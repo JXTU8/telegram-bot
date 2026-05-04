@@ -1,59 +1,66 @@
 """
 countdown_manager.py
 ────────────────────
-Supports multiple named countdowns per group/chat.
-Each countdown has its own name, target date, and reminder time.
-Data is persisted to a JSON file so it survives restarts.
+Countdown store backed by Upstash Redis.
+Data persists across restarts and redeployments.
 
-Structure:
-{
-  "chat_id": {
-    "countdown_name": {
-      "target_date": "YYYY-MM-DD",
+Redis key structure:
+  countdowns:<chat_id>  →  JSON dict of all countdowns for that chat
+  {
+    "Exam": {
+      "target_date": "2025-12-31",
       "reminder_hour": 8,
-      "reminder_minute": 0,
-      "created_by": user_id
+      "reminder_minute": 30,
+      "created_by": 123456789
     },
     ...
-  },
-  ...
-}
+  }
 """
 
 import json
 import logging
+import os
 from datetime import date
-from pathlib import Path
 from typing import Optional
+
+from upstash_redis import Redis
 
 logger = logging.getLogger(__name__)
 
-DATA_FILE = Path("data/countdowns.json")
+# ─────────────────────────────────────────────
+# Redis client
+# ─────────────────────────────────────────────
+redis = Redis(
+    url=os.environ["UPSTASH_REDIS_REST_URL"],
+    token=os.environ["UPSTASH_REDIS_REST_TOKEN"],
+)
 
 
 # ─────────────────────────────────────────────
 # Internal helpers
 # ─────────────────────────────────────────────
-def _load() -> dict:
-    if not DATA_FILE.exists():
-        return {}
+def _rkey(chat_id: int) -> str:
+    return f"countdowns:{chat_id}"
+
+
+def _load_chat(chat_id: int) -> dict:
     try:
-        return json.loads(DATA_FILE.read_text())
+        data = redis.get(_rkey(chat_id))
+        if data is None:
+            return {}
+        if isinstance(data, dict):
+            return data
+        return json.loads(data)
     except Exception as e:
-        logger.error("Failed to load countdowns: %s", e)
+        logger.error("Redis read error for chat %s: %s", chat_id, e)
         return {}
 
 
-def _save(data: dict) -> None:
+def _save_chat(chat_id: int, data: dict) -> None:
     try:
-        DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
-        DATA_FILE.write_text(json.dumps(data, indent=2))
+        redis.set(_rkey(chat_id), json.dumps(data))
     except Exception as e:
-        logger.error("Failed to save countdowns: %s", e)
-
-
-def _ckey(chat_id: int) -> str:
-    return str(chat_id)
+        logger.error("Redis write error for chat %s: %s", chat_id, e)
 
 
 # ─────────────────────────────────────────────
@@ -68,43 +75,60 @@ def add_countdown(
     created_by: int,
 ) -> None:
     """Add or overwrite a named countdown for a chat."""
-    data = _load()
-    chat = data.setdefault(_ckey(chat_id), {})
-    chat[name] = {
+    data = _load_chat(chat_id)
+    data[name] = {
         "target_date": target_date.isoformat(),
         "reminder_hour": hour,
         "reminder_minute": minute,
         "created_by": created_by,
     }
-    _save(data)
+    _save_chat(chat_id, data)
 
 
 def get_countdown(chat_id: int, name: str) -> Optional[dict]:
-    """Return a single countdown entry dict or None."""
-    return _load().get(_ckey(chat_id), {}).get(name)
+    """Return a single countdown entry or None."""
+    return _load_chat(chat_id).get(name)
 
 
-def get_all_countdowns(chat_id: int) -> dict[str, dict]:
+def get_all_countdowns(chat_id: int) -> dict:
     """Return all countdowns for a chat."""
-    return _load().get(_ckey(chat_id), {})
+    return _load_chat(chat_id)
 
 
 def remove_countdown(chat_id: int, name: str) -> bool:
     """Remove a named countdown. Returns True if it existed."""
-    data = _load()
-    chat = data.get(_ckey(chat_id), {})
-    if name in chat:
-        del chat[name]
-        data[_ckey(chat_id)] = chat
-        _save(data)
+    data = _load_chat(chat_id)
+    if name in data:
+        del data[name]
+        _save_chat(chat_id, data)
         return True
     return False
 
 
 def countdown_exists(chat_id: int, name: str) -> bool:
-    return name in _load().get(_ckey(chat_id), {})
+    return name in _load_chat(chat_id)
 
 
 def get_all_chats() -> dict:
-    """Return entire data store (used to restore jobs on startup)."""
-    return _load()
+    """
+    Return all countdowns across all chats.
+    Used to restore reminder jobs on startup.
+    """
+    try:
+        keys = redis.keys("countdowns:*")
+        if not keys:
+            return {}
+
+        result = {}
+        for key in keys:
+            chat_id = int(key.split(":")[1])
+            data = redis.get(key)
+            if data:
+                if isinstance(data, dict):
+                    result[chat_id] = data
+                else:
+                    result[chat_id] = json.loads(data)
+        return result
+    except Exception as e:
+        logger.error("Redis get_all_chats error: %s", e)
+        return {}
