@@ -1,15 +1,28 @@
 from datetime import datetime
-from config import TIMEZONE
 
-active_countdowns = {}
+data = {}
 
-def add_countdown(chat_id, target_date):
-    active_countdowns[chat_id] = target_date
+# =====================
+# COUNTDOWN FUNCTIONS
+# =====================
+def set_countdown(chat_id, name, date):
+    if chat_id not in data:
+        data[chat_id] = {"countdowns": {}, "reminders": {}}
+    data[chat_id]["countdowns"][name] = date
 
 
-def get_countdown(chat_id):
-    return active_countdowns.get(chat_id, None)
+def list_countdowns(chat_id):
+    return data.get(chat_id, {}).get("countdowns", {})
 
 
-def list_all():
-    return active_countdowns
+# =====================
+# REMINDER FUNCTIONS
+# =====================
+def set_reminder(chat_id, name, time_str):
+    if chat_id not in data:
+        data[chat_id] = {"countdowns": {}, "reminders": {}}
+    data[chat_id]["reminders"][name] = time_str
+
+
+def list_reminders():
+    return data

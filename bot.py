@@ -1,106 +1,134 @@
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-from datetime import datetime, time
-import pytz
+from datetime import datetime
 
 from config import TOKEN, TIMEZONE
-from countdown_manager import add_countdown, get_countdown, list_all
+from countdown_manager import (
+    set_countdown,
+    list_countdowns,
+    set_reminder,
+    list_reminders
+)
 
 # =========================
 # HELP COMMAND
 # =========================
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = """
-📌 Available Commands:
-
-/setdate YYYY-MM-DD
-→ Set a countdown until that date (Malaysia time)
-
-/listcountdown
-→ Show all active countdowns
-
-/help
-→ Show this help menu
-"""
-    await update.message.reply_text(message)
+    await update.message.reply_text(
+        "📌 Commands:\n\n"
+        "/setdate <name> <YYYY-MM-DD>\n"
+        "→ Set countdown\n\n"
+        "/listcountdown\n"
+        "→ Show all countdowns\n\n"
+        "/setreminder <name> <HH:MM>\n"
+        "→ Set daily reminder (GMT+8)\n\n"
+        "/help\n"
+        "→ Show this help"
+    )
 
 
 # =========================
 # SET COUNTDOWN
 # =========================
-async def set_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def setdate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        date_str = context.args[0]
-        target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+        name = context.args[0]
+        date_str = context.args[1]
 
+        date = datetime.strptime(date_str, "%Y-%m-%d").date()
         chat_id = update.effective_chat.id
-        add_countdown(chat_id, target_date)
+
+        set_countdown(chat_id, name, date)
 
         await update.message.reply_text(
-            f"✅ Countdown set to {target_date} (MYT GMT+8)"
+            f"✅ Countdown '{name}' set to {date} (GMT+8)"
         )
 
     except:
         await update.message.reply_text(
-            "Usage: /setdate YYYY-MM-DD"
+            "Usage: /setdate <name> <YYYY-MM-DD>"
         )
 
 
 # =========================
-# LIST COUNTDOWNS
+# LIST COUNTDOWN
 # =========================
-async def list_countdown(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    data = list_all()
+async def listcountdown(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    data = list_countdowns(chat_id)
 
     if not data:
         await update.message.reply_text("📭 No active countdowns.")
         return
 
-    msg = "📋 Active Countdowns:\n\n"
-
     today = datetime.now(TIMEZONE).date()
 
-    for chat_id, target_date in data.items():
-        days_left = (target_date - today).days
-        msg += f"Chat {chat_id}: {target_date} ({days_left} days left)\n"
+    msg = "📋 Your Countdown(s):\n\n"
+
+    for name, date in data.items():
+        days_left = (date - today).days
+        msg += f"🔹 {name}: {date} ({days_left} days left)\n"
 
     await update.message.reply_text(msg)
 
 
 # =========================
-# DAILY REMINDER (12:00 MYT)
+# SET REMINDER (NAMED)
 # =========================
-async def daily_reminder(context: ContextTypes.DEFAULT_TYPE):
-    job = context.job
-    chat_id = job.chat_id
+async def setreminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        name = context.args[0]
+        time_str = context.args[1]
 
-    target_date = get_countdown(chat_id)
+        hour, minute = map(int, time_str.split(":"))
+        if hour > 23 or minute > 59:
+            raise ValueError
 
-    if not target_date:
-        return
+        chat_id = update.effective_chat.id
+        set_reminder(chat_id, name, time_str)
 
-    today = datetime.now(TIMEZONE).date()
+        await update.message.reply_text(
+            f"🔔 Reminder '{name}' set at {time_str} (GMT+8)"
+        )
 
-    if today > target_date:
-        await context.bot.send_message(chat_id, "✅ Countdown finished!")
-        return
-
-    days_left = (target_date - today).days
-
-    await context.bot.send_message(
-        chat_id,
-        f"📅 {days_left} days left until {target_date}"
-    )
+    except:
+        await update.message.reply_text(
+            "Usage: /setreminder <name> <HH:MM>\nExample: /setreminder exam 12:00"
+        )
 
 
 # =========================
-# MAIN SETUP
+# DAILY REMINDER CHECKER
+# =========================
+async def reminder_checker(context: ContextTypes.DEFAULT_TYPE):
+    now = datetime.now(TIMEZONE).strftime("%H:%M")
+
+    data = list_reminders()
+
+    for chat_id, user_data in data.items():
+        reminders = user_data.get("reminders", {})
+
+        for name, time_str in reminders.items():
+            if now == time_str:
+                await context.bot.send_message(
+                    chat_id,
+                    f"🔔 Reminder: '{name}' (GMT+8) - {time_str}"
+                )
+
+
+# =========================
+# MAIN BOT SETUP
 # =========================
 app = ApplicationBuilder().token(TOKEN).build()
 
+# commands
 app.add_handler(CommandHandler("help", help_command))
-app.add_handler(CommandHandler("setdate", set_date))
-app.add_handler(CommandHandler("listcountdown", list_countdown))
+app.add_handler(CommandHandler("setdate", setdate))
+app.add_handler(CommandHandler("listcountdown", listcountdown))
+app.add_handler(CommandHandler("setreminder", setreminder))
 
-print("Bot running...")
+# background job (runs every minute)
+app.job_queue.run_repeating(reminder_checker, interval=60, first=0)
+
+print("🤖 Bot is running...")
 app.run_polling()
