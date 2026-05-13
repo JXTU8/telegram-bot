@@ -5,6 +5,10 @@ Group countdown bot — MYT (GMT+8).
 
 Flow to add a countdown:
   /addcountdown → asks name → asks date → asks time → done!
+  (30 second timeout at each step — auto cancels if no response)
+
+Flow to make a decision:
+  /choose → asks decision → asks options → dramatic reveal!
 
 Commands
 ────────
@@ -13,10 +17,13 @@ Commands
 /addcountdown    → Add a new named countdown (multi-step)
 /listcountdown   → Show all active countdowns in this group
 /removecountdown → Remove a countdown by name
-/cancel          → Cancel the current /addcountdown flow
+/choose          → Let the bot decide for you
+/cancel          → Cancel the current flow
 """
 
 import logging
+import random
+import asyncio
 from datetime import date, datetime
 
 from telegram import Update
@@ -53,6 +60,36 @@ logger = logging.getLogger(__name__)
 # Conversation states
 # ─────────────────────────────────────────────
 ASK_NAME, ASK_DATE, ASK_TIME = range(3)
+ASK_DECISION, ASK_OPTIONS    = range(3, 5)
+
+# Timeout in seconds
+CONV_TIMEOUT = 30
+
+# Dramatic reveal messages
+THINKING_MESSAGES = [
+    "🎲 Rolling the dice...",
+    "🔮 Consulting the crystal ball...",
+    "🌀 Spinning the wheel...",
+    "🤔 Thinking really hard...",
+    "⚡ Calculating your fate...",
+    "🎯 Taking aim...",
+    "🃏 Drawing a card...",
+    "🌟 Reading the stars...",
+]
+
+# Fun verdict lines
+VERDICT_LINES = [
+    "The universe has spoken.",
+    "No take backs!",
+    "Trust the process.",
+    "Destiny has decided.",
+    "It is what it is.",
+    "The stars don't lie.",
+    "You asked, I answered.",
+    "Don't blame me, blame fate.",
+    "Final answer. No debates.",
+    "Science has confirmed it.",
+]
 
 
 # ─────────────────────────────────────────────
@@ -75,10 +112,8 @@ def _job_name(chat_id: int, name: str) -> str:
 
 
 def _schedule_reminder(app, chat_id: int, name: str, hour: int, minute: int) -> None:
-    """Schedule a daily reminder job for a specific countdown."""
     jname = _job_name(chat_id, name)
 
-    # Remove existing job for this countdown if any
     for job in app.job_queue.get_jobs_by_name(jname):
         job.schedule_removal()
 
@@ -100,16 +135,30 @@ def _schedule_reminder(app, chat_id: int, name: str, hour: int, minute: int) -> 
 
 
 # ─────────────────────────────────────────────
+# Timeout handler
+# ─────────────────────────────────────────────
+async def conversation_timeout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data.clear()
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text="⏰ *Timed out!* You took too long to respond.\nStart again with /addcountdown or /choose.",
+        parse_mode="Markdown",
+    )
+    return ConversationHandler.END
+
+
+# ─────────────────────────────────────────────
 # /start
 # ─────────────────────────────────────────────
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "👋 *Welcome to Countdown Bot!*\n\n"
-        "I track multiple countdowns for your group and remind everyone daily.\n\n"
-        "Get started:\n"
+        "I track multiple countdowns for your group and remind everyone daily.\n"
+        "I can also make decisions for you when you're stuck!\n\n"
         "➕ `/addcountdown` — add a new countdown\n"
         "📋 `/listcountdown` — see all active countdowns\n"
-        "🗑️ `/removecountdown` — remove a countdown\n\n"
+        "🗑️ `/removecountdown` — remove a countdown\n"
+        "🎲 `/choose` — let me decide for you\n\n"
         "Type /help for all commands.",
         parse_mode="Markdown",
     )
@@ -122,13 +171,15 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_text(
         "📌 *Available Commands*\n\n"
         "`/addcountdown`\n"
-        "→ Add a new countdown (bot will guide you step by step)\n\n"
+        "→ Add a new countdown (bot guides you step by step)\n\n"
         "`/listcountdown`\n"
         "→ Show all active countdowns in this group\n\n"
         "`/removecountdown <name>`\n"
         "→ Remove a countdown by name\n\n"
+        "`/choose`\n"
+        "→ Can't decide? Let the bot pick for you!\n\n"
         "`/cancel`\n"
-        "→ Cancel adding a countdown\n\n"
+        "→ Cancel the current flow\n\n"
         "`/help`\n"
         "→ Show this menu",
         parse_mode="Markdown",
@@ -143,6 +194,7 @@ async def add_countdown_start(update: Update, context: ContextTypes.DEFAULT_TYPE
         "➕ *New Countdown*\n\n"
         "Step 1/3 — What do you want to call this countdown?\n"
         "_(e.g. Final Exam, Holiday, Birthday)_\n\n"
+        f"⏰ You have *{CONV_TIMEOUT} seconds* to reply.\n"
         "Type /cancel to stop.",
         parse_mode="Markdown",
     )
@@ -154,24 +206,27 @@ async def received_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     name = update.message.text.strip()
 
     if not name:
-        await update.message.reply_text("⚠️ Name can't be empty. Try again:")
+        await update.message.reply_text(
+            f"⚠️ Name can't be empty. Try again:\n⏰ You have *{CONV_TIMEOUT} seconds* to reply.",
+            parse_mode="Markdown",
+        )
         return ASK_NAME
 
     chat_id = update.effective_chat.id
     if countdown_exists(chat_id, name):
         await update.message.reply_text(
             f"⚠️ A countdown named *{name}* already exists.\n"
-            "Please use a different name or remove the existing one first.",
+            f"Please use a different name.\n⏰ You have *{CONV_TIMEOUT} seconds* to reply.",
             parse_mode="Markdown",
         )
         return ASK_NAME
 
     context.user_data["new_countdown_name"] = name
-
     await update.message.reply_text(
         f"✅ Name set to *{name}*\n\n"
         "Step 2/3 — What is the target date?\n"
-        "Format: `YYYY-MM-DD` _(e.g. 2025-12-31)_",
+        "Format: `YYYY-MM-DD` _(e.g. 2025-12-31)_\n\n"
+        f"⏰ You have *{CONV_TIMEOUT} seconds* to reply.",
         parse_mode="Markdown",
     )
     return ASK_DATE
@@ -185,24 +240,26 @@ async def received_date(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
     except ValueError:
         await update.message.reply_text(
-            "❌ Invalid format. Use `YYYY-MM-DD` _(e.g. 2025-12-31)_\nTry again:",
+            "❌ Invalid format. Use `YYYY-MM-DD` _(e.g. 2025-12-31)_\n"
+            f"⏰ You have *{CONV_TIMEOUT} seconds* to reply.",
             parse_mode="Markdown",
         )
         return ASK_DATE
 
     if target_date < _today():
         await update.message.reply_text(
-            f"⚠️ `{target_date}` is in the past. Please choose a future date:",
+            f"⚠️ `{target_date}` is in the past. Please choose a future date.\n"
+            f"⏰ You have *{CONV_TIMEOUT} seconds* to reply.",
             parse_mode="Markdown",
         )
         return ASK_DATE
 
     context.user_data["new_countdown_date"] = target_date
-
     await update.message.reply_text(
         f"✅ Date set to *{target_date}*\n\n"
         "Step 3/3 — What time should the group be reminded daily?\n"
-        "Format: `HH:MM` in 24hr MYT _(e.g. 08:30 or 20:00)_",
+        "Format: `HH:MM` in 24hr MYT _(e.g. 08:30 or 20:00)_\n\n"
+        f"⏰ You have *{CONV_TIMEOUT} seconds* to reply.",
         parse_mode="Markdown",
     )
     return ASK_TIME
@@ -217,13 +274,14 @@ async def received_time(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         hour, minute = parsed.hour, parsed.minute
     except ValueError:
         await update.message.reply_text(
-            "❌ Invalid format. Use `HH:MM` _(e.g. 08:30)_\nTry again:",
+            "❌ Invalid format. Use `HH:MM` _(e.g. 08:30)_\n"
+            f"⏰ You have *{CONV_TIMEOUT} seconds* to reply.",
             parse_mode="Markdown",
         )
         return ASK_TIME
 
-    chat_id   = update.effective_chat.id
-    name      = context.user_data["new_countdown_name"]
+    chat_id     = update.effective_chat.id
+    name        = context.user_data["new_countdown_name"]
     target_date = context.user_data["new_countdown_date"]
     created_by  = update.effective_user.id
 
@@ -247,10 +305,88 @@ async def received_time(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     return ConversationHandler.END
 
 
+# ─────────────────────────────────────────────
+# /choose — Step 1: ask for decision
+# ─────────────────────────────────────────────
+async def choose_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await update.message.reply_text(
+        "🎲 *Decision Maker*\n\n"
+        "What's the issue? Tell me what you need to decide.\n"
+        "_(e.g. Should I skip class? What should I eat?)_\n\n"
+        f"⏰ You have *{CONV_TIMEOUT} seconds* to reply.\n"
+        "Type /cancel to stop.",
+        parse_mode="Markdown",
+    )
+    return ASK_DECISION
+
+
+# Step 2: receive decision, ask for options
+async def received_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    decision = update.message.text.strip()
+
+    if not decision:
+        await update.message.reply_text(
+            f"⚠️ Can't be empty. What's the issue?\n⏰ You have *{CONV_TIMEOUT} seconds* to reply.",
+            parse_mode="Markdown",
+        )
+        return ASK_DECISION
+
+    context.user_data["decision"] = decision
+    await update.message.reply_text(
+        f"Got it — *\"{decision}\"*\n\n"
+        "Now give me the options, separated by commas.\n"
+        "_(e.g. Yes, No, Maybe  or  Pizza, Burger, Sushi)_\n\n"
+        f"⏰ You have *{CONV_TIMEOUT} seconds* to reply.",
+        parse_mode="Markdown",
+    )
+    return ASK_OPTIONS
+
+
+# Final step: receive options, pick one dramatically
+async def received_options(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    raw     = update.message.text.strip()
+    options = [o.strip() for o in raw.split(",") if o.strip()]
+
+    if len(options) < 2:
+        await update.message.reply_text(
+            "⚠️ Please give at least *2 options* separated by commas.\n"
+            "_(e.g. Yes, No, Maybe)_\n\n"
+            f"⏰ You have *{CONV_TIMEOUT} seconds* to reply.",
+            parse_mode="Markdown",
+        )
+        return ASK_OPTIONS
+
+    decision = context.user_data["decision"]
+    chosen   = random.choice(options)
+    verdict  = random.choice(VERDICT_LINES)
+    thinking = random.choice(THINKING_MESSAGES)
+
+    # Send dramatic thinking message first
+    thinking_msg = await update.message.reply_text(thinking)
+
+    # Fake suspense delay
+    await asyncio.sleep(2)
+
+    # Edit the message to reveal the answer
+    await thinking_msg.edit_text(
+        f"🎯 *Decision:* _{decision}_\n"
+        f"📋 *Options:* {', '.join(options)}\n\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"✅ *The answer is... {chosen}!*\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"_{verdict}_",
+        parse_mode="Markdown",
+    )
+
+    context.user_data.clear()
+    logger.info("Chat %s chose '%s' from %s", update.effective_chat.id, chosen, options)
+    return ConversationHandler.END
+
+
 # Cancel
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data.clear()
-    await update.message.reply_text("❌ Cancelled. No countdown was added.")
+    await update.message.reply_text("❌ Cancelled.")
     return ConversationHandler.END
 
 
@@ -258,7 +394,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 # /listcountdown
 # ─────────────────────────────────────────────
 async def list_countdown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = update.effective_chat.id
+    chat_id    = update.effective_chat.id
     countdowns = get_all_countdowns(chat_id)
 
     if not countdowns:
@@ -271,10 +407,10 @@ async def list_countdown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     today = _today()
     lines = ["📋 *Active Countdowns:*\n"]
     for name, entry in countdowns.items():
-        td = date.fromisoformat(entry["target_date"])
+        td        = date.fromisoformat(entry["target_date"])
         days_left = (td - today).days
-        h = entry["reminder_hour"]
-        m = entry["reminder_minute"]
+        h         = entry["reminder_hour"]
+        m         = entry["reminder_minute"]
         lines.append(
             f"• *{name}*\n"
             f"  📆 {td}  |  {_days_label(days_left)}\n"
@@ -302,7 +438,6 @@ async def remove_countdown_cmd(update: Update, context: ContextTypes.DEFAULT_TYP
     removed = remove_countdown(chat_id, name)
 
     if removed:
-        # Cancel its reminder job
         jname = _job_name(chat_id, name)
         for job in context.job_queue.get_jobs_by_name(jname):
             job.schedule_removal()
@@ -325,7 +460,7 @@ async def daily_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
     name    = job.data["countdown_name"]
 
     countdowns = get_all_countdowns(chat_id)
-    entry = countdowns.get(name)
+    entry      = countdowns.get(name)
 
     if not entry:
         job.schedule_removal()
@@ -357,19 +492,18 @@ async def daily_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 # ─────────────────────────────────────────────
-# Restore jobs on startup (in case bot restarted)
+# Restore jobs on startup
 # ─────────────────────────────────────────────
 async def restore_jobs(app) -> None:
     all_data = get_all_chats()
-    count = 0
-    for chat_id_str, countdowns in all_data.items():
-        chat_id = int(chat_id_str)
+    count    = 0
+    for chat_id, countdowns in all_data.items():
         for name, entry in countdowns.items():
             h = entry.get("reminder_hour", 12)
             m = entry.get("reminder_minute", 0)
             _schedule_reminder(app, chat_id, name, h, m)
             count += 1
-    logger.info("Restored %s reminder job(s) from disk.", count)
+    logger.info("Restored %s reminder job(s) from Redis.", count)
 
 
 # ─────────────────────────────────────────────
@@ -380,20 +514,39 @@ def main() -> None:
 
     app = ApplicationBuilder().token(TOKEN).post_init(restore_jobs).build()
 
-    # Conversation handler for /addcountdown
-    conv_handler = ConversationHandler(
+    # Countdown conversation handler
+    countdown_conv = ConversationHandler(
         entry_points=[CommandHandler("addcountdown", add_countdown_start)],
         states={
             ASK_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_name)],
             ASK_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_date)],
             ASK_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_time)],
+            ConversationHandler.TIMEOUT: [
+                MessageHandler(filters.ALL, conversation_timeout)
+            ],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
+        conversation_timeout=CONV_TIMEOUT,
+    )
+
+    # Choose conversation handler
+    choose_conv = ConversationHandler(
+        entry_points=[CommandHandler("choose", choose_start)],
+        states={
+            ASK_DECISION: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_decision)],
+            ASK_OPTIONS:  [MessageHandler(filters.TEXT & ~filters.COMMAND, received_options)],
+            ConversationHandler.TIMEOUT: [
+                MessageHandler(filters.ALL, conversation_timeout)
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+        conversation_timeout=CONV_TIMEOUT,
     )
 
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(conv_handler)
+    app.add_handler(countdown_conv)
+    app.add_handler(choose_conv)
     app.add_handler(CommandHandler("listcountdown", list_countdown))
     app.add_handler(CommandHandler("removecountdown", remove_countdown_cmd))
 
