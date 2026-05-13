@@ -10,6 +10,9 @@ Flow to add a countdown:
 Flow to make a decision:
   /choose → asks decision → asks options → dramatic reveal!
 
+Ask AI anything:
+  /ask <question> → Gemini AI replies
+
 Commands
 ────────
 /start           → Welcome message
@@ -18,6 +21,7 @@ Commands
 /listcountdown   → Show all active countdowns in this group
 /removecountdown → Remove a countdown by name
 /choose          → Let the bot decide for you
+/ask             → Ask Gemini AI anything
 /cancel          → Cancel the current flow
 """
 
@@ -27,6 +31,7 @@ import random
 import asyncio
 from datetime import date, datetime
 
+import google.generativeai as genai
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -58,25 +63,16 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────
-# Banned users — set BANNED_USERS in Render env
-# e.g. BANNED_USERS=123456789,987654321
+# Gemini AI setup
 # ─────────────────────────────────────────────
-def _load_banned_users() -> set[int]:
-    raw = os.getenv("BANNED_USERS", "")
-    if not raw:
-        return set()
-    try:
-        return {int(uid.strip()) for uid in raw.split(",") if uid.strip()}
-    except ValueError:
-        logger.warning("Invalid BANNED_USERS format. Expected comma-separated integers.")
-        return set()
-
-BANNED_USERS = _load_banned_users()
-
-
-def is_banned(user_id: int) -> bool:
-    return user_id in BANNED_USERS
-
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+    gemini_model = genai.GenerativeModel("gemini-1.5-flash")
+    logger.info("Gemini AI ready.")
+else:
+    gemini_model = None
+    logger.warning("GEMINI_API_KEY not set — /ask command will be disabled.")
 
 # ─────────────────────────────────────────────
 # Conversation states
@@ -84,10 +80,8 @@ def is_banned(user_id: int) -> bool:
 ASK_NAME, ASK_DATE, ASK_TIME = range(3)
 ASK_DECISION, ASK_OPTIONS    = range(3, 5)
 
-# Timeout in seconds
 CONV_TIMEOUT = 30
 
-# Dramatic reveal messages
 THINKING_MESSAGES = [
     "🎲 Rolling the dice...",
     "🔮 Consulting the crystal ball...",
@@ -172,17 +166,15 @@ async def conversation_timeout(update: Update, context: ContextTypes.DEFAULT_TYP
 # /start
 # ─────────────────────────────────────────────
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if is_banned(update.effective_user.id):
-        return
-
     await update.message.reply_text(
         "👋 *Welcome to Countdown Bot!*\n\n"
         "I track multiple countdowns for your group and remind everyone daily.\n"
-        "I can also make decisions for you when you're stuck!\n\n"
+        "I can also make decisions and answer questions!\n\n"
         "➕ `/addcountdown` — add a new countdown\n"
         "📋 `/listcountdown` — see all active countdowns\n"
         "🗑️ `/removecountdown` — remove a countdown\n"
-        "🎲 `/choose` — let me decide for you\n\n"
+        "🎲 `/choose` — let me decide for you\n"
+        "🤖 `/ask` — ask me anything\n\n"
         "Type /help for all commands.",
         parse_mode="Markdown",
     )
@@ -192,9 +184,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 # /help
 # ─────────────────────────────────────────────
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if is_banned(update.effective_user.id):
-        return
-
     await update.message.reply_text(
         "📌 *Available Commands*\n\n"
         "`/addcountdown`\n"
@@ -205,6 +194,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "→ Remove a countdown by name\n\n"
         "`/choose`\n"
         "→ Can't decide? Let the bot pick for you!\n\n"
+        "`/ask <question>`\n"
+        "→ Ask Gemini AI anything\n\n"
         "`/cancel`\n"
         "→ Cancel the current flow\n\n"
         "`/help`\n"
@@ -214,12 +205,52 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 # ─────────────────────────────────────────────
+# /ask <question> — Gemini AI
+# ─────────────────────────────────────────────
+async def ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not gemini_model:
+        await update.message.reply_text(
+            "⚠️ AI is not configured. Ask the admin to set up the `GEMINI_API_KEY`."
+        )
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: `/ask <your question>`\n"
+            "_(e.g. `/ask what is the speed of light?`)_",
+            parse_mode="Markdown",
+        )
+        return
+
+    question = " ".join(context.args)
+    thinking_msg = await update.message.reply_text("🤖 Thinking...")
+
+    try:
+        response = await asyncio.to_thread(
+            gemini_model.generate_content,
+            question,
+        )
+        answer = response.text.strip()
+
+        # Trim if too long for Telegram
+        if len(answer) > 4000:
+            answer = answer[:4000] + "...\n\n_(Response trimmed)_"
+
+        await thinking_msg.edit_text(
+            f"🤖 *Q: {question}*\n\n{answer}",
+            parse_mode="Markdown",
+        )
+    except Exception as e:
+        logger.error("Gemini error: %s", e)
+        await thinking_msg.edit_text(
+            "❌ Something went wrong with the AI. Please try again later."
+        )
+
+
+# ─────────────────────────────────────────────
 # /addcountdown — Step 1: ask for name
 # ─────────────────────────────────────────────
 async def add_countdown_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    if is_banned(update.effective_user.id):
-        return ConversationHandler.END
-
     await update.message.reply_text(
         "➕ *New Countdown*\n\n"
         "Step 1/3 — What do you want to call this countdown?\n"
@@ -231,11 +262,7 @@ async def add_countdown_start(update: Update, context: ContextTypes.DEFAULT_TYPE
     return ASK_NAME
 
 
-# Step 2: receive name, ask for date
 async def received_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    if is_banned(update.effective_user.id):
-        return ConversationHandler.END
-
     name = update.message.text.strip()
 
     if not name:
@@ -265,11 +292,7 @@ async def received_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     return ASK_DATE
 
 
-# Step 3: receive date, ask for time
 async def received_date(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    if is_banned(update.effective_user.id):
-        return ConversationHandler.END
-
     date_str = update.message.text.strip()
 
     try:
@@ -301,11 +324,7 @@ async def received_date(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     return ASK_TIME
 
 
-# Final step: receive time, save everything
 async def received_time(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    if is_banned(update.effective_user.id):
-        return ConversationHandler.END
-
     time_str = update.message.text.strip()
 
     try:
@@ -345,12 +364,9 @@ async def received_time(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 
 
 # ─────────────────────────────────────────────
-# /choose — Step 1: ask for decision
+# /choose
 # ─────────────────────────────────────────────
 async def choose_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    if is_banned(update.effective_user.id):
-        return ConversationHandler.END
-
     await update.message.reply_text(
         "🎲 *Decision Maker*\n\n"
         "What's the issue? Tell me what you need to decide.\n"
@@ -362,11 +378,7 @@ async def choose_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     return ASK_DECISION
 
 
-# Step 2: receive decision, ask for options
 async def received_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    if is_banned(update.effective_user.id):
-        return ConversationHandler.END
-
     decision = update.message.text.strip()
 
     if not decision:
@@ -387,11 +399,7 @@ async def received_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     return ASK_OPTIONS
 
 
-# Final step: receive options, pick one dramatically
 async def received_options(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    if is_banned(update.effective_user.id):
-        return ConversationHandler.END
-
     raw     = update.message.text.strip()
     options = [o.strip() for o in raw.split(",") if o.strip()]
 
@@ -427,7 +435,6 @@ async def received_options(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     return ConversationHandler.END
 
 
-# Cancel
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data.clear()
     await update.message.reply_text("❌ Cancelled.")
@@ -438,9 +445,6 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 # /listcountdown
 # ─────────────────────────────────────────────
 async def list_countdown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if is_banned(update.effective_user.id):
-        return
-
     chat_id    = update.effective_chat.id
     countdowns = get_all_countdowns(chat_id)
 
@@ -471,9 +475,6 @@ async def list_countdown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 # /removecountdown <name>
 # ─────────────────────────────────────────────
 async def remove_countdown_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if is_banned(update.effective_user.id):
-        return
-
     if not context.args:
         await update.message.reply_text(
             "⚠️ Please provide the countdown name.\n"
@@ -593,6 +594,7 @@ def main() -> None:
 
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("ask", ask_command))
     app.add_handler(countdown_conv)
     app.add_handler(choose_conv)
     app.add_handler(CommandHandler("listcountdown", list_countdown))
