@@ -22,6 +22,7 @@ Commands
 """
 
 import logging
+import os
 import random
 import asyncio
 from datetime import date, datetime
@@ -57,6 +58,27 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────
+# Banned users — set BANNED_USERS in Render env
+# e.g. BANNED_USERS=123456789,987654321
+# ─────────────────────────────────────────────
+def _load_banned_users() -> set[int]:
+    raw = os.getenv("BANNED_USERS", "")
+    if not raw:
+        return set()
+    try:
+        return {int(uid.strip()) for uid in raw.split(",") if uid.strip()}
+    except ValueError:
+        logger.warning("Invalid BANNED_USERS format. Expected comma-separated integers.")
+        return set()
+
+BANNED_USERS = _load_banned_users()
+
+
+def is_banned(user_id: int) -> bool:
+    return user_id in BANNED_USERS
+
+
+# ─────────────────────────────────────────────
 # Conversation states
 # ─────────────────────────────────────────────
 ASK_NAME, ASK_DATE, ASK_TIME = range(3)
@@ -77,7 +99,6 @@ THINKING_MESSAGES = [
     "🌟 Reading the stars...",
 ]
 
-# Fun verdict lines
 VERDICT_LINES = [
     "The universe has spoken.",
     "No take backs!",
@@ -151,6 +172,9 @@ async def conversation_timeout(update: Update, context: ContextTypes.DEFAULT_TYP
 # /start
 # ─────────────────────────────────────────────
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if is_banned(update.effective_user.id):
+        return
+
     await update.message.reply_text(
         "👋 *Welcome to Countdown Bot!*\n\n"
         "I track multiple countdowns for your group and remind everyone daily.\n"
@@ -168,6 +192,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 # /help
 # ─────────────────────────────────────────────
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if is_banned(update.effective_user.id):
+        return
+
     await update.message.reply_text(
         "📌 *Available Commands*\n\n"
         "`/addcountdown`\n"
@@ -190,6 +217,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 # /addcountdown — Step 1: ask for name
 # ─────────────────────────────────────────────
 async def add_countdown_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if is_banned(update.effective_user.id):
+        return ConversationHandler.END
+
     await update.message.reply_text(
         "➕ *New Countdown*\n\n"
         "Step 1/3 — What do you want to call this countdown?\n"
@@ -203,6 +233,9 @@ async def add_countdown_start(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 # Step 2: receive name, ask for date
 async def received_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if is_banned(update.effective_user.id):
+        return ConversationHandler.END
+
     name = update.message.text.strip()
 
     if not name:
@@ -234,6 +267,9 @@ async def received_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 
 # Step 3: receive date, ask for time
 async def received_date(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if is_banned(update.effective_user.id):
+        return ConversationHandler.END
+
     date_str = update.message.text.strip()
 
     try:
@@ -267,6 +303,9 @@ async def received_date(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 
 # Final step: receive time, save everything
 async def received_time(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if is_banned(update.effective_user.id):
+        return ConversationHandler.END
+
     time_str = update.message.text.strip()
 
     try:
@@ -309,6 +348,9 @@ async def received_time(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 # /choose — Step 1: ask for decision
 # ─────────────────────────────────────────────
 async def choose_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if is_banned(update.effective_user.id):
+        return ConversationHandler.END
+
     await update.message.reply_text(
         "🎲 *Decision Maker*\n\n"
         "What's the issue? Tell me what you need to decide.\n"
@@ -322,6 +364,9 @@ async def choose_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 
 # Step 2: receive decision, ask for options
 async def received_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if is_banned(update.effective_user.id):
+        return ConversationHandler.END
+
     decision = update.message.text.strip()
 
     if not decision:
@@ -344,6 +389,9 @@ async def received_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 # Final step: receive options, pick one dramatically
 async def received_options(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if is_banned(update.effective_user.id):
+        return ConversationHandler.END
+
     raw     = update.message.text.strip()
     options = [o.strip() for o in raw.split(",") if o.strip()]
 
@@ -361,13 +409,9 @@ async def received_options(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     verdict  = random.choice(VERDICT_LINES)
     thinking = random.choice(THINKING_MESSAGES)
 
-    # Send dramatic thinking message first
     thinking_msg = await update.message.reply_text(thinking)
-
-    # Fake suspense delay
     await asyncio.sleep(2)
 
-    # Edit the message to reveal the answer
     await thinking_msg.edit_text(
         f"🎯 *Decision:* _{decision}_\n"
         f"📋 *Options:* {', '.join(options)}\n\n"
@@ -394,6 +438,9 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 # /listcountdown
 # ─────────────────────────────────────────────
 async def list_countdown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if is_banned(update.effective_user.id):
+        return
+
     chat_id    = update.effective_chat.id
     countdowns = get_all_countdowns(chat_id)
 
@@ -424,6 +471,9 @@ async def list_countdown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 # /removecountdown <name>
 # ─────────────────────────────────────────────
 async def remove_countdown_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if is_banned(update.effective_user.id):
+        return
+
     if not context.args:
         await update.message.reply_text(
             "⚠️ Please provide the countdown name.\n"
@@ -514,7 +564,6 @@ def main() -> None:
 
     app = ApplicationBuilder().token(TOKEN).post_init(restore_jobs).build()
 
-    # Countdown conversation handler
     countdown_conv = ConversationHandler(
         entry_points=[CommandHandler("addcountdown", add_countdown_start)],
         states={
@@ -529,7 +578,6 @@ def main() -> None:
         conversation_timeout=CONV_TIMEOUT,
     )
 
-    # Choose conversation handler
     choose_conv = ConversationHandler(
         entry_points=[CommandHandler("choose", choose_start)],
         states={
