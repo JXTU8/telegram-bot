@@ -68,7 +68,7 @@ logger = logging.getLogger(__name__)
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
-    gemini_model = genai.GenerativeModel("gemini-2.5-flash")
+    gemini_model = genai.GenerativeModel("gemini-3.1-flash-lite")
     logger.info("Gemini AI ready.")
 else:
     gemini_model = None
@@ -237,8 +237,7 @@ async def ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             answer = answer[:4000] + "...\n\n_(Response trimmed)_"
 
         await thinking_msg.edit_text(
-            f"🤖 *Q: {question}*\n\n{answer}",
-            parse_mode="Markdown",
+            f"🤖 Q: {question}\n\n{answer}"
         )
     except Exception as e:
         logger.error("Gemini error: %s", e)
