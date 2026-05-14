@@ -228,22 +228,22 @@ async def ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     try:
         response = await asyncio.to_thread(
             gemini_model.generate_content,
-            question,
+            f"Answer concisely and in plain text only, no markdown formatting, no bullet symbols, no headers: {question}",
         )
         answer = response.text.strip()
 
-        # Trim if too long for Telegram
-        if len(answer) > 4000:
-            answer = answer[:4000] + "...\n\n_(Response trimmed)_"
-
-        # Use HTML parse mode — safer than Markdown for AI responses
+        # Escape HTML special chars
         safe_question = question.replace("<", "&lt;").replace(">", "&gt;")
         safe_answer   = answer.replace("<", "&lt;").replace(">", "&gt;")
 
-        await thinking_msg.edit_text(
-            f"🤖 <b>Q: {safe_question}</b>\n\n{safe_answer}",
-            parse_mode="HTML",
-        )
+        # Split into multiple messages if too long
+        max_len = 3800
+        header = f"🤖 <b>Q: {safe_question}</b>\n\n"
+        chunks = [safe_answer[i:i+max_len] for i in range(0, len(safe_answer), max_len)]
+
+        await thinking_msg.edit_text(header + chunks[0], parse_mode="HTML")
+        for chunk in chunks[1:]:
+            await thinking_msg.reply_text(chunk, parse_mode="HTML")
     except Exception as e:
         logger.error("Gemini error: %s", e)
         await thinking_msg.edit_text(
