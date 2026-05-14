@@ -207,29 +207,39 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 # ─────────────────────────────────────────────
 # /ask — DuckDuckGo search + Groq AI
 # ─────────────────────────────────────────────
+SERPER_API_KEY = os.getenv("SERPER_API_KEY", "")
+
+
 def _search_web(query: str) -> str:
-    """Search DuckDuckGo and return a short context string."""
+    """Search Google via Serper and return a short context string."""
+    if not SERPER_API_KEY:
+        return ""
     try:
-        resp = requests.get(
-            "https://api.duckduckgo.com/",
-            params={
-                "q": query,
-                "format": "json",
-                "no_html": 1,
-                "skip_disambig": 1,
+        resp = requests.post(
+            "https://google.serper.dev/search",
+            headers={
+                "X-API-KEY": SERPER_API_KEY,
+                "Content-Type": "application/json",
             },
+            json={"q": query, "num": 5},
             timeout=8,
         )
         data = resp.json()
         results = []
-        if data.get("AbstractText"):
-            results.append(data["AbstractText"])
-        for r in data.get("RelatedTopics", [])[:3]:
-            if isinstance(r, dict) and r.get("Text"):
-                results.append(r["Text"])
+        if data.get("answerBox"):
+            box = data["answerBox"]
+            if box.get("answer"):
+                results.append(box["answer"])
+            elif box.get("snippet"):
+                results.append(box["snippet"])
+        if data.get("knowledgeGraph", {}).get("description"):
+            results.append(data["knowledgeGraph"]["description"])
+        for r in data.get("organic", [])[:3]:
+            if r.get("snippet"):
+                results.append(f"{r['title']}: {r['snippet']}")
         return "\n".join(results)
     except Exception as e:
-        logger.warning("DuckDuckGo search failed: %s", e)
+        logger.warning("Serper search failed: %s", e)
         return ""
 
 
