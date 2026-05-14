@@ -236,8 +236,13 @@ async def ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if len(answer) > 4000:
             answer = answer[:4000] + "...\n\n_(Response trimmed)_"
 
+        # Use HTML parse mode — safer than Markdown for AI responses
+        safe_question = question.replace("<", "&lt;").replace(">", "&gt;")
+        safe_answer   = answer.replace("<", "&lt;").replace(">", "&gt;")
+
         await thinking_msg.edit_text(
-            f"🤖 Q: {question}\n\n{answer}"
+            f"🤖 <b>Q: {safe_question}</b>\n\n{safe_answer}",
+            parse_mode="HTML",
         )
     except Exception as e:
         logger.error("Gemini error: %s", e)
