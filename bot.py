@@ -31,7 +31,6 @@ import random
 import asyncio
 from datetime import date, datetime
 
-import google.generativeai as genai
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -63,16 +62,16 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────
-# Gemini AI setup
+# Groq AI setup
 # ─────────────────────────────────────────────
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
-    gemini_model = genai.GenerativeModel("gemini-3.1-flash-lite")
-    logger.info("Gemini AI ready.")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+if GROQ_API_KEY:
+    from groq import Groq
+    groq_client = Groq(api_key=GROQ_API_KEY)
+    logger.info("Groq AI ready.")
 else:
-    gemini_model = None
-    logger.warning("GEMINI_API_KEY not set — /ask command will be disabled.")
+    groq_client = None
+    logger.warning("GROQ_API_KEY not set — /ask command will be disabled.")
 
 # ─────────────────────────────────────────────
 # Conversation states
@@ -208,9 +207,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 # /ask <question> — Gemini AI
 # ─────────────────────────────────────────────
 async def ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not gemini_model:
+    if not groq_client:
         await update.message.reply_text(
-            "⚠️ AI is not configured. Ask the admin to set up the `GEMINI_API_KEY`."
+            "⚠️ AI is not configured. Ask the admin to set up the `GROQ_API_KEY`."
         )
         return
 
@@ -226,14 +225,24 @@ async def ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     thinking_msg = await update.message.reply_text("🤖 Thinking...")
 
     try:
-        from google.generativeai import protos
-        search_tool = protos.Tool(google_search=protos.GoogleSearch())
-        response = await asyncio.to_thread(
-            gemini_model.generate_content,
-            f"Answer concisely and in plain text only, no markdown formatting, no bullet symbols, no headers: {question}",
-            tools=[search_tool],
-        )
-        answer = response.text.strip()
+        def call_groq():
+            chat = groq_client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You are a helpful assistant. Answer concisely in plain text only. No markdown formatting, no bullet symbols, no headers."
+                    },
+                    {
+                        "role": "user",
+                        "content": question
+                    }
+                ],
+                max_tokens=1024,
+            )
+            return chat.choices[0].message.content.strip()
+
+        answer = await asyncio.to_thread(call_groq)
 
         # Escape HTML special chars
         safe_question = question.replace("<", "&lt;").replace(">", "&gt;")
