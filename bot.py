@@ -11,7 +11,7 @@ Flow to make a decision:
   /choose → asks decision → asks options → dramatic reveal!
 
 Ask AI anything:
-  /ask <question> → Gemini AI replies
+  /ask <question> → DuckDuckGo search + Groq AI reply
 
 Commands
 ────────
@@ -21,7 +21,7 @@ Commands
 /listcountdown   → Show all active countdowns in this group
 /removecountdown → Remove a countdown by name
 /choose          → Let the bot decide for you
-/ask             → Ask Gemini AI anything
+/ask             → Ask AI anything
 /cancel          → Cancel the current flow
 """
 
@@ -31,6 +31,8 @@ import random
 import asyncio
 from datetime import date, datetime
 
+import requests
+from groq import Groq
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -66,7 +68,6 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────────────────────
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 if GROQ_API_KEY:
-    from groq import Groq
     groq_client = Groq(api_key=GROQ_API_KEY)
     logger.info("Groq AI ready.")
 else:
@@ -194,7 +195,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "`/choose`\n"
         "→ Can't decide? Let the bot pick for you!\n\n"
         "`/ask <question>`\n"
-        "→ Ask Gemini AI anything\n\n"
+        "→ Ask AI anything\n\n"
         "`/cancel`\n"
         "→ Cancel the current flow\n\n"
         "`/help`\n"
@@ -204,8 +205,56 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 # ─────────────────────────────────────────────
-# /ask <question> — Gemini AI
+# /ask — DuckDuckGo search + Groq AI
 # ─────────────────────────────────────────────
+def _search_web(query: str) -> str:
+    """Search DuckDuckGo and return a short context string."""
+    try:
+        resp = requests.get(
+            "https://api.duckduckgo.com/",
+            params={
+                "q": query,
+                "format": "json",
+                "no_html": 1,
+                "skip_disambig": 1,
+            },
+            timeout=8,
+        )
+        data = resp.json()
+        results = []
+        if data.get("AbstractText"):
+            results.append(data["AbstractText"])
+        for r in data.get("RelatedTopics", [])[:3]:
+            if isinstance(r, dict) and r.get("Text"):
+                results.append(r["Text"])
+        return "\n".join(results)
+    except Exception as e:
+        logger.warning("DuckDuckGo search failed: %s", e)
+        return ""
+
+
+def _call_groq(question: str, search_context: str) -> str:
+    """Call Groq with optional search context."""
+    system_msg = (
+        "You are a helpful assistant. Answer concisely in plain text only. "
+        "No markdown formatting, no bullet symbols, no headers. "
+        "Use the web search results below if relevant, otherwise use your own knowledge."
+    )
+    user_msg = question
+    if search_context:
+        user_msg = f"Web search results for context:\n{search_context}\n\nQuestion: {question}"
+
+    chat = groq_client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[
+            {"role": "system", "content": system_msg},
+            {"role": "user",   "content": user_msg},
+        ],
+        max_tokens=1024,
+    )
+    return chat.choices[0].message.content.strip()
+
+
 async def ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not groq_client:
         await update.message.reply_text(
@@ -216,33 +265,20 @@ async def ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if not context.args:
         await update.message.reply_text(
             "Usage: `/ask <your question>`\n"
-            "_(e.g. `/ask what is the speed of light?`)_",
+            "_(e.g. `/ask what is tung tung tung sahur?`)_",
             parse_mode="Markdown",
         )
         return
 
     question = " ".join(context.args)
-    thinking_msg = await update.message.reply_text("🤖 Thinking...")
+    thinking_msg = await update.message.reply_text("🤖 Searching and thinking...")
 
     try:
-        def call_groq():
-            chat = groq_client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "You are a helpful assistant. Answer concisely in plain text only. No markdown formatting, no bullet symbols, no headers."
-                    },
-                    {
-                        "role": "user",
-                        "content": question
-                    }
-                ],
-                max_tokens=1024,
-            )
-            return chat.choices[0].message.content.strip()
+        # Step 1 — search the web
+        search_context = await asyncio.to_thread(_search_web, question)
 
-        answer = await asyncio.to_thread(call_groq)
+        # Step 2 — ask Groq with context
+        answer = await asyncio.to_thread(_call_groq, question, search_context)
 
         # Escape HTML special chars
         safe_question = question.replace("<", "&lt;").replace(">", "&gt;")
@@ -250,14 +286,15 @@ async def ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
         # Split into multiple messages if too long
         max_len = 3800
-        header = f"🤖 <b>Q: {safe_question}</b>\n\n"
-        chunks = [safe_answer[i:i+max_len] for i in range(0, len(safe_answer), max_len)]
+        header  = f"🤖 <b>Q: {safe_question}</b>\n\n"
+        chunks  = [safe_answer[i:i + max_len] for i in range(0, len(safe_answer), max_len)]
 
         await thinking_msg.edit_text(header + chunks[0], parse_mode="HTML")
         for chunk in chunks[1:]:
             await thinking_msg.reply_text(chunk, parse_mode="HTML")
+
     except Exception as e:
-        logger.error("Gemini error: %s", e)
+        logger.error("Ask error: %s", e)
         await thinking_msg.edit_text(
             "❌ Something went wrong with the AI. Please try again later."
         )
