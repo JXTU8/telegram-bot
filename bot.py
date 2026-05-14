@@ -226,9 +226,11 @@ async def ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     thinking_msg = await update.message.reply_text("🤖 Thinking...")
 
     try:
+        search_tool = {"google_search": {}}
         response = await asyncio.to_thread(
             gemini_model.generate_content,
             f"Answer concisely and in plain text only, no markdown formatting, no bullet symbols, no headers: {question}",
+            tools=[search_tool],
         )
         answer = response.text.strip()
 
