@@ -620,6 +620,138 @@ async def restore_jobs(app) -> None:
     logger.info("Restored %s reminder job(s) from Redis.", count)
 
 
+
+# ─────────────────────────────────────────────
+# /fate — Daily luck predictor
+# ─────────────────────────────────────────────
+
+FATE_LUCKY_ID   = int(os.getenv("FATE_LUCKY_ID",   "0"))
+FATE_UNLUCKY_ID = int(os.getenv("FATE_UNLUCKY_ID", "0"))
+
+FATE_TIERS = [
+    {
+        "name":  "💀 CURSED",
+        "range": (0, 10),
+        "messages": [
+            "Your ancestors are filing a complaint.",
+            "Even your shadow is avoiding you today.",
+            "The universe has personally chosen you to suffer.",
+            "A black cat saw you and walked away in disgust.",
+            "Mercury is in retrograde and it is specifically targeting you.",
+        ],
+    },
+    {
+        "name":  "🌧️ Unlucky",
+        "range": (11, 35),
+        "messages": [
+            "Things could be worse. They probably will be.",
+            "Not your day. Maybe tomorrow.",
+            "Your coffee will definitely go cold faster than usual.",
+            "The queue will always be longer wherever you go.",
+            "You will find a parking spot, but someone else will take it.",
+        ],
+    },
+    {
+        "name":  "🌤️ Neutral",
+        "range": (36, 64),
+        "messages": [
+            "Perfectly balanced, as all things should be.",
+            "Not great, not terrible. Just vibing.",
+            "The universe has no strong feelings about you today.",
+            "You exist. That is about it for today.",
+            "Coin flip energy. Could go either way.",
+        ],
+    },
+    {
+        "name":  "✨ Blessed",
+        "range": (65, 89),
+        "messages": [
+            "The stars are rooting for you today.",
+            "Good things are coming. Stay ready.",
+            "Your energy is immaculate today. Do not waste it.",
+            "Luck is on your side. Make your move.",
+            "Today is yours. Go claim it.",
+        ],
+    },
+    {
+        "name":  "🌟 LEGENDARY",
+        "range": (90, 100),
+        "messages": [
+            "The universe bows before you.",
+            "You were BUILT for today. Absolutely unstoppable.",
+            "Buy lottery. Seriously. Right now.",
+            "Angels are personally cheering you on.",
+            "This is your villain origin story but make it successful.",
+        ],
+    },
+]
+
+FATE_EXTREME_LUCKY_MESSAGES = [
+    "THE COSMOS HAS CHOSEN YOU. Once-in-a-lifetime energy. You are literally untouchable today. The stars aligned specifically for you.",
+    "ABSOLUTE MAXIMUM LUCK. You have been blessed by forces beyond this world. Today nothing can stop you. NOTHING.",
+    "DIVINE INTERVENTION DETECTED. The universe has put everything on pause just to give you this moment. Legendary.",
+]
+
+FATE_EXTREME_UNLUCKY_MESSAGES = [
+    "CATASTROPHICALLY CURSED. Something has gone terribly wrong in your cosmic alignment. Stay home. Do not touch anything.",
+    "VOID-LEVEL BAD LUCK. The universe did not just forget about you. It actively chose violence. We are so sorry.",
+    "MAXIMUM CURSE DETECTED. Even the laws of physics are against you today. We recommend staying very very still.",
+]
+
+
+def _get_fate(user_id: int):
+    today_str = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
+    rng = random.Random(f"{user_id}:{today_str}")
+
+    if FATE_LUCKY_ID and user_id == FATE_LUCKY_ID:
+        return 999, "🌈 COSMICALLY CHOSEN", rng.choice(FATE_EXTREME_LUCKY_MESSAGES)
+
+    if FATE_UNLUCKY_ID and user_id == FATE_UNLUCKY_ID:
+        return -999, "☠️ COSMICALLY CURSED", rng.choice(FATE_EXTREME_UNLUCKY_MESSAGES)
+
+    extreme_roll = rng.randint(1, 30)
+    if extreme_roll == 1:
+        if rng.random() < 0.5:
+            return 999, "🌈 COSMICALLY CHOSEN", rng.choice(FATE_EXTREME_LUCKY_MESSAGES)
+        else:
+            return -999, "☠️ COSMICALLY CURSED", rng.choice(FATE_EXTREME_UNLUCKY_MESSAGES)
+
+    score = rng.randint(0, 100)
+    for tier in FATE_TIERS:
+        lo, hi = tier["range"]
+        if lo <= score <= hi:
+            return score, tier["name"], rng.choice(tier["messages"])
+
+    return score, "🌤️ Neutral", "Just another day."
+
+
+async def fate_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user     = update.effective_user
+    user_id  = user.id
+    username = user.first_name or user.username or "You"
+
+    score, tier, message = _get_fate(user_id)
+
+    if score == 999:
+        score_display = "999 ⚡ MAXIMUM"
+    elif score == -999:
+        score_display = "-999 💀 MINIMUM"
+    else:
+        filled = round(score / 10)
+        bar    = "█" * filled + "░" * (10 - filled)
+        score_display = f"{score}/100  [{bar}]"
+
+    await update.message.reply_text(
+        f"🔮 *Daily Fate — {username}*\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"Tier: *{tier}*\n"
+        f"Score: `{score_display}`\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"_{message}_\n\n"
+        f"_Resets at midnight MYT_ 🌙",
+        parse_mode="Markdown",
+    )
+
 # ─────────────────────────────────────────────
 # Main
 # ─────────────────────────────────────────────
@@ -662,6 +794,7 @@ def main() -> None:
     app.add_handler(choose_conv)
     app.add_handler(CommandHandler("listcountdown", list_countdown))
     app.add_handler(CommandHandler("removecountdown", remove_countdown_cmd))
+    app.add_handler(CommandHandler("fate", fate_command))
 
     logger.info("Bot is running...")
     app.run_polling()
