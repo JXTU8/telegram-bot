@@ -1,28 +1,29 @@
 """
 bot.py
-──────
-Group countdown bot — MYT (GMT+8).
+------
+Group countdown bot - MYT (GMT+8).
 
 Flow to add a countdown:
-  /addcountdown → asks name → asks date → asks time → done!
-  (30 second timeout at each step — auto cancels if no response)
+  /addcountdown -> asks name -> asks date -> asks time -> done!
+  (30 second timeout at each step - auto cancels if no response)
 
 Flow to make a decision:
-  /choose → asks decision → asks options → dramatic reveal!
+  /choose -> asks decision -> asks options -> dramatic reveal!
 
 Ask AI anything:
-  /ask <question> → DuckDuckGo search + Groq AI reply
+  /ask <question> -> Serper Google search + Groq AI reply
 
 Commands
-────────
-/start           → Welcome message
-/help            → Command reference
-/addcountdown    → Add a new named countdown (multi-step)
-/listcountdown   → Show all active countdowns in this group
-/removecountdown → Remove a countdown by name
-/choose          → Let the bot decide for you
-/ask             → Ask AI anything
-/cancel          → Cancel the current flow
+--------
+/start           -> Welcome message
+/help            -> Command reference
+/addcountdown    -> Add a new named countdown (multi-step)
+/listcountdown   -> Show all active countdowns in this group
+/removecountdown -> Remove a countdown by name
+/choose          -> Let the bot decide for you
+/ask             -> Ask AI anything
+/fate            -> Check your daily luck
+/cancel          -> Cancel the current flow
 """
 
 import logging
@@ -53,9 +54,9 @@ from countdown_manager import (
 )
 from keep_alive import keep_alive
 
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 # Logging
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 logging.basicConfig(
     format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
@@ -63,22 +64,22 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 # Groq AI setup
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 if GROQ_API_KEY:
     groq_client = Groq(api_key=GROQ_API_KEY)
     logger.info("Groq AI ready.")
 else:
     groq_client = None
-    logger.warning("GROQ_API_KEY not set — /ask command will be disabled.")
+    logger.warning("GROQ_API_KEY not set - /ask command will be disabled.")
 
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 # Conversation states
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 ASK_NAME, ASK_DATE, ASK_TIME = range(3)
-ASK_DECISION, ASK_OPTIONS    = range(3, 5)
+ASK_DECISION, ASK_OPTIONS = range(3, 5)
 
 CONV_TIMEOUT = 30
 
@@ -104,12 +105,27 @@ VERDICT_LINES = [
     "Don't blame me, blame fate.",
     "Final answer. No debates.",
     "Science has confirmed it.",
+    "The council has reached a verdict.",
+    "The odds have been judged.",
+    "Case closed.",
+    "The wheel has no regrets.",
+    "Probability has spoken.",
+    "This is now canon.",
+    "The decision has left the chat.",
+    "A bold choice. Respectable.",
+    "The numbers made me do it.",
+    "Fate signed the paperwork.",
+    "Certified by absolutely no authority.",
+    "The vibes are legally binding.",
+    "That is the official unofficial answer.",
+    "The timeline accepts this outcome.",
+    "A decision has entered the arena.",
 ]
 
 
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 # Helpers
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 def _today() -> date:
     return datetime.now(TIMEZONE).date()
 
@@ -149,9 +165,9 @@ def _schedule_reminder(app, chat_id: int, name: str, hour: int, minute: int) -> 
     )
 
 
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 # Timeout handler
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 async def conversation_timeout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data.clear()
     await context.bot.send_message(
@@ -162,9 +178,9 @@ async def conversation_timeout(update: Update, context: ContextTypes.DEFAULT_TYP
     return ConversationHandler.END
 
 
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 # /start
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "👋 *Welcome to Countdown Bot!*\n\n"
@@ -175,14 +191,15 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "🗑️ `/removecountdown` — remove a countdown\n"
         "🎲 `/choose` — let me decide for you\n"
         "🤖 `/ask` — ask me anything\n\n"
+        "🔮 `/fate` — check your daily luck\n"
         "Type /help for all commands.",
         parse_mode="Markdown",
     )
 
 
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 # /help
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "📌 *Available Commands*\n\n"
@@ -196,6 +213,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "→ Can't decide? Let the bot pick for you!\n\n"
         "`/ask <question>`\n"
         "→ Ask AI anything\n\n"
+        "`/fate`\n"
+        "→ Check your daily luck prediction\n\n"
         "`/cancel`\n"
         "→ Cancel the current flow\n\n"
         "`/help`\n"
@@ -204,9 +223,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     )
 
 
-# ─────────────────────────────────────────────
-# /ask — DuckDuckGo search + Groq AI
-# ─────────────────────────────────────────────
+# ---------------------------------------------
+# /ask - Serper Google search + Groq AI
+# ---------------------------------------------
 SERPER_API_KEY = os.getenv("SERPER_API_KEY", "")
 
 
@@ -214,6 +233,7 @@ def _search_web(query: str) -> str:
     """Search Google via Serper and return a short context string."""
     if not SERPER_API_KEY:
         return ""
+
     try:
         resp = requests.post(
             "https://google.serper.dev/search",
@@ -258,7 +278,7 @@ def _call_groq(question: str, search_context: str) -> str:
         model="llama-3.3-70b-versatile",
         messages=[
             {"role": "system", "content": system_msg},
-            {"role": "user",   "content": user_msg},
+            {"role": "user", "content": user_msg},
         ],
         max_tokens=1024,
     )
@@ -284,20 +304,15 @@ async def ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     thinking_msg = await update.message.reply_text("🤖 Searching and thinking...")
 
     try:
-        # Step 1 — search the web
         search_context = await asyncio.to_thread(_search_web, question)
-
-        # Step 2 — ask Groq with context
         answer = await asyncio.to_thread(_call_groq, question, search_context)
 
-        # Escape HTML special chars
         safe_question = question.replace("<", "&lt;").replace(">", "&gt;")
-        safe_answer   = answer.replace("<", "&lt;").replace(">", "&gt;")
+        safe_answer = answer.replace("<", "&lt;").replace(">", "&gt;")
 
-        # Split into multiple messages if too long
         max_len = 3800
-        header  = f"🤖 <b>Q: {safe_question}</b>\n\n"
-        chunks  = [safe_answer[i:i + max_len] for i in range(0, len(safe_answer), max_len)]
+        header = f"🤖 <b>Q: {safe_question}</b>\n\n"
+        chunks = [safe_answer[i:i + max_len] for i in range(0, len(safe_answer), max_len)]
 
         await thinking_msg.edit_text(header + chunks[0], parse_mode="HTML")
         for chunk in chunks[1:]:
@@ -310,9 +325,9 @@ async def ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
 
 
-# ─────────────────────────────────────────────
-# /addcountdown — Step 1: ask for name
-# ─────────────────────────────────────────────
+# ---------------------------------------------
+# /addcountdown - Step 1: ask for name
+# ---------------------------------------------
 async def add_countdown_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text(
         "➕ *New Countdown*\n\n"
@@ -401,15 +416,15 @@ async def received_time(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         )
         return ASK_TIME
 
-    chat_id     = update.effective_chat.id
-    name        = context.user_data["new_countdown_name"]
+    chat_id = update.effective_chat.id
+    name = context.user_data["new_countdown_name"]
     target_date = context.user_data["new_countdown_date"]
-    created_by  = update.effective_user.id
+    created_by = update.effective_user.id
 
     add_countdown(chat_id, name, target_date, hour, minute, created_by)
     _schedule_reminder(context.application, chat_id, name, hour, minute)
 
-    today     = _today()
+    today = _today()
     days_left = (target_date - today).days
 
     await update.message.reply_text(
@@ -422,13 +437,13 @@ async def received_time(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     )
 
     context.user_data.clear()
-    logger.info("Chat %s added countdown '%s' → %s at %02d:%02d", chat_id, name, target_date, hour, minute)
+    logger.info("Chat %s added countdown '%s' -> %s at %02d:%02d", chat_id, name, target_date, hour, minute)
     return ConversationHandler.END
 
 
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 # /choose
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 async def choose_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text(
         "🎲 *Decision Maker*\n\n"
@@ -463,7 +478,7 @@ async def received_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 
 async def received_options(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    raw     = update.message.text.strip()
+    raw = update.message.text.strip()
     options = [o.strip() for o in raw.split(",") if o.strip()]
 
     if len(options) < 2:
@@ -476,32 +491,44 @@ async def received_options(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return ASK_OPTIONS
 
     decision = context.user_data["decision"]
-    chosen   = random.choice(options)
-    verdict  = random.choice(VERDICT_LINES)
+    verdict = random.choice(VERDICT_LINES)
     thinking = random.choice(THINKING_MESSAGES)
 
-    # Generate random percentages that add up to 100
-    weights = [random.random() for _ in options]
-    total   = sum(weights)
-    percs   = [round(w / total * 100, 2) for w in weights]
-    # Fix rounding so they sum to exactly 100
-    diff = round(100 - sum(percs), 2)
-    percs[0] = round(percs[0] + diff, 2)
+    weights = [random.randint(1, 100) for _ in options]
+    total_weight = sum(weights)
+    raw_percentages = [(weight / total_weight) * 100 for weight in weights]
+    percentages = [int(value) for value in raw_percentages]
+
+    remainder = 100 - sum(percentages)
+    decimal_order = sorted(
+        range(len(raw_percentages)),
+        key=lambda i: raw_percentages[i] - percentages[i],
+        reverse=True,
+    )
+    for index in decimal_order[:remainder]:
+        percentages[index] += 1
+
+    highest_percentage = max(percentages)
+    winning_options = [
+        option for option, percentage in zip(options, percentages)
+        if percentage == highest_percentage
+    ]
+    chosen = random.choice(winning_options)
+    percentage_lines = "\n".join(
+        f"• *{option}* — `{percentage}%`"
+        for option, percentage in zip(options, percentages)
+    )
 
     thinking_msg = await update.message.reply_text(thinking)
     await asyncio.sleep(2)
 
-    odds_lines = []
-    for opt, pct in zip(options, percs):
-        arrow = "👉 " if opt == chosen else "    "
-        odds_lines.append(f"{arrow}*{opt}* — {pct}%")
-
     await thinking_msg.edit_text(
         f"🎯 *Decision:* _{decision}_\n"
+        f"📊 *Chance Results:*\n{percentage_lines}\n\n"
         f"━━━━━━━━━━━━━━━\n"
         f"✅ *The answer is... {chosen}!*\n"
         f"━━━━━━━━━━━━━━━\n"
-        f"📊 *Odds:*\n" + "\n".join(odds_lines) + f"\n\n_{verdict}_",
+        f"_{verdict}_",
         parse_mode="Markdown",
     )
 
@@ -516,11 +543,11 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return ConversationHandler.END
 
 
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 # /listcountdown
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 async def list_countdown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id    = update.effective_chat.id
+    chat_id = update.effective_chat.id
     countdowns = get_all_countdowns(chat_id)
 
     if not countdowns:
@@ -533,10 +560,10 @@ async def list_countdown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     today = _today()
     lines = ["📋 *Active Countdowns:*\n"]
     for name, entry in countdowns.items():
-        td        = date.fromisoformat(entry["target_date"])
+        td = date.fromisoformat(entry["target_date"])
         days_left = (td - today).days
-        h         = entry["reminder_hour"]
-        m         = entry["reminder_minute"]
+        h = entry["reminder_hour"]
+        m = entry["reminder_minute"]
         lines.append(
             f"• *{name}*\n"
             f"  📆 {td}  |  {_days_label(days_left)}\n"
@@ -546,9 +573,9 @@ async def list_countdown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 # /removecountdown <name>
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 async def remove_countdown_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not context.args:
         await update.message.reply_text(
@@ -559,7 +586,7 @@ async def remove_countdown_cmd(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         return
 
-    name    = " ".join(context.args)
+    name = " ".join(context.args)
     chat_id = update.effective_chat.id
     removed = remove_countdown(chat_id, name)
 
@@ -577,23 +604,23 @@ async def remove_countdown_cmd(update: Update, context: ContextTypes.DEFAULT_TYP
         )
 
 
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 # Daily reminder job
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 async def daily_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
-    job     = context.job
+    job = context.job
     chat_id = job.chat_id
-    name    = job.data["countdown_name"]
+    name = job.data["countdown_name"]
 
     countdowns = get_all_countdowns(chat_id)
-    entry      = countdowns.get(name)
+    entry = countdowns.get(name)
 
     if not entry:
         job.schedule_removal()
         return
 
-    today     = _today()
-    td        = date.fromisoformat(entry["target_date"])
+    today = _today()
+    td = date.fromisoformat(entry["target_date"])
     days_left = (td - today).days
 
     if days_left < 0:
@@ -614,15 +641,15 @@ async def daily_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
         f"{_days_label(days_left)}",
         parse_mode="Markdown",
     )
-    logger.info("Sent reminder for '%s' to chat %s — %s days left", name, chat_id, days_left)
+    logger.info("Sent reminder for '%s' to chat %s - %s days left", name, chat_id, days_left)
 
 
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 # Restore jobs on startup
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 async def restore_jobs(app) -> None:
     all_data = get_all_chats()
-    count    = 0
+    count = 0
     for chat_id, countdowns in all_data.items():
         for name, entry in countdowns.items():
             h = entry.get("reminder_hour", 12)
@@ -632,17 +659,15 @@ async def restore_jobs(app) -> None:
     logger.info("Restored %s reminder job(s) from Redis.", count)
 
 
-
-# ─────────────────────────────────────────────
-# /fate — Daily luck predictor
-# ─────────────────────────────────────────────
-
-FATE_LUCKY_ID   = int(os.getenv("FATE_LUCKY_ID",   "0"))
+# ---------------------------------------------
+# /fate - Daily luck predictor
+# ---------------------------------------------
+FATE_LUCKY_ID = int(os.getenv("FATE_LUCKY_ID", "0"))
 FATE_UNLUCKY_ID = int(os.getenv("FATE_UNLUCKY_ID", "0"))
 
 FATE_TIERS = [
     {
-        "name":  "💀 CURSED",
+        "name": "💀 CURSED",
         "range": (0, 10),
         "messages": [
             "Your ancestors are filing a complaint.",
@@ -653,7 +678,7 @@ FATE_TIERS = [
         ],
     },
     {
-        "name":  "🌧️ Unlucky",
+        "name": "🌧️ Unlucky",
         "range": (11, 35),
         "messages": [
             "Things could be worse. They probably will be.",
@@ -664,7 +689,7 @@ FATE_TIERS = [
         ],
     },
     {
-        "name":  "🌤️ Neutral",
+        "name": "🌤️ Neutral",
         "range": (36, 64),
         "messages": [
             "Perfectly balanced, as all things should be.",
@@ -675,7 +700,7 @@ FATE_TIERS = [
         ],
     },
     {
-        "name":  "✨ Blessed",
+        "name": "✨ Blessed",
         "range": (65, 89),
         "messages": [
             "The stars are rooting for you today.",
@@ -686,7 +711,7 @@ FATE_TIERS = [
         ],
     },
     {
-        "name":  "🌟 LEGENDARY",
+        "name": "🌟 LEGENDARY",
         "range": (90, 100),
         "messages": [
             "The universe bows before you.",
@@ -725,8 +750,7 @@ def _get_fate(user_id: int):
     if extreme_roll == 1:
         if rng.random() < 0.5:
             return 999, "🌈 COSMICALLY CHOSEN", rng.choice(FATE_EXTREME_LUCKY_MESSAGES)
-        else:
-            return -999, "☠️ COSMICALLY CURSED", rng.choice(FATE_EXTREME_UNLUCKY_MESSAGES)
+        return -999, "☠️ COSMICALLY CURSED", rng.choice(FATE_EXTREME_UNLUCKY_MESSAGES)
 
     score = rng.randint(0, 100)
     for tier in FATE_TIERS:
@@ -738,8 +762,8 @@ def _get_fate(user_id: int):
 
 
 async def fate_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user     = update.effective_user
-    user_id  = user.id
+    user = update.effective_user
+    user_id = user.id
     username = user.first_name or user.username or "You"
 
     score, tier, message = _get_fate(user_id)
@@ -750,7 +774,7 @@ async def fate_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         score_display = "-999 💀 MINIMUM"
     else:
         filled = round(score / 10)
-        bar    = "█" * filled + "░" * (10 - filled)
+        bar = "█" * filled + "░" * (10 - filled)
         score_display = f"{score}/100  [{bar}]"
 
     await update.message.reply_text(
@@ -759,14 +783,14 @@ async def fate_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         f"Tier: *{tier}*\n"
         f"Score: `{score_display}`\n"
         f"━━━━━━━━━━━━━━━\n"
-        f"_{message}_\n\n"
-        f"_Resets at midnight MYT_ 🌙",
+        f"_{message}_",
         parse_mode="Markdown",
     )
 
-# ─────────────────────────────────────────────
+
+# ---------------------------------------------
 # Main
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 def main() -> None:
     keep_alive()
 
@@ -790,7 +814,7 @@ def main() -> None:
         entry_points=[CommandHandler("choose", choose_start)],
         states={
             ASK_DECISION: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_decision)],
-            ASK_OPTIONS:  [MessageHandler(filters.TEXT & ~filters.COMMAND, received_options)],
+            ASK_OPTIONS: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_options)],
             ConversationHandler.TIMEOUT: [
                 MessageHandler(filters.ALL, conversation_timeout)
             ],
