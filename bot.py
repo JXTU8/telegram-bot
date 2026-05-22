@@ -480,16 +480,28 @@ async def received_options(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     verdict  = random.choice(VERDICT_LINES)
     thinking = random.choice(THINKING_MESSAGES)
 
+    # Generate random percentages that add up to 100
+    weights = [random.random() for _ in options]
+    total   = sum(weights)
+    percs   = [round(w / total * 100, 2) for w in weights]
+    # Fix rounding so they sum to exactly 100
+    diff = round(100 - sum(percs), 2)
+    percs[0] = round(percs[0] + diff, 2)
+
     thinking_msg = await update.message.reply_text(thinking)
     await asyncio.sleep(2)
 
+    odds_lines = []
+    for opt, pct in zip(options, percs):
+        arrow = "👉 " if opt == chosen else "    "
+        odds_lines.append(f"{arrow}*{opt}* — {pct}%")
+
     await thinking_msg.edit_text(
         f"🎯 *Decision:* _{decision}_\n"
-        f"📋 *Options:* {', '.join(options)}\n\n"
         f"━━━━━━━━━━━━━━━\n"
         f"✅ *The answer is... {chosen}!*\n"
         f"━━━━━━━━━━━━━━━\n"
-        f"_{verdict}_",
+        f"📊 *Odds:*\n" + "\n".join(odds_lines) + f"\n\n_{verdict}_",
         parse_mode="Markdown",
     )
 
