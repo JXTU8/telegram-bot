@@ -496,27 +496,24 @@ async def received_options(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     weights = [random.randint(1, 100) for _ in options]
     total_weight = sum(weights)
-    raw_percentages = [(weight / total_weight) * 100 for weight in weights]
-    percentages = [int(value) for value in raw_percentages]
+    odds = [
+        {
+            "option": option,
+            "weight": weight,
+            "percentage": (weight / total_weight) * 100,
+        }
+        for option, weight in zip(options, weights)
+    ]
 
-    remainder = 100 - sum(percentages)
-    decimal_order = sorted(
-        range(len(raw_percentages)),
-        key=lambda i: raw_percentages[i] - percentages[i],
-        reverse=True,
-    )
-    for index in decimal_order[:remainder]:
-        percentages[index] += 1
-
-    highest_percentage = max(percentages)
+    highest_weight = max(item["weight"] for item in odds)
     winning_options = [
-        option for option, percentage in zip(options, percentages)
-        if percentage == highest_percentage
+        item["option"] for item in odds
+        if item["weight"] == highest_weight
     ]
     chosen = random.choice(winning_options)
     percentage_lines = "\n".join(
-        f"• *{option}* — `{percentage}%`"
-        for option, percentage in zip(options, percentages)
+        f"{'👉' if item['option'] == chosen else '   '} *{item['option']}* — `{item['percentage']:.2f}%`"
+        for item in odds
     )
 
     thinking_msg = await update.message.reply_text(thinking)
