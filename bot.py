@@ -92,6 +92,18 @@ THINKING_MESSAGES = [
     "🎯 Taking aim...",
     "🃏 Drawing a card...",
     "🌟 Reading the stars...",
+    "🧠 Running the numbers...",
+    "📊 Crunching the odds...",
+    "🪄 Summoning a result...",
+    "🧭 Letting fate navigate...",
+    "🎰 Pulling the lever...",
+    "🕯️ Asking the mysterious forces...",
+    "🥁 Building suspense...",
+    "🧮 Doing very serious math...",
+    "🌌 Checking alternate timelines...",
+    "📡 Receiving cosmic data...",
+    "🎭 Preparing the reveal...",
+    "🔍 Inspecting the possibilities...",
 ]
 
 VERDICT_LINES = [
@@ -512,7 +524,7 @@ async def received_options(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     ]
     chosen = random.choice(winning_options)
     percentage_lines = "\n".join(
-        f"{'👉' if item['option'] == chosen else '   '} *{item['option']}* — {item['percentage']:.2f}%"
+        f"{'👉' if item['option'] == chosen else '   '} {item['option']} - {item['percentage']:.2f}%"
         for item in odds
     )
 
@@ -520,13 +532,12 @@ async def received_options(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await asyncio.sleep(2)
 
     await thinking_msg.edit_text(
-        f"🎯 *Decision:* _{decision}_\n"
-        f"📊 *Chance Results:*\n{percentage_lines}\n\n"
+        f"🎯 Decision: {decision}\n"
         f"━━━━━━━━━━━━━━━\n"
-        f"✅ *The answer is... {chosen}!*\n"
+        f"✅ The answer is... {chosen}!\n"
         f"━━━━━━━━━━━━━━━\n"
-        f"_{verdict}_",
-        parse_mode="Markdown",
+        f"📊 Odds:\n{percentage_lines}\n\n"
+        f"{verdict}",
     )
 
     context.user_data.clear()
