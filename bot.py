@@ -186,12 +186,12 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "👋 *Welcome to Countdown Bot!*\n\n"
         "I track multiple countdowns for your group and remind everyone daily.\n"
         "I can also make decisions and answer questions!\n\n"
-        "➕ `/addcountdown` — add a new countdown\n"
-        "📋 `/listcountdown` — see all active countdowns\n"
-        "🗑️ `/removecountdown` — remove a countdown\n"
-        "🎲 `/choose` — let me decide for you\n"
-        "🤖 `/ask` — ask me anything\n\n"
-        "🔮 `/fate` — check your daily luck\n"
+        "➕ /addcountdown — add a new countdown\n"
+        "📋 /listcountdown — see all active countdowns\n"
+        "🗑️ /removecountdown — remove a countdown\n"
+        "🎲 /choose — let me decide for you\n"
+        "🤖 /ask — ask me anything\n\n"
+        "🔮 /fate — check your daily luck\n"
         "Type /help for all commands.",
         parse_mode="Markdown",
     )
@@ -203,21 +203,21 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "📌 *Available Commands*\n\n"
-        "`/addcountdown`\n"
+        "/addcountdown\n"
         "→ Add a new countdown (bot guides you step by step)\n\n"
-        "`/listcountdown`\n"
+        "/listcountdown\n"
         "→ Show all active countdowns in this group\n\n"
-        "`/removecountdown <name>`\n"
+        "/removecountdown <name>\n"
         "→ Remove a countdown by name\n\n"
-        "`/choose`\n"
+        "/choose\n"
         "→ Can't decide? Let the bot pick for you!\n\n"
-        "`/ask <question>`\n"
+        "/ask <question>\n"
         "→ Ask AI anything\n\n"
-        "`/fate`\n"
+        "/fate\n"
         "→ Check your daily luck prediction\n\n"
-        "`/cancel`\n"
+        "/cancel\n"
         "→ Cancel the current flow\n\n"
-        "`/help`\n"
+        "/help\n"
         "→ Show this menu",
         parse_mode="Markdown",
     )
@@ -512,7 +512,7 @@ async def received_options(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     ]
     chosen = random.choice(winning_options)
     percentage_lines = "\n".join(
-        f"{'👉' if item['option'] == chosen else '   '} *{item['option']}* — `{item['percentage']:.2f}%`"
+        f"{'👉' if item['option'] == chosen else '   '} *{item['option']}* — {item['percentage']:.2f}%"
         for item in odds
     )
 
