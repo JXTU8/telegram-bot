@@ -388,6 +388,27 @@ def _call_groq(question: str, search_context: str) -> str:
     return chat.choices[0].message.content.strip()
 
 
+def _call_groq_fun(prompt: str) -> str:
+    """Call Groq for short fun commands without using web search."""
+    chat = groq_client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You write short, playful Telegram group chat content. "
+                    "Plain text only. No markdown. Keep it friendly, funny, and safe. "
+                    "Give only the answer, no intro."
+                ),
+            },
+            {"role": "user", "content": prompt},
+        ],
+        max_tokens=120,
+        temperature=0.9,
+    )
+    return chat.choices[0].message.content.strip()
+
+
 async def ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not groq_client:
         await update.message.reply_text(
@@ -1245,11 +1266,11 @@ async def ship_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def roast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    target = _target_from_mention_or_reply(update)
+    target = _mentioned_target(update)
     if not target:
         await update.message.reply_text(
             "Usage: /roast @user\n"
-            "Or reply to someone's message with /roast"
+            "Mention someone directly so I know who to roast."
         )
         return
 
@@ -1257,7 +1278,14 @@ async def roast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def compliment_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    target = _target_from_args_or_reply(update, context, _display_user(update.effective_user))
+    target = _mentioned_target(update)
+    if not target:
+        await update.message.reply_text(
+            "Usage: /compliment @user\n"
+            "Mention someone directly so I know who to compliment."
+        )
+        return
+
     await update.message.reply_text(random.choice(COMPLIMENT_LINES).format(target=target))
 
 
@@ -1310,15 +1338,48 @@ async def rank_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def truth_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(f"🧃 Truth\n{random.choice(TRUTH_QUESTIONS)}")
+    fallback = random.choice(TRUTH_QUESTIONS)
+    if not groq_client:
+        await update.message.reply_text(f"🧃 Truth\n{fallback}")
+        return
+
+    try:
+        prompt = "Create one funny but answerable truth question for friends in a Telegram group chat."
+        truth = await asyncio.to_thread(_call_groq_fun, prompt)
+        await update.message.reply_text(f"🧃 Truth\n{truth}")
+    except Exception as e:
+        logger.warning("Groq truth command failed: %s", e)
+        await update.message.reply_text(f"🧃 Truth\n{fallback}")
 
 
 async def dare_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(f"🎬 Dare\n{random.choice(DARE_PROMPTS)}")
+    fallback = random.choice(DARE_PROMPTS)
+    if not groq_client:
+        await update.message.reply_text(f"🎬 Dare\n{fallback}")
+        return
+
+    try:
+        prompt = "Create one playful, safe, non-harmful dare for friends in a Telegram group chat."
+        dare = await asyncio.to_thread(_call_groq_fun, prompt)
+        await update.message.reply_text(f"🎬 Dare\n{dare}")
+    except Exception as e:
+        logger.warning("Groq dare command failed: %s", e)
+        await update.message.reply_text(f"🎬 Dare\n{fallback}")
 
 
 async def would_you_rather_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(f"⚖️ Would You Rather\n{random.choice(WOULD_YOU_RATHER_PROMPTS)}")
+    fallback = random.choice(WOULD_YOU_RATHER_PROMPTS)
+    if not groq_client:
+        await update.message.reply_text(f"⚖️ Would You Rather\n{fallback}")
+        return
+
+    try:
+        prompt = "Create one funny would-you-rather question for friends in a Telegram group chat."
+        question = await asyncio.to_thread(_call_groq_fun, prompt)
+        await update.message.reply_text(f"⚖️ Would You Rather\n{question}")
+    except Exception as e:
+        logger.warning("Groq wouldyourather command failed: %s", e)
+        await update.message.reply_text(f"⚖️ Would You Rather\n{fallback}")
 
 
 async def coinflip_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1332,9 +1393,22 @@ async def eightball_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await update.message.reply_text("Usage: /8ball <question>")
         return
 
-    await update.message.reply_text(
-        f"🎱 {random.choice(EIGHT_BALL_ANSWERS)}"
-    )
+    fallback = random.choice(EIGHT_BALL_ANSWERS)
+    if not groq_client:
+        await update.message.reply_text(f"🎱 {fallback}")
+        return
+
+    try:
+        prompt = (
+            "Answer this like a playful magic 8-ball. "
+            "Keep it under 20 words. Question: "
+            f"{question}"
+        )
+        answer = await asyncio.to_thread(_call_groq_fun, prompt)
+        await update.message.reply_text(f"🎱 {answer}")
+    except Exception as e:
+        logger.warning("Groq 8ball command failed: %s", e)
+        await update.message.reply_text(f"🎱 {fallback}")
 
 
 def _luck_result(key: str):
