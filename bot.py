@@ -1102,47 +1102,99 @@ def _target_from_mention_or_reply(
     return fallback
 
 
+def _ship_target(label: str, user_id=None, username: str = "", explicit_username: bool = False) -> dict:
+    return {
+        "label": label,
+        "user_id": user_id,
+        "username": username.strip().lstrip("@").casefold(),
+        "explicit_username": explicit_username,
+    }
+
+
+def _ship_mentions_from_message(update: Update) -> list[dict]:
+    message = update.message
+    if not message:
+        return []
+
+    targets = []
+    for entity in message.entities or []:
+        if entity.type == "text_mention" and getattr(entity, "user", None):
+            targets.append(
+                _ship_target(
+                    _display_user(entity.user),
+                    user_id=entity.user.id,
+                    username=entity.user.username or "",
+                    explicit_username=bool(entity.user.username),
+                )
+            )
+        elif entity.type == "mention":
+            mention = message.parse_entity(entity)
+            targets.append(
+                _ship_target(
+                    mention,
+                    username=mention,
+                    explicit_username=True,
+                )
+            )
+
+    return targets
+
+
 def _extract_ship_targets(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = _arg_text(context)
     replied = update.message.reply_to_message
+    mentioned_targets = _ship_mentions_from_message(update)
+
+    if len(mentioned_targets) >= 2:
+        return mentioned_targets[:2]
 
     if "," in text:
         parts = [part.strip() for part in text.split(",") if part.strip()]
         if len(parts) >= 2:
             return [
-                {"label": parts[0], "user_id": None, "username": _normalize_target(parts[0])},
-                {"label": parts[1], "user_id": None, "username": _normalize_target(parts[1])},
+                _ship_target(parts[0]),
+                _ship_target(parts[1]),
             ]
 
     if replied and replied.from_user and len(context.args) == 1:
+        other_target = mentioned_targets[0] if mentioned_targets else _ship_target(
+            context.args[0],
+            username=context.args[0] if context.args[0].startswith("@") else "",
+            explicit_username=context.args[0].startswith("@"),
+        )
         return [
-            {
-                "label": _display_user(replied.from_user),
-                "user_id": replied.from_user.id,
-                "username": (replied.from_user.username or "").casefold(),
-            },
-            {
-                "label": context.args[0],
-                "user_id": None,
-                "username": _normalize_target(context.args[0]),
-            },
+            _ship_target(
+                _display_user(replied.from_user),
+                user_id=replied.from_user.id,
+                username=replied.from_user.username or "",
+                explicit_username=bool(replied.from_user.username),
+            ),
+            other_target,
         ]
 
     if len(context.args) >= 2:
         return [
-            {"label": context.args[0], "user_id": None, "username": _normalize_target(context.args[0])},
-            {"label": context.args[1], "user_id": None, "username": _normalize_target(context.args[1])},
+            _ship_target(
+                context.args[0],
+                username=context.args[0] if context.args[0].startswith("@") else "",
+                explicit_username=context.args[0].startswith("@"),
+            ),
+            _ship_target(
+                context.args[1],
+                username=context.args[1] if context.args[1].startswith("@") else "",
+                explicit_username=context.args[1].startswith("@"),
+            ),
         ]
 
     return []
 
 
-async def _is_protected_ship_target(target: dict) -> bool:
+def _is_protected_ship_target(target: dict) -> bool:
     if BOT_OWNER_ID and target.get("user_id") == BOT_OWNER_ID:
         return True
 
-    username = target.get("username") or _normalize_target(target["label"])
-    if username in BOT_OWNER_USERNAMES:
+    username = target.get("username", "")
+    if target.get("explicit_username") and username in BOT_OWNER_USERNAMES:
         return True
 
     return False
@@ -1165,7 +1217,7 @@ async def ship_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     for target in targets:
-        if await _is_protected_ship_target(target):
+        if _is_protected_ship_target(target):
             await update.message.reply_text(random.choice(SHIP_OWNER_BLOCK_LINES))
             return
 
