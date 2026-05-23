@@ -1076,21 +1076,6 @@ def _stable_rng(label: str, *parts):
     return random.Random(seed)
 
 
-def _target_from_args_or_reply(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    fallback: str = "",
-):
-    if context.args:
-        return _arg_text(context)
-
-    replied = update.message.reply_to_message
-    if replied and replied.from_user:
-        return _display_user(replied.from_user)
-
-    return fallback
-
-
 def _mentioned_target(update: Update, context: ContextTypes.DEFAULT_TYPE = None) -> str:
     message = update.message
     if not message:
@@ -1131,19 +1116,8 @@ def _mentioned_target(update: Update, context: ContextTypes.DEFAULT_TYPE = None)
     return ""
 
 
-def _target_from_mention_or_reply(
-    update: Update,
-    fallback: str = "",
-) -> str:
-    mentioned = _mentioned_target(update)
-    if mentioned:
-        return mentioned
-
-    replied = update.message.reply_to_message
-    if replied and replied.from_user:
-        return _display_user(replied.from_user)
-
-    return fallback
+def _target_from_mention_or_sender(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
+    return _mentioned_target(update, context) or _display_user(update.effective_user)
 
 
 def _ship_target(label: str, user_id=None, username: str = "", explicit_username: bool = False) -> dict:
@@ -1289,12 +1263,12 @@ async def ship_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def roast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    target = _mentioned_target(update, context) or _display_user(update.effective_user)
+    target = _target_from_mention_or_sender(update, context)
     await update.message.reply_text(random.choice(ROAST_LINES).format(target=target))
 
 
 async def compliment_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    target = _mentioned_target(update, context) or _display_user(update.effective_user)
+    target = _target_from_mention_or_sender(update, context)
     await update.message.reply_text(random.choice(COMPLIMENT_LINES).format(target=target))
 
 
@@ -1432,7 +1406,7 @@ def _luck_result(key: str):
 
 
 async def luck_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    target = _target_from_args_or_reply(update, context, _display_user(update.effective_user))
+    target = _target_from_mention_or_sender(update, context)
     score, tier, message = _luck_result(_normalize_target(target))
 
     await update.message.reply_text(
@@ -1465,13 +1439,13 @@ async def fateboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 
 async def curse_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    target = _target_from_args_or_reply(update, context, _display_user(update.effective_user))
+    target = _target_from_mention_or_sender(update, context)
     rng = _daily_rng("curse", update.effective_chat.id, _normalize_target(target))
     await update.message.reply_text(rng.choice(CURSE_LINES).format(target=target))
 
 
 async def bless_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    target = _target_from_args_or_reply(update, context, _display_user(update.effective_user))
+    target = _target_from_mention_or_sender(update, context)
     rng = _daily_rng("bless", update.effective_chat.id, _normalize_target(target))
     await update.message.reply_text(rng.choice(BLESS_LINES).format(target=target))
 
