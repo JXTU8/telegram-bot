@@ -43,14 +43,19 @@ def _rkey(chat_id: int) -> str:
     return f"countdowns:{chat_id}"
 
 
+def _decode_chat_data(data) -> dict:
+    if data is None:
+        return {}
+    if isinstance(data, dict):
+        return data
+    if isinstance(data, bytes):
+        data = data.decode("utf-8")
+    return json.loads(data)
+
+
 def _load_chat(chat_id: int) -> dict:
     try:
-        data = redis.get(_rkey(chat_id))
-        if data is None:
-            return {}
-        if isinstance(data, dict):
-            return data
-        return json.loads(data)
+        return _decode_chat_data(redis.get(_rkey(chat_id)))
     except Exception as e:
         logger.error("Redis read error for chat %s: %s", chat_id, e)
         return {}
@@ -58,7 +63,7 @@ def _load_chat(chat_id: int) -> dict:
 
 def _save_chat(chat_id: int, data: dict) -> None:
     try:
-        redis.set(_rkey(chat_id), json.dumps(data))
+        redis.set(_rkey(chat_id), json.dumps(data, separators=(",", ":")))
     except Exception as e:
         logger.error("Redis write error for chat %s: %s", chat_id, e)
 
@@ -121,13 +126,14 @@ def get_all_chats() -> dict:
 
         result = {}
         for key in keys:
-            chat_id = int(key.split(":")[1])
-            data = redis.get(key)
-            if data:
-                if isinstance(data, dict):
-                    result[chat_id] = data
-                else:
-                    result[chat_id] = json.loads(data)
+            key_name = key.decode("utf-8") if isinstance(key, bytes) else str(key)
+            try:
+                chat_id = int(key_name.split(":", 1)[1])
+            except (IndexError, ValueError):
+                logger.warning("Skipping unexpected Redis key: %s", key)
+                continue
+
+            result[chat_id] = _decode_chat_data(redis.get(key))
         return result
     except Exception as e:
         logger.error("Redis get_all_chats error: %s", e)

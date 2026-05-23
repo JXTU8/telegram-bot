@@ -31,6 +31,7 @@ import os
 import random
 import asyncio
 from datetime import date, datetime
+from time import monotonic
 
 import requests
 from groq import Groq
@@ -154,6 +155,14 @@ def _job_name(chat_id: int, name: str) -> str:
     return f"{chat_id}::{name}"
 
 
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except ValueError:
+        logger.warning("%s must be an integer. Using %s.", name, default)
+        return default
+
+
 def _schedule_reminder(app, chat_id: int, name: str, hour: int, minute: int) -> None:
     jname = _job_name(chat_id, name)
 
@@ -239,6 +248,40 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 # /ask - Serper Google search + Groq AI
 # ---------------------------------------------
 SERPER_API_KEY = os.getenv("SERPER_API_KEY", "")
+SERPER_URL = "https://google.serper.dev/search"
+SERPER_HEADERS = {
+    "X-API-KEY": SERPER_API_KEY,
+    "Content-Type": "application/json",
+}
+SERPER_SESSION = requests.Session()
+SEARCH_CACHE_TTL_SECONDS = max(0, _env_int("SEARCH_CACHE_TTL_SECONDS", 900))
+SEARCH_CACHE_MAX_ITEMS = 128
+_SEARCH_CACHE = {}
+
+
+def _cache_key(query: str) -> str:
+    return " ".join(query.casefold().split())
+
+
+def _get_cached_search(query: str):
+    cached = _SEARCH_CACHE.get(_cache_key(query))
+    if not cached:
+        return None
+
+    cached_at, result = cached
+    if monotonic() - cached_at <= SEARCH_CACHE_TTL_SECONDS:
+        return result
+
+    _SEARCH_CACHE.pop(_cache_key(query), None)
+    return None
+
+
+def _set_cached_search(query: str, result: str) -> None:
+    if len(_SEARCH_CACHE) >= SEARCH_CACHE_MAX_ITEMS:
+        oldest_key = min(_SEARCH_CACHE, key=lambda key: _SEARCH_CACHE[key][0])
+        _SEARCH_CACHE.pop(oldest_key, None)
+
+    _SEARCH_CACHE[_cache_key(query)] = (monotonic(), result)
 
 
 def _search_web(query: str) -> str:
@@ -246,16 +289,18 @@ def _search_web(query: str) -> str:
     if not SERPER_API_KEY:
         return ""
 
+    cached = _get_cached_search(query)
+    if cached is not None:
+        return cached
+
     try:
-        resp = requests.post(
-            "https://google.serper.dev/search",
-            headers={
-                "X-API-KEY": SERPER_API_KEY,
-                "Content-Type": "application/json",
-            },
+        resp = SERPER_SESSION.post(
+            SERPER_URL,
+            headers=SERPER_HEADERS,
             json={"q": query, "num": 5},
-            timeout=8,
+            timeout=(3, 8),
         )
+        resp.raise_for_status()
         data = resp.json()
         results = []
         if data.get("answerBox"):
@@ -268,8 +313,12 @@ def _search_web(query: str) -> str:
             results.append(data["knowledgeGraph"]["description"])
         for r in data.get("organic", [])[:3]:
             if r.get("snippet"):
-                results.append(f"{r['title']}: {r['snippet']}")
-        return "\n".join(results)
+                title = r.get("title", "Search result")
+                results.append(f"{title}: {r['snippet']}")
+
+        search_context = "\n".join(results)
+        _set_cached_search(query, search_context)
+        return search_context
     except Exception as e:
         logger.warning("Serper search failed: %s", e)
         return ""
@@ -319,16 +368,16 @@ async def ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         search_context = await asyncio.to_thread(_search_web, question)
         answer = await asyncio.to_thread(_call_groq, question, search_context)
 
-        safe_question = question.replace("<", "&lt;").replace(">", "&gt;")
-        safe_answer = answer.replace("<", "&lt;").replace(">", "&gt;")
+        max_len = 3900
+        header = f"🤖 Q: {question}\n\n"
+        first_chunk_limit = max(1, max_len - len(header))
+        first_chunk = answer[:first_chunk_limit]
+        remaining_answer = answer[first_chunk_limit:]
 
-        max_len = 3800
-        header = f"🤖 <b>Q: {safe_question}</b>\n\n"
-        chunks = [safe_answer[i:i + max_len] for i in range(0, len(safe_answer), max_len)]
-
-        await thinking_msg.edit_text(header + chunks[0], parse_mode="HTML")
-        for chunk in chunks[1:]:
-            await thinking_msg.reply_text(chunk, parse_mode="HTML")
+        await thinking_msg.edit_text(header + first_chunk)
+        for i in range(0, len(remaining_answer), max_len):
+            chunk = remaining_answer[i:i + max_len]
+            await thinking_msg.reply_text(chunk)
 
     except Exception as e:
         logger.error("Ask error: %s", e)
@@ -670,8 +719,8 @@ async def restore_jobs(app) -> None:
 # ---------------------------------------------
 # /fate - Daily luck predictor
 # ---------------------------------------------
-FATE_LUCKY_ID = int(os.getenv("FATE_LUCKY_ID", "0"))
-FATE_UNLUCKY_ID = int(os.getenv("FATE_UNLUCKY_ID", "0"))
+FATE_LUCKY_ID = _env_int("FATE_LUCKY_ID", 0)
+FATE_UNLUCKY_ID = _env_int("FATE_UNLUCKY_ID", 0)
 
 FATE_TIERS = [
     {

@@ -16,6 +16,9 @@ from flask import Flask
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
+_http_session = requests.Session()
+_started = False
+_start_lock = threading.Lock()
 
 
 @app.route("/")
@@ -46,19 +49,34 @@ def _self_ping() -> None:
     while True:
         time.sleep(14 * 60)  # 14 minutes
         try:
-            resp = requests.get(ping_url, timeout=10)
+            resp = _http_session.get(ping_url, timeout=10)
             logger.info("Self-ping OK (%s)", resp.status_code)
         except Exception as e:
             logger.warning("Self-ping failed: %s", e)
 
 
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except ValueError:
+        logger.warning("%s must be an integer. Using %s.", name, default)
+        return default
+
+
 def keep_alive() -> None:
     """Start the Flask server + self-ping in background threads."""
-    port = int(os.getenv("PORT", 8080))
+    global _started
+
+    with _start_lock:
+        if _started:
+            return
+        _started = True
+
+    port = _env_int("PORT", 8080)
 
     # Web server thread
     server_thread = threading.Thread(
-        target=lambda: app.run(host="0.0.0.0", port=port),
+        target=lambda: app.run(host="0.0.0.0", port=port, use_reloader=False),
         daemon=True,
     )
     server_thread.start()
