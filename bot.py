@@ -452,8 +452,25 @@ async def ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 # ---------------------------------------------
 # /addcountdown - Step 1: ask for name
 # ---------------------------------------------
+def _track(context: ContextTypes.DEFAULT_TYPE, *messages) -> None:
+    """Store message IDs so they can be bulk-deleted at the end of the flow."""
+    ids: list = context.user_data.setdefault("_cd_msg_ids", [])
+    for msg in messages:
+        if msg is not None:
+            ids.append((msg.chat_id, msg.message_id))
+
+
+async def _delete_tracked(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Delete every tracked message, silently ignoring failures."""
+    for chat_id, msg_id in context.user_data.pop("_cd_msg_ids", []):
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
+        except Exception:
+            pass
+
+
 async def add_countdown_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text(
+    bot_msg = await update.message.reply_text(
         "➕ *New Countdown*\n\n"
         "Step 1/3 — What do you want to call this countdown?\n"
         "_(e.g. Final Exam, Holiday, Birthday)_\n\n"
@@ -461,6 +478,7 @@ async def add_countdown_start(update: Update, context: ContextTypes.DEFAULT_TYPE
         "Type /cancel to stop.",
         parse_mode="Markdown",
     )
+    _track(context, update.message, bot_msg)
     return ASK_NAME
 
 
@@ -484,13 +502,14 @@ async def received_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         return ASK_NAME
 
     context.user_data["new_countdown_name"] = name
-    await update.message.reply_text(
+    bot_msg = await update.message.reply_text(
         f"✅ Name set to *{name}*\n\n"
         "Step 2/3 — What is the target date?\n"
         "Format: `YYYY-MM-DD` _(e.g. 2025-12-31)_\n\n"
         f"⏰ You have *{CONV_TIMEOUT} seconds* to reply.",
         parse_mode="Markdown",
     )
+    _track(context, update.message, bot_msg)
     return ASK_DATE
 
 
@@ -516,13 +535,14 @@ async def received_date(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         return ASK_DATE
 
     context.user_data["new_countdown_date"] = target_date
-    await update.message.reply_text(
+    bot_msg = await update.message.reply_text(
         f"✅ Date set to *{target_date}*\n\n"
         "Step 3/3 — What time should the group be reminded daily?\n"
         "Format: `HH:MM` in 24hr MYT _(e.g. 08:30 or 20:00)_\n\n"
         f"⏰ You have *{CONV_TIMEOUT} seconds* to reply.",
         parse_mode="Markdown",
     )
+    _track(context, update.message, bot_msg)
     return ASK_TIME
 
 
@@ -551,12 +571,18 @@ async def received_time(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     today = _today()
     days_left = (target_date - today).days
 
-    await update.message.reply_text(
-        f"🎉 *Countdown Added!*\n\n"
-        f"📛 Name: *{name}*\n"
-        f"📆 Target: *{target_date}*\n"
-        f"{_days_label(days_left)}\n"
-        f"🔔 Daily reminder at *{hour:02d}:{minute:02d} MYT*",
+    _track(context, update.message)
+    await _delete_tracked(context)
+
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=(
+            f"🎉 *Countdown Added!*\n\n"
+            f"📛 Name: *{name}*\n"
+            f"📆 Target: *{target_date}*\n"
+            f"{_days_label(days_left)}\n"
+            f"🔔 Daily reminder at *{hour:02d}:{minute:02d} MYT*"
+        ),
         parse_mode="Markdown",
     )
 
@@ -1251,7 +1277,7 @@ async def ship_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
         return
 
-    rng = _daily_rng("ship", normalized[0], normalized[1])
+    rng = _stable_rng("ship", normalized[0], normalized[1])
     score = rng.randint(0, 10000) / 100
 
     await update.message.reply_text(
