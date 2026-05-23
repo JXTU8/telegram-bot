@@ -23,6 +23,20 @@ Commands
 /choose          -> Let the bot decide for you
 /ask             -> Ask AI anything
 /fate            -> Check your daily luck
+/ship            -> Compatibility percentage
+/roast           -> Friendly roast
+/compliment      -> Random compliment
+/vibecheck       -> Group mood score
+/rank            -> Random ranking
+/truth           -> Truth question
+/dare            -> Dare challenge
+/wouldyourather  -> Would you rather question
+/coinflip        -> Heads or tails
+/8ball           -> Magic 8-ball
+/luck            -> Check someone's luck
+/fateboard       -> Today's fate leaderboard
+/curse           -> Fake daily curse
+/bless           -> Fake daily blessing
 /cancel          -> Cancel the current flow
 """
 
@@ -163,6 +177,14 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+BOT_OWNER_ID = _env_int("BOT_OWNER_ID", 0)
+BOT_OWNER_USERNAMES = {
+    username.strip().lstrip("@").casefold()
+    for username in os.getenv("BOT_OWNER_USERNAME", "").replace(",", " ").split()
+    if username.strip()
+}
+
+
 def _schedule_reminder(app, chat_id: int, name: str, hour: int, minute: int) -> None:
     jname = _job_name(chat_id, name)
 
@@ -213,6 +235,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "🎲 /choose — let me decide for you\n"
         "🤖 /ask — ask me anything\n\n"
         "🔮 /fate — check your daily luck\n"
+        "🎉 /help — see all fun commands\n"
         "Type /help for all commands.",
         parse_mode="Markdown",
     )
@@ -236,6 +259,25 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "→ Ask AI anything\n\n"
         "/fate\n"
         "→ Check your daily luck prediction\n\n"
+        "🎉 *Fun Commands*\n\n"
+        "/ship @user1 @user2\n"
+        "→ Compatibility percentage\n\n"
+        "/roast @user\n"
+        "→ Friendly roast\n\n"
+        "/compliment @user\n"
+        "→ Random compliment\n\n"
+        "/vibecheck\n"
+        "→ Check the group mood\n\n"
+        "/rank topic: item1, item2, item3\n"
+        "→ Randomly rank things\n\n"
+        "/truth, /dare, /wouldyourather\n"
+        "→ Party prompts\n\n"
+        "/coinflip, /8ball <question>\n"
+        "→ Quick decisions\n\n"
+        "/luck @user, /fateboard\n"
+        "→ Luck check and leaderboard\n\n"
+        "/curse, /bless\n"
+        "→ Fake daily curse or blessing\n\n"
         "/cancel\n"
         "→ Cancel the current flow\n\n"
         "/help\n"
@@ -792,6 +834,23 @@ FATE_EXTREME_UNLUCKY_MESSAGES = [
     "MAXIMUM CURSE DETECTED. Even the laws of physics are against you today. We recommend staying very very still.",
 ]
 
+FATE_BOARD = {}
+
+
+def _remember_fate(chat_id: int, user_id: int, name: str, score: int, tier: str) -> None:
+    today_str = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
+    chat_board = FATE_BOARD.setdefault(chat_id, {"date": today_str, "users": {}})
+
+    if chat_board["date"] != today_str:
+        chat_board["date"] = today_str
+        chat_board["users"] = {}
+
+    chat_board["users"][user_id] = {
+        "name": name,
+        "score": score,
+        "tier": tier,
+    }
+
 
 def _get_fate(user_id: int):
     today_str = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
@@ -824,6 +883,7 @@ async def fate_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     username = user.first_name or user.username or "You"
 
     score, tier, message = _get_fate(user_id)
+    _remember_fate(update.effective_chat.id, user_id, username, score, tier)
 
     if score == 999:
         score_display = "999 ⚡ MAXIMUM"
@@ -843,6 +903,426 @@ async def fate_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         f"_{message}_",
         parse_mode="Markdown",
     )
+
+
+# ---------------------------------------------
+# Fun commands
+# ---------------------------------------------
+SHIP_OWNER_BLOCK_LINES = [
+    "Nice try, but you do not ship da GOAT. The owner is outside the romance algorithm.",
+    "Access denied. The owner is canonically unshippable.",
+    "You should not ship da GOAT. That is premium lore and the bot refuses.",
+    "Compatibility scan cancelled. The owner has main-character immunity.",
+]
+
+SHIP_TIER_LINES = [
+    (10, "This ship is still buffering."),
+    (25, "Low battery chemistry."),
+    (45, "There is potential, but the universe is squinting."),
+    (65, "Not bad. The vibes are warming up."),
+    (80, "Strong ship energy detected."),
+    (94, "Dangerously compatible. The chat may need to sit down."),
+    (100, "Legendary ship. The timeline is shaking."),
+]
+
+ROAST_LINES = [
+    "{target}, your confidence loads faster than your common sense.",
+    "{target}, you bring side quest energy to main quest problems.",
+    "{target}, your aura said 'software update required'.",
+    "{target}, you are proof that chaos can have a username.",
+    "{target}, your plan has the structural integrity of wet tissue.",
+    "{target}, you are not wrong often, but today is looking ambitious.",
+    "{target}, your brain opened 47 tabs and all of them froze.",
+    "{target}, you have premium nonsense with free-tier execution.",
+    "{target}, your logic took a lunch break and never clocked back in.",
+    "{target}, you are built different. Not better, just different.",
+]
+
+COMPLIMENT_LINES = [
+    "{target}, your vibe is clean today.",
+    "{target}, you are carrying excellent main-character energy.",
+    "{target}, your presence improves the group chat economy.",
+    "{target}, you are suspiciously easy to root for.",
+    "{target}, your aura has good lighting.",
+    "{target}, you are the reason the chat has range.",
+    "{target}, your brain has sparkle settings enabled.",
+    "{target}, you make ordinary moments feel less ordinary.",
+    "{target}, you are quietly iconic.",
+    "{target}, you are doing better than you think.",
+]
+
+VIBE_TIERS = [
+    (20, "The group chat needs a reboot."),
+    (40, "Chaotic but still breathing."),
+    (60, "Stable enough. Do not shake it."),
+    (80, "Good vibes are loading properly."),
+    (100, "Elite group energy. Screenshot-worthy."),
+]
+
+TRUTH_QUESTIONS = [
+    "What is one thing you pretend not to care about but actually do?",
+    "Who in this chat gives the best advice?",
+    "What is the most embarrassing thing you have searched online?",
+    "What is one habit you know is bad but still do?",
+    "What is a song you would never admit is on repeat?",
+    "Who here would survive a drama episode the longest?",
+    "What is the most unserious reason you got annoyed recently?",
+    "What is one thing you are secretly proud of?",
+    "Who in this chat is most likely to overthink a simple text?",
+    "What is your most harmless guilty pleasure?",
+]
+
+DARE_PROMPTS = [
+    "Send the last saved meme in your gallery.",
+    "Compliment someone in this chat with zero sarcasm.",
+    "Let the chat choose your profile picture for 10 minutes.",
+    "Say 'I was wrong' even if you were obviously right.",
+    "Send a voice note saying one dramatic sentence.",
+    "Type your next message with maximum formal energy.",
+    "Let someone in the chat pick your next snack or drink.",
+    "Reply to the next message like a movie trailer narrator.",
+    "Send your current battery percentage with no context.",
+    "Use only polite corporate language for the next 5 minutes.",
+]
+
+WOULD_YOU_RATHER_PROMPTS = [
+    "Would you rather always be 10 minutes late or always 30 minutes early?",
+    "Would you rather know every secret or forget every embarrassing memory?",
+    "Would you rather have unlimited money for food or travel?",
+    "Would you rather read minds for one day or rewind one day?",
+    "Would you rather be famous for talent or famous by accident?",
+    "Would you rather never need sleep or never need to study?",
+    "Would you rather have perfect luck or perfect timing?",
+    "Would you rather only text or only voice note for a week?",
+    "Would you rather win every argument or never need to argue?",
+    "Would you rather be able to pause time or skip boring moments?",
+]
+
+EIGHT_BALL_ANSWERS = [
+    "Yes.",
+    "No.",
+    "Absolutely.",
+    "Not today.",
+    "The signs point to yes.",
+    "The signs point to chaos.",
+    "Ask again after snacks.",
+    "Highly likely.",
+    "Extremely suspicious, but yes.",
+    "I would not bet my lunch on it.",
+    "The answer is hiding, but leaning yes.",
+    "The answer is hiding, but leaning no.",
+]
+
+CURSE_LINES = [
+    "{target} is cursed to forget why they opened an app.",
+    "{target} is cursed with warm drinks turning cold too fast.",
+    "{target} is cursed to type a message and immediately see a typo.",
+    "{target} is cursed with one extra loading screen today.",
+    "{target} is cursed to hear 'we need to talk' with no context.",
+    "{target} is cursed to crave food that is unavailable.",
+]
+
+BLESS_LINES = [
+    "{target} is blessed with perfect timing today.",
+    "{target} is blessed with unexpectedly good news.",
+    "{target} is blessed with strong focus and low nonsense.",
+    "{target} is blessed with clear skin, clear mind, clear path.",
+    "{target} is blessed with the ability to choose correctly today.",
+    "{target} is blessed with main-character background music.",
+]
+
+
+def _display_user(user) -> str:
+    return user.first_name or user.username or str(user.id)
+
+
+def _arg_text(context: ContextTypes.DEFAULT_TYPE) -> str:
+    return " ".join(context.args).strip()
+
+
+def _normalize_target(target: str) -> str:
+    return target.strip().lstrip("@").casefold()
+
+
+def _daily_rng(label: str, *parts):
+    today_str = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
+    seed = ":".join(str(part) for part in (label, today_str, *parts))
+    return random.Random(seed)
+
+
+def _stable_rng(label: str, *parts):
+    seed = ":".join(str(part) for part in (label, *parts))
+    return random.Random(seed)
+
+
+def _target_from_args_or_reply(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    fallback: str = "",
+):
+    if context.args:
+        return _arg_text(context)
+
+    replied = update.message.reply_to_message
+    if replied and replied.from_user:
+        return _display_user(replied.from_user)
+
+    return fallback
+
+
+def _extract_ship_targets(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = _arg_text(context)
+    replied = update.message.reply_to_message
+
+    if "," in text:
+        parts = [part.strip() for part in text.split(",") if part.strip()]
+        if len(parts) >= 2:
+            return [
+                {"label": parts[0], "user_id": None, "username": _normalize_target(parts[0])},
+                {"label": parts[1], "user_id": None, "username": _normalize_target(parts[1])},
+            ]
+
+    if replied and replied.from_user and len(context.args) == 1:
+        return [
+            {
+                "label": _display_user(replied.from_user),
+                "user_id": replied.from_user.id,
+                "username": (replied.from_user.username or "").casefold(),
+            },
+            {
+                "label": context.args[0],
+                "user_id": None,
+                "username": _normalize_target(context.args[0]),
+            },
+        ]
+
+    if len(context.args) >= 2:
+        return [
+            {"label": context.args[0], "user_id": None, "username": _normalize_target(context.args[0])},
+            {"label": context.args[1], "user_id": None, "username": _normalize_target(context.args[1])},
+        ]
+
+    return []
+
+
+async def _is_group_creator_target(target: dict, update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    username = target.get("username")
+    if not username or update.effective_chat.type == "private":
+        return False
+
+    try:
+        admins = await context.bot.get_chat_administrators(update.effective_chat.id)
+    except Exception as e:
+        logger.debug("Could not check chat creator for /ship: %s", e)
+        return False
+
+    for admin in admins:
+        admin_username = (admin.user.username or "").casefold()
+        if admin.status == "creator" and admin_username == username:
+            return True
+
+    return False
+
+
+async def _is_protected_ship_target(target: dict, update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    if BOT_OWNER_ID and target.get("user_id") == BOT_OWNER_ID:
+        return True
+
+    username = target.get("username") or _normalize_target(target["label"])
+    if username in BOT_OWNER_USERNAMES:
+        return True
+
+    return await _is_group_creator_target(target, update, context)
+
+
+def _ship_comment(score: float) -> str:
+    for limit, comment in SHIP_TIER_LINES:
+        if score <= limit:
+            return comment
+    return SHIP_TIER_LINES[-1][1]
+
+
+async def ship_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    targets = _extract_ship_targets(update, context)
+    if len(targets) < 2:
+        await update.message.reply_text(
+            "Usage: /ship @user1 @user2\n"
+            "Tip: you can also reply to someone with /ship @user"
+        )
+        return
+
+    for target in targets:
+        if await _is_protected_ship_target(target, update, context):
+            await update.message.reply_text(random.choice(SHIP_OWNER_BLOCK_LINES))
+            return
+
+    target_a, target_b = targets[0]["label"], targets[1]["label"]
+    normalized = sorted([_normalize_target(target_a), _normalize_target(target_b)])
+
+    if normalized[0] == normalized[1]:
+        await update.message.reply_text(
+            f"💞 Ship Result\n"
+            f"{target_a} x {target_b}\n\n"
+            f"Compatibility: 100.00%\n"
+            f"That is not a ship. That is self-love with documentation."
+        )
+        return
+
+    rng = _stable_rng("ship", normalized[0], normalized[1])
+    score = rng.randint(0, 10000) / 100
+
+    await update.message.reply_text(
+        f"💞 Ship Result\n"
+        f"{target_a} x {target_b}\n\n"
+        f"Compatibility: {score:.2f}%\n"
+        f"{_ship_comment(score)}"
+    )
+
+
+async def roast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    target = _target_from_args_or_reply(update, context)
+    if not target:
+        await update.message.reply_text("Usage: /roast @user")
+        return
+
+    await update.message.reply_text(random.choice(ROAST_LINES).format(target=target))
+
+
+async def compliment_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    target = _target_from_args_or_reply(update, context, _display_user(update.effective_user))
+    await update.message.reply_text(random.choice(COMPLIMENT_LINES).format(target=target))
+
+
+async def vibecheck_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    rng = _daily_rng("vibecheck", update.effective_chat.id)
+    score = rng.randint(0, 100)
+    mood = next(message for limit, message in VIBE_TIERS if score <= limit)
+
+    await update.message.reply_text(
+        f"📡 Vibe Check\n"
+        f"Group mood: {score}/100\n"
+        f"{mood}"
+    )
+
+
+def _parse_rank_text(text: str):
+    title = "Random Ranking"
+    item_text = text
+
+    if ":" in text:
+        title, item_text = [part.strip() for part in text.split(":", 1)]
+        title = title or "Random Ranking"
+
+    if "," in item_text:
+        items = [item.strip() for item in item_text.split(",") if item.strip()]
+    else:
+        items = [item.strip() for item in item_text.split() if item.strip()]
+
+    return title, items[:12]
+
+
+async def rank_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    text = _arg_text(context)
+    if not text:
+        await update.message.reply_text(
+            "Usage: /rank topic: item1, item2, item3\n"
+            "Example: /rank food: pizza, burger, sushi"
+        )
+        return
+
+    title, items = _parse_rank_text(text)
+    if len(items) < 2:
+        await update.message.reply_text("Give me at least 2 things to rank.")
+        return
+
+    random.shuffle(items)
+    lines = [f"🏆 {title}"]
+    lines.extend(f"{index}. {item}" for index, item in enumerate(items, start=1))
+    await update.message.reply_text("\n".join(lines))
+
+
+async def truth_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(f"🧃 Truth\n{random.choice(TRUTH_QUESTIONS)}")
+
+
+async def dare_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(f"🎬 Dare\n{random.choice(DARE_PROMPTS)}")
+
+
+async def would_you_rather_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(f"⚖️ Would You Rather\n{random.choice(WOULD_YOU_RATHER_PROMPTS)}")
+
+
+async def coinflip_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    result = random.choice(["Heads", "Tails"])
+    await update.message.reply_text(f"🪙 Coinflip: {result}")
+
+
+async def eightball_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    question = _arg_text(context)
+    if not question:
+        await update.message.reply_text("Usage: /8ball <question>")
+        return
+
+    await update.message.reply_text(
+        f"🎱 {random.choice(EIGHT_BALL_ANSWERS)}"
+    )
+
+
+def _luck_result(key: str):
+    rng = _daily_rng("luck", key)
+    score = rng.randint(0, 100)
+    for tier in FATE_TIERS:
+        lo, hi = tier["range"]
+        if lo <= score <= hi:
+            return score, tier["name"], rng.choice(tier["messages"])
+
+    return score, "🌤️ Neutral", "Just another day."
+
+
+async def luck_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    target = _target_from_args_or_reply(update, context, _display_user(update.effective_user))
+    score, tier, message = _luck_result(_normalize_target(target))
+
+    await update.message.reply_text(
+        f"🍀 Daily Luck — {target}\n"
+        f"Tier: {tier}\n"
+        f"Score: {score}/100\n"
+        f"{message}"
+    )
+
+
+async def fateboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    today_str = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
+    chat_board = FATE_BOARD.get(update.effective_chat.id)
+
+    if not chat_board or chat_board["date"] != today_str or not chat_board["users"]:
+        await update.message.reply_text("No fate scores yet today. Tell people to use /fate first.")
+        return
+
+    users = sorted(
+        chat_board["users"].values(),
+        key=lambda item: item["score"],
+        reverse=True,
+    )
+
+    lines = ["🏅 Today's Fateboard"]
+    for index, item in enumerate(users[:10], start=1):
+        lines.append(f"{index}. {item['name']} — {item['score']} ({item['tier']})")
+
+    await update.message.reply_text("\n".join(lines))
+
+
+async def curse_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    target = _target_from_args_or_reply(update, context, _display_user(update.effective_user))
+    rng = _daily_rng("curse", update.effective_chat.id, _normalize_target(target))
+    await update.message.reply_text(rng.choice(CURSE_LINES).format(target=target))
+
+
+async def bless_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    target = _target_from_args_or_reply(update, context, _display_user(update.effective_user))
+    rng = _daily_rng("bless", update.effective_chat.id, _normalize_target(target))
+    await update.message.reply_text(rng.choice(BLESS_LINES).format(target=target))
 
 
 # ---------------------------------------------
@@ -888,6 +1368,20 @@ def main() -> None:
     app.add_handler(CommandHandler("listcountdown", list_countdown))
     app.add_handler(CommandHandler("removecountdown", remove_countdown_cmd))
     app.add_handler(CommandHandler("fate", fate_command))
+    app.add_handler(CommandHandler("ship", ship_command))
+    app.add_handler(CommandHandler("roast", roast_command))
+    app.add_handler(CommandHandler("compliment", compliment_command))
+    app.add_handler(CommandHandler("vibecheck", vibecheck_command))
+    app.add_handler(CommandHandler("rank", rank_command))
+    app.add_handler(CommandHandler("truth", truth_command))
+    app.add_handler(CommandHandler("dare", dare_command))
+    app.add_handler(CommandHandler("wouldyourather", would_you_rather_command))
+    app.add_handler(CommandHandler("coinflip", coinflip_command))
+    app.add_handler(CommandHandler("8ball", eightball_command))
+    app.add_handler(CommandHandler("luck", luck_command))
+    app.add_handler(CommandHandler("fateboard", fateboard_command))
+    app.add_handler(CommandHandler("curse", curse_command))
+    app.add_handler(CommandHandler("bless", bless_command))
 
     logger.info("Bot is running...")
     app.run_polling()
