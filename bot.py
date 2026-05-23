@@ -1091,19 +1091,42 @@ def _target_from_args_or_reply(
     return fallback
 
 
-def _mentioned_target(update: Update) -> str:
+def _mentioned_target(update: Update, context: ContextTypes.DEFAULT_TYPE = None) -> str:
     message = update.message
     if not message:
         return ""
+
+    ignored_usernames = set()
+    ignored_user_ids = set()
+    if context:
+        bot_username = getattr(context.bot, "username", None)
+        bot_id = getattr(context.bot, "id", None)
+        if bot_username:
+            ignored_usernames.add(bot_username.casefold())
+        if bot_id:
+            ignored_user_ids.add(bot_id)
+
+    for entity in message.entities or []:
+        if entity.type != "bot_command":
+            continue
+
+        command_text = message.parse_entity(entity)
+        if "@" in command_text:
+            ignored_usernames.add(command_text.split("@", 1)[1].casefold())
 
     for entity in message.entities or []:
         if entity.type not in ("mention", "text_mention"):
             continue
 
         if getattr(entity, "user", None):
+            if entity.user.id in ignored_user_ids:
+                continue
             return _display_user(entity.user)
 
-        return message.parse_entity(entity)
+        mention = message.parse_entity(entity)
+        if _normalize_target(mention) in ignored_usernames:
+            continue
+        return mention
 
     return ""
 
@@ -1266,26 +1289,12 @@ async def ship_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def roast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    target = _mentioned_target(update)
-    if not target:
-        await update.message.reply_text(
-            "Usage: /roast @user\n"
-            "Mention someone directly so I know who to roast."
-        )
-        return
-
+    target = _mentioned_target(update, context) or _display_user(update.effective_user)
     await update.message.reply_text(random.choice(ROAST_LINES).format(target=target))
 
 
 async def compliment_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    target = _mentioned_target(update)
-    if not target:
-        await update.message.reply_text(
-            "Usage: /compliment @user\n"
-            "Mention someone directly so I know who to compliment."
-        )
-        return
-
+    target = _mentioned_target(update, context) or _display_user(update.effective_user)
     await update.message.reply_text(random.choice(COMPLIMENT_LINES).format(target=target))
 
 
