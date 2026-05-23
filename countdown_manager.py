@@ -180,3 +180,180 @@ def get_fate_board(chat_id: int, date_str: str) -> dict:
     except Exception as e:
         logger.error("Redis fateboard read error for chat %s: %s", chat_id, e)
         return {}
+
+
+# ─────────────────────────────────────────────
+# Quote archive (per chat)
+# Redis key: quotes:<chat_id>  →  JSON list of quote dicts
+# Capped at 100 quotes per chat, no TTL (persistent)
+# ─────────────────────────────────────────────
+_QUOTES_MAX = 100
+
+
+def _quotes_key(chat_id: int) -> str:
+    return f"quotes:{chat_id}"
+
+
+def save_quote(chat_id: int, author_name: str, text: str, saved_by_name: str) -> int:
+    """Append a quote. Returns the new total count."""
+    key = _quotes_key(chat_id)
+    try:
+        raw = redis.get(key)
+        quotes = _decode_chat_data(raw) if raw else []
+        if not isinstance(quotes, list):
+            quotes = []
+        quotes.append({"author": author_name, "text": text, "saved_by": saved_by_name})
+        quotes = quotes[-_QUOTES_MAX:]
+        redis.set(key, json.dumps(quotes, separators=(",", ":")))
+        return len(quotes)
+    except Exception as e:
+        logger.error("Redis quote save error for chat %s: %s", chat_id, e)
+        return 0
+
+
+def get_random_quote(chat_id: int) -> Optional[dict]:
+    """Return a random quote dict or None."""
+    import random as _random
+    key = _quotes_key(chat_id)
+    try:
+        raw = redis.get(key)
+        if not raw:
+            return None
+        quotes = _decode_chat_data(raw)
+        if not isinstance(quotes, list) or not quotes:
+            return None
+        return _random.choice(quotes)
+    except Exception as e:
+        logger.error("Redis quote read error for chat %s: %s", chat_id, e)
+        return None
+
+
+def get_quote_count(chat_id: int) -> int:
+    key = _quotes_key(chat_id)
+    try:
+        raw = redis.get(key)
+        if not raw:
+            return 0
+        quotes = _decode_chat_data(raw)
+        return len(quotes) if isinstance(quotes, list) else 0
+    except Exception:
+        return 0
+
+
+# ─────────────────────────────────────────────
+# Ship pair leaderboard (per chat)
+# Redis key: ship_pairs:<chat_id>  →  JSON dict
+# {pair_key: {label_a, label_b, score}}
+# ─────────────────────────────────────────────
+def _ship_pairs_key(chat_id: int) -> str:
+    return f"ship_pairs:{chat_id}"
+
+
+def save_ship_pair(
+    chat_id: int, pair_key: str, label_a: str, label_b: str, score: float
+) -> None:
+    key = _ship_pairs_key(chat_id)
+    try:
+        raw = redis.get(key)
+        pairs = _decode_chat_data(raw) if raw else {}
+        pairs[pair_key] = {"label_a": label_a, "label_b": label_b, "score": score}
+        redis.set(key, json.dumps(pairs, separators=(",", ":")))
+    except Exception as e:
+        logger.error("Redis ship pair save error for chat %s: %s", chat_id, e)
+
+
+def get_top_ship_pairs(chat_id: int, limit: int = 5) -> list:
+    key = _ship_pairs_key(chat_id)
+    try:
+        raw = redis.get(key)
+        if not raw:
+            return []
+        pairs = _decode_chat_data(raw)
+        return sorted(pairs.values(), key=lambda x: x["score"], reverse=True)[:limit]
+    except Exception as e:
+        logger.error("Redis ship pairs read error for chat %s: %s", chat_id, e)
+        return []
+
+
+# ─────────────────────────────────────────────
+# Fate streak (per user)
+# Redis key: fate_streak:<user_id>  →  {date, streak, category}
+# category: "lucky" | "unlucky" | "neutral"
+# TTL: 49 hours — resets if you miss a day
+# ─────────────────────────────────────────────
+_STREAK_TTL = 60 * 60 * 49  # 49 hours
+
+
+def _streak_key(user_id: int) -> str:
+    return f"fate_streak:{user_id}"
+
+
+def update_fate_streak(user_id: int, date_str: str, tier_category: str) -> int:
+    """Update streak and return the new count."""
+    from datetime import date as _date, timedelta
+    key = _streak_key(user_id)
+    try:
+        raw = redis.get(key)
+        data = _decode_chat_data(raw) if raw else {}
+
+        today = _date.fromisoformat(date_str)
+        yesterday_str = (today - timedelta(days=1)).isoformat()
+
+        if data.get("date") == date_str:
+            # Already logged today, return existing streak
+            return data.get("streak", 1)
+        elif data.get("date") == yesterday_str and data.get("category") == tier_category:
+            streak = data.get("streak", 1) + 1
+        else:
+            streak = 1
+
+        new_data = {"date": date_str, "streak": streak, "category": tier_category}
+        redis.set(key, json.dumps(new_data, separators=(",", ":")))
+        redis.expire(key, _STREAK_TTL)
+        return streak
+    except Exception as e:
+        logger.error("Redis streak update error for user %s: %s", user_id, e)
+        return 1
+
+
+def get_fate_streak(user_id: int) -> tuple:
+    """Return (streak_count, category). streak_count=0 if none."""
+    key = _streak_key(user_id)
+    try:
+        raw = redis.get(key)
+        if not raw:
+            return 0, "neutral"
+        data = _decode_chat_data(raw)
+        return data.get("streak", 0), data.get("category", "neutral")
+    except Exception as e:
+        logger.error("Redis streak read error for user %s: %s", user_id, e)
+        return 0, "neutral"
+
+
+# ─────────────────────────────────────────────
+# Seen users (per chat) — for /mvp
+# Redis key: seen_users:<chat_id>  →  {user_id_str: name}
+# ─────────────────────────────────────────────
+def _seen_key(chat_id: int) -> str:
+    return f"seen_users:{chat_id}"
+
+
+def track_seen_user(chat_id: int, user_id: int, name: str) -> None:
+    key = _seen_key(chat_id)
+    try:
+        raw = redis.get(key)
+        users = _decode_chat_data(raw) if raw else {}
+        users[str(user_id)] = name
+        redis.set(key, json.dumps(users, separators=(",", ":")))
+    except Exception as e:
+        logger.error("Redis seen user track error for chat %s: %s", chat_id, e)
+
+
+def get_seen_users(chat_id: int) -> dict:
+    key = _seen_key(chat_id)
+    try:
+        raw = redis.get(key)
+        return _decode_chat_data(raw) if raw else {}
+    except Exception as e:
+        logger.error("Redis seen users read error for chat %s: %s", chat_id, e)
+        return {}

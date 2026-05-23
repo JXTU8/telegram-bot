@@ -44,6 +44,7 @@ import logging
 import os
 import random
 import asyncio
+import re
 from datetime import date, datetime
 from time import monotonic
 
@@ -68,6 +69,15 @@ from countdown_manager import (
     countdown_exists,
     save_fate_entry,
     get_fate_board,
+    save_quote,
+    get_random_quote,
+    get_quote_count,
+    save_ship_pair,
+    get_top_ship_pairs,
+    update_fate_streak,
+    get_fate_streak,
+    track_seen_user,
+    get_seen_users,
 )
 from keep_alive import keep_alive
 
@@ -254,26 +264,39 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/listcountdown — see all active countdowns in this group\n"
         "/removecountdown <name> — remove a countdown by name\n\n"
         "🎲 *Decisions*\n"
-        "/choose — can't decide? let the bot pick for you\n"
-        "/rank topic: item1, item2, item3 — randomly rank things\n\n"
+        "/choose — can't decide? let the bot pick for you (guided)\n"
+        "/decide opt1, opt2, opt3 — instant pick, no back and forth\n"
+        "/rank topic: item1, item2, item3 — randomly rank things\n"
+        "/poll question: opt1, opt2 — send a native Telegram poll\n\n"
         "🤖 *AI*\n"
         "/ask <question> — search the web + ask AI anything\n"
-        "/8ball <question> — magic 8-ball powered by AI\n\n"
+        "/8ball <question> — magic 8-ball powered by AI\n"
+        "/hot <anything> — rate anything out of 100\n\n"
         "🔮 *Daily Fate*\n"
         "/fate — check your personal daily luck (resets at midnight MYT)\n"
         "/fateboard — today's fate leaderboard for the group\n"
+        "/fatestreak — see how many days in a row your fate has stayed lucky or unlucky\n"
         "/luck @user — check someone's daily luck score\n\n"
         "🎉 *Fun*\n"
-        "/ship @user1 @user2 — compatibility percentage (resets daily)\n"
+        "/ship @user1 @user2 — compatibility percentage (permanent score per pair)\n"
+        "/shipleaderboard — top 5 most compatible pairs in this chat\n"
         "/roast @user — personalised AI roast\n"
         "/compliment @user — personalised AI compliment\n"
         "/vibecheck — group mood score (shifts morning / afternoon / night)\n"
+        "/mvp — today's most valuable group member\n"
         "/truth — random truth question\n"
         "/dare — random dare\n"
         "/wouldyourather — random would you rather\n"
         "/coinflip — heads or tails\n"
         "/curse @user — fake daily curse\n"
         "/bless @user — fake daily blessing\n\n"
+        "💬 *Quotes*\n"
+        "/quote — reply to any message to save it to the archive\n"
+        "/quote @user their words — save a quote manually\n"
+        "/quotes — pull a random saved quote\n\n"
+        "⏰ *Reminders*\n"
+        "/remind in 10min do something — personal one-shot reminder\n"
+        "/remind in 2h check the oven — supports min and h\n\n"
         "⚙️ *Other*\n"
         "/cancel — cancel the current /addcountdown or /choose flow\n"
         "/help — show this menu",
@@ -907,13 +930,25 @@ def _get_fate(user_id: int):
     return score, "🌤️ Neutral", "Just another day."
 
 
+def _tier_category(score: int) -> str:
+    if score >= 65 or score == 999:
+        return "lucky"
+    if score <= 35 or score == -999:
+        return "unlucky"
+    return "neutral"
+
+
 async def fate_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     user_id = user.id
     username = user.first_name or user.username or "You"
 
     score, tier, message = _get_fate(user_id)
+    today_str = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
+
     _remember_fate(update.effective_chat.id, user_id, username, score, tier)
+    update_fate_streak(user_id, today_str, _tier_category(score))
+    track_seen_user(update.effective_chat.id, user_id, username)
 
     if score == 999:
         score_display = "999 ⚡ MAXIMUM"
@@ -1263,6 +1298,15 @@ async def ship_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     rng = _stable_rng("ship", normalized[0], normalized[1])
     score = rng.randint(0, 10000) / 100
 
+    # Persist pair for leaderboard
+    pair_key = f"{normalized[0]}:{normalized[1]}"
+    save_ship_pair(update.effective_chat.id, pair_key, target_a, target_b, score)
+
+    # Track users if we have real user objects
+    for t in targets:
+        if t.get("user_id"):
+            track_seen_user(update.effective_chat.id, t["user_id"], t["label"])
+
     await update.message.reply_text(
         f"💞 Ship Result\n"
         f"{target_a} x {target_b}\n\n"
@@ -1479,6 +1523,302 @@ async def bless_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 # ---------------------------------------------
+# /decide — instant single-command pick
+# ---------------------------------------------
+async def decide_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    text = _arg_text(context)
+    if not text:
+        await update.message.reply_text(
+            "Usage: /decide option1, option2, option3\n"
+            "Example: /decide pizza, burger, sushi"
+        )
+        return
+
+    options = [o.strip() for o in text.split(",") if o.strip()]
+    if len(options) < 2:
+        await update.message.reply_text(
+            "Give me at least 2 options separated by commas.\n"
+            "Example: /decide sleep, study, both"
+        )
+        return
+
+    chosen = random.choice(options)
+    verdict = random.choice(VERDICT_LINES)
+    await update.message.reply_text(f"🎯 {chosen}\n{verdict}")
+
+
+# ---------------------------------------------
+# /poll — native Telegram poll
+# ---------------------------------------------
+async def poll_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    text = _arg_text(context)
+    if not text or ":" not in text:
+        await update.message.reply_text(
+            "Usage: /poll question: option1, option2, option3\n"
+            "Example: /poll Where to makan?: McD, KFC, Mamak"
+        )
+        return
+
+    question, opts_text = text.split(":", 1)
+    question = question.strip()
+    options = [o.strip() for o in opts_text.split(",") if o.strip()]
+
+    if not question:
+        await update.message.reply_text("The question can't be empty.")
+        return
+    if len(options) < 2:
+        await update.message.reply_text("Give at least 2 options separated by commas.")
+        return
+
+    options = options[:10]  # Telegram max is 10
+    await context.bot.send_poll(
+        chat_id=update.effective_chat.id,
+        question=question[:300],
+        options=[o[:100] for o in options],
+        is_anonymous=False,
+    )
+
+
+# ---------------------------------------------
+# /remind — one-shot personal reminder
+# ---------------------------------------------
+_REMIND_RE = re.compile(
+    r"in\s+(\d+)\s*(m(?:in(?:utes?)?)?|h(?:ours?|rs?)?)",
+    re.IGNORECASE,
+)
+
+
+async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    text = _arg_text(context)
+    if not text:
+        await update.message.reply_text(
+            "Usage: /remind in <time> <what>\n"
+            "Examples:\n"
+            "• /remind in 10min check the oven\n"
+            "• /remind in 2h submit the report"
+        )
+        return
+
+    match = _REMIND_RE.search(text)
+    if not match:
+        await update.message.reply_text(
+            "Couldn't parse the time. Try:\n"
+            "/remind in 10min take a break\n"
+            "/remind in 2h check dinner"
+        )
+        return
+
+    amount = int(match.group(1))
+    unit = match.group(2)[0].lower()
+    seconds = amount * (3600 if unit == "h" else 60)
+    label = f"{amount}h" if unit == "h" else f"{amount}min"
+
+    if seconds < 60:
+        await update.message.reply_text("Minimum reminder time is 1 minute.")
+        return
+    if seconds > 86400:
+        await update.message.reply_text("Maximum reminder time is 24 hours.")
+        return
+
+    # Everything after the time expression is the reminder body
+    reminder_text = text[match.end():].strip().lstrip("to").strip()
+    if not reminder_text:
+        reminder_text = "You asked me to remind you of something!"
+
+    user = update.effective_user
+    chat_id = update.effective_chat.id
+    user_mention = user.mention_html() if user else "Hey"
+
+    async def _fire(ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        await ctx.bot.send_message(
+            chat_id=chat_id,
+            text=f"⏰ Reminder for {user_mention}!\n{reminder_text}",
+            parse_mode="HTML",
+        )
+
+    context.application.job_queue.run_once(_fire, when=seconds, chat_id=chat_id)
+    await update.message.reply_text(f"⏰ Got it! I'll remind you in {label}.")
+
+
+# ---------------------------------------------
+# /quote — save a quote; /quotes — fetch one
+# ---------------------------------------------
+async def quote_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.message
+    replied = message.reply_to_message
+    saved_by = _display_user(update.effective_user)
+
+    if replied and replied.from_user and replied.text:
+        author = _display_user(replied.from_user)
+        text = replied.text
+    elif context.args:
+        mentioned = _mentioned_target(update, context)
+        full_text = _arg_text(context)
+        if mentioned and mentioned != _display_user(update.effective_user):
+            author = mentioned
+            # Strip the leading @mention token from the text
+            parts = full_text.split(None, 1)
+            text = parts[1].strip() if len(parts) > 1 else ""
+        else:
+            author = "Anonymous"
+            text = full_text
+    else:
+        await message.reply_text(
+            "Usage:\n"
+            "• Reply to a message with /quote to save it\n"
+            "• /quote @user their memorable words"
+        )
+        return
+
+    if not text:
+        await message.reply_text("The quote can't be empty!")
+        return
+
+    count = save_quote(update.effective_chat.id, author, text, saved_by)
+    await message.reply_text(f'💬 Saved!\n"{text}" — {author}\n_(#{count} in this chat)_', parse_mode="Markdown")
+
+
+async def quotes_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = get_random_quote(update.effective_chat.id)
+    if not q:
+        await update.message.reply_text(
+            "No quotes saved yet. Reply to any message with /quote to start the archive!"
+        )
+        return
+    await update.message.reply_text(
+        f'💬 *"{q["text"]}"*\n— {q["author"]}\n_(saved by {q["saved_by"]})_',
+        parse_mode="Markdown",
+    )
+
+
+# ---------------------------------------------
+# /shipleaderboard — top pairs by compatibility
+# ---------------------------------------------
+async def shipleaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    pairs = get_top_ship_pairs(update.effective_chat.id)
+    if not pairs:
+        await update.message.reply_text(
+            "No ships logged yet. Use /ship @user1 @user2 to get started!"
+        )
+        return
+
+    medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"]
+    lines = ["💞 *Ship Leaderboard — Most Compatible Pairs*\n"]
+    for i, pair in enumerate(pairs):
+        medal = medals[i] if i < len(medals) else f"{i + 1}."
+        lines.append(f"{medal} {pair['label_a']} x {pair['label_b']} — {pair['score']:.2f}%")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+# ---------------------------------------------
+# /fatestreak — consecutive days on same fate tier
+# ---------------------------------------------
+async def fatestreak_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    name = user.first_name or user.username or "You"
+    streak, category = get_fate_streak(user.id)
+
+    if streak < 2:
+        await update.message.reply_text(
+            f"🔥 {name} has no streak yet.\nUse /fate daily to build one!"
+        )
+        return
+
+    emoji = {"lucky": "✨", "unlucky": "💀", "neutral": "🌤️"}.get(category, "🎲")
+    await update.message.reply_text(
+        f"🔥 *Fate Streak — {name}*\n"
+        f"{emoji} *{streak} day(s)* in a row of {category} fate!",
+        parse_mode="Markdown",
+    )
+
+
+# ---------------------------------------------
+# /mvp — daily random MVP from seen users
+# ---------------------------------------------
+MVP_LINES = [
+    "The data is in. The vibe is certified.",
+    "Chosen by the algorithm. No debates.",
+    "Today's main character. Uncontested.",
+    "The group would not be the same without this one.",
+    "Carrying the group energy on their back. Respect.",
+    "Statistically, the most needed person in this chat today.",
+    "The universe picked. We just announced it.",
+    "Undefeated. Unbothered. MVP.",
+]
+
+
+async def mvp_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    users = get_seen_users(chat_id)
+
+    if not users:
+        await update.message.reply_text(
+            "No users tracked yet! Everyone needs to use at least one command first."
+        )
+        return
+
+    today_str = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
+    rng = random.Random(f"mvp:{chat_id}:{today_str}")
+    winner_id = rng.choice(list(users.keys()))
+    winner_name = users[winner_id]
+
+    await update.message.reply_text(
+        f"🏆 *Today's MVP — {winner_name}*\n"
+        f"{rng.choice(MVP_LINES)}",
+        parse_mode="Markdown",
+    )
+
+
+# ---------------------------------------------
+# /hot — hot or not rating for anything
+# ---------------------------------------------
+HOT_VERDICTS = [
+    (15,  "🧊 Absolutely not. Ice cold."),
+    (35,  "😬 Not great. The vibes said no."),
+    (55,  "🤔 Debatable. The jury is split."),
+    (75,  "🔥 Lowkey hot. Solid choice."),
+    (90,  "🌶️ Very hot. The group approves."),
+    (100, "💥 MAXIMUM HOT. Undeniably elite."),
+]
+
+
+async def hot_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    text = _arg_text(context)
+    if not text:
+        await update.message.reply_text(
+            "Usage: /hot <anything>\nExample: /hot sleeping through alarms"
+        )
+        return
+
+    today_str = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
+    rng = random.Random(f"hot:{_normalize_target(text)}:{today_str}")
+    score = rng.randint(0, 100)
+    fallback = next(v for limit, v in HOT_VERDICTS if score <= limit)
+
+    if groq_client:
+        try:
+            prompt = (
+                f"Rate '{text}' in one short punchy sentence. "
+                f"The score is {score}/100 — match that energy. "
+                "Be funny. Plain text only. No intro."
+            )
+            verdict = await asyncio.to_thread(_call_groq_fun, prompt)
+        except Exception as e:
+            logger.warning("Groq hot command failed: %s", e)
+            verdict = fallback
+    else:
+        verdict = fallback
+
+    await update.message.reply_text(
+        f"🌡️ *Hot or Not — {text}*\n"
+        f"Score: {score}/100\n"
+        f"{verdict}",
+        parse_mode="Markdown",
+    )
+
+
+# ---------------------------------------------
 # Main
 # ---------------------------------------------
 def main() -> None:
@@ -1535,6 +1875,15 @@ def main() -> None:
     app.add_handler(CommandHandler("fateboard", fateboard_command))
     app.add_handler(CommandHandler("curse", curse_command))
     app.add_handler(CommandHandler("bless", bless_command))
+    app.add_handler(CommandHandler("decide", decide_command))
+    app.add_handler(CommandHandler("poll", poll_command))
+    app.add_handler(CommandHandler("remind", remind_command))
+    app.add_handler(CommandHandler("quote", quote_command))
+    app.add_handler(CommandHandler("quotes", quotes_command))
+    app.add_handler(CommandHandler("shipleaderboard", shipleaderboard_command))
+    app.add_handler(CommandHandler("fatestreak", fatestreak_command))
+    app.add_handler(CommandHandler("mvp", mvp_command))
+    app.add_handler(CommandHandler("hot", hot_command))
 
     logger.info("Bot is running...")
     app.run_polling()
