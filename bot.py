@@ -1440,14 +1440,12 @@ async def fateboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 async def curse_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     target = _target_from_mention_or_sender(update, context)
-    rng = _daily_rng("curse", update.effective_chat.id, _normalize_target(target))
-    await update.message.reply_text(rng.choice(CURSE_LINES).format(target=target))
+    await update.message.reply_text(random.choice(CURSE_LINES).format(target=target))
 
 
 async def bless_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     target = _target_from_mention_or_sender(update, context)
-    rng = _daily_rng("bless", update.effective_chat.id, _normalize_target(target))
-    await update.message.reply_text(rng.choice(BLESS_LINES).format(target=target))
+    await update.message.reply_text(random.choice(BLESS_LINES).format(target=target))
 
 
 # ---------------------------------------------
