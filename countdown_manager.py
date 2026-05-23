@@ -138,3 +138,45 @@ def get_all_chats() -> dict:
     except Exception as e:
         logger.error("Redis get_all_chats error: %s", e)
         return {}
+
+
+# ─────────────────────────────────────────────
+# Fateboard persistence (per chat, per day)
+# Redis key: fateboard:<chat_id>:<YYYY-MM-DD>
+# TTL: 2 days so it auto-cleans itself
+# ─────────────────────────────────────────────
+_FATEBOARD_TTL = 60 * 60 * 48  # 48 hours
+
+
+def _fb_key(chat_id: int, date_str: str) -> str:
+    return f"fateboard:{chat_id}:{date_str}"
+
+
+def save_fate_entry(
+    chat_id: int,
+    date_str: str,
+    user_id: int,
+    name: str,
+    score: int,
+    tier: str,
+) -> None:
+    """Upsert one user's fate result into today's board for this chat."""
+    key = _fb_key(chat_id, date_str)
+    try:
+        raw = redis.get(key)
+        board = _decode_chat_data(raw)
+        board[str(user_id)] = {"name": name, "score": score, "tier": tier}
+        redis.set(key, json.dumps(board, separators=(",", ":")))
+        redis.expire(key, _FATEBOARD_TTL)
+    except Exception as e:
+        logger.error("Redis fateboard write error for chat %s: %s", chat_id, e)
+
+
+def get_fate_board(chat_id: int, date_str: str) -> dict:
+    """Return {user_id_str: {name, score, tier}} for today's board."""
+    key = _fb_key(chat_id, date_str)
+    try:
+        return _decode_chat_data(redis.get(key))
+    except Exception as e:
+        logger.error("Redis fateboard read error for chat %s: %s", chat_id, e)
+        return {}
