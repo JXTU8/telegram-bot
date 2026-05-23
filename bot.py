@@ -1070,6 +1070,38 @@ def _target_from_args_or_reply(
     return fallback
 
 
+def _mentioned_target(update: Update) -> str:
+    message = update.message
+    if not message:
+        return ""
+
+    for entity in message.entities or []:
+        if entity.type not in ("mention", "text_mention"):
+            continue
+
+        if getattr(entity, "user", None):
+            return _display_user(entity.user)
+
+        return message.parse_entity(entity)
+
+    return ""
+
+
+def _target_from_mention_or_reply(
+    update: Update,
+    fallback: str = "",
+) -> str:
+    mentioned = _mentioned_target(update)
+    if mentioned:
+        return mentioned
+
+    replied = update.message.reply_to_message
+    if replied and replied.from_user:
+        return _display_user(replied.from_user)
+
+    return fallback
+
+
 def _extract_ship_targets(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = _arg_text(context)
     replied = update.message.reply_to_message
@@ -1105,26 +1137,7 @@ def _extract_ship_targets(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return []
 
 
-async def _is_group_creator_target(target: dict, update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    username = target.get("username")
-    if not username or update.effective_chat.type == "private":
-        return False
-
-    try:
-        admins = await context.bot.get_chat_administrators(update.effective_chat.id)
-    except Exception as e:
-        logger.debug("Could not check chat creator for /ship: %s", e)
-        return False
-
-    for admin in admins:
-        admin_username = (admin.user.username or "").casefold()
-        if admin.status == "creator" and admin_username == username:
-            return True
-
-    return False
-
-
-async def _is_protected_ship_target(target: dict, update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+async def _is_protected_ship_target(target: dict) -> bool:
     if BOT_OWNER_ID and target.get("user_id") == BOT_OWNER_ID:
         return True
 
@@ -1132,7 +1145,7 @@ async def _is_protected_ship_target(target: dict, update: Update, context: Conte
     if username in BOT_OWNER_USERNAMES:
         return True
 
-    return await _is_group_creator_target(target, update, context)
+    return False
 
 
 def _ship_comment(score: float) -> str:
@@ -1152,7 +1165,7 @@ async def ship_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     for target in targets:
-        if await _is_protected_ship_target(target, update, context):
+        if await _is_protected_ship_target(target):
             await update.message.reply_text(random.choice(SHIP_OWNER_BLOCK_LINES))
             return
 
@@ -1180,9 +1193,12 @@ async def ship_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def roast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    target = _target_from_args_or_reply(update, context)
+    target = _target_from_mention_or_reply(update)
     if not target:
-        await update.message.reply_text("Usage: /roast @user")
+        await update.message.reply_text(
+            "Usage: /roast @user\n"
+            "Or reply to someone's message with /roast"
+        )
         return
 
     await update.message.reply_text(random.choice(ROAST_LINES).format(target=target))
