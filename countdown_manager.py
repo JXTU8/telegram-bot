@@ -163,11 +163,15 @@ def save_fate_entry(
     """Upsert one user's fate result into today's board for this chat."""
     key = _fb_key(chat_id, date_str)
     try:
-        raw = redis.get(key)
-        board = _decode_chat_data(raw)
+        try:
+            raw = redis.get(key)
+        except Exception:
+            raw = None
+        board = _decode_chat_data(raw) if raw is not None else {}
         board[str(user_id)] = {"name": name, "score": score, "tier": tier}
-        redis.set(key, json.dumps(board, separators=(",", ":")))
-        redis.expire(key, _FATEBOARD_TTL)
+        # Atomic write + TTL in a single REST call (no separate expire)
+        redis.set(key, json.dumps(board, separators=(",", ":")), ex=_FATEBOARD_TTL)
+        logger.info("Fateboard saved for chat %s user %s score %s", chat_id, user_id, score)
     except Exception as e:
         logger.error("Redis fateboard write error for chat %s: %s", chat_id, e)
 
@@ -176,7 +180,10 @@ def get_fate_board(chat_id: int, date_str: str) -> dict:
     """Return {user_id_str: {name, score, tier}} for today's board."""
     key = _fb_key(chat_id, date_str)
     try:
-        return _decode_chat_data(redis.get(key))
+        raw = redis.get(key)
+        if raw is None:
+            return {}
+        return _decode_chat_data(raw)
     except Exception as e:
         logger.error("Redis fateboard read error for chat %s: %s", chat_id, e)
         return {}
