@@ -212,7 +212,7 @@ def save_quote(chat_id: int, author_name: str, text: str, saved_by_name: str) ->
 
 
 def get_random_quote(chat_id: int) -> Optional[dict]:
-    """Return a random quote dict or None."""
+    """Return a random quote dict (with 1-based 'index' key) or None."""
     import random as _random
     key = _quotes_key(chat_id)
     try:
@@ -222,10 +222,49 @@ def get_random_quote(chat_id: int) -> Optional[dict]:
         quotes = _decode_chat_data(raw)
         if not isinstance(quotes, list) or not quotes:
             return None
-        return _random.choice(quotes)
+        idx = _random.randrange(len(quotes))
+        q = dict(quotes[idx])
+        q["index"] = idx + 1  # 1-based for display
+        return q
     except Exception as e:
         logger.error("Redis quote read error for chat %s: %s", chat_id, e)
         return None
+
+
+def get_all_quotes(chat_id: int) -> list:
+    """Return all quotes as a list."""
+    key = _quotes_key(chat_id)
+    try:
+        raw = redis.get(key)
+        if not raw:
+            return []
+        quotes = _decode_chat_data(raw)
+        return quotes if isinstance(quotes, list) else []
+    except Exception as e:
+        logger.error("Redis quotes list error for chat %s: %s", chat_id, e)
+        return []
+
+
+def delete_quote(chat_id: int, index: int) -> tuple:
+    """
+    Delete quote by 1-based index.
+    Returns (success: bool, message: str).
+    """
+    key = _quotes_key(chat_id)
+    try:
+        raw = redis.get(key)
+        quotes = _decode_chat_data(raw) if raw else []
+        if not isinstance(quotes, list) or not quotes:
+            return False, "❌ No quotes saved yet."
+        if index < 1 or index > len(quotes):
+            return False, f"❌ Quote #{index} doesn't exist. There are {len(quotes)} quote(s)."
+        removed = quotes.pop(index - 1)
+        redis.set(key, json.dumps(quotes, separators=(",", ":")))
+        preview = removed["text"][:60] + ("…" if len(removed["text"]) > 60 else "")
+        return True, f'🗑️ Deleted quote #{index}: *"{preview}"* — {removed["author"]}'
+    except Exception as e:
+        logger.error("Redis quote delete error for chat %s: %s", chat_id, e)
+        return False, "❌ Something went wrong while deleting the quote."
 
 
 def get_quote_count(chat_id: int) -> int:
