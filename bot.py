@@ -66,6 +66,8 @@ from countdown_manager import (
     get_all_chats,
     remove_countdown,
     countdown_exists,
+    save_fate_entry,
+    get_fate_board,
 )
 from keep_alive import keep_alive
 
@@ -247,41 +249,34 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "📌 *Available Commands*\n\n"
-        "/addcountdown\n"
-        "→ Add a new countdown (bot guides you step by step)\n\n"
-        "/listcountdown\n"
-        "→ Show all active countdowns in this group\n\n"
-        "/removecountdown <name>\n"
-        "→ Remove a countdown by name\n\n"
-        "/choose\n"
-        "→ Can't decide? Let the bot pick for you!\n\n"
-        "/ask <question>\n"
-        "→ Ask AI anything\n\n"
-        "/fate\n"
-        "→ Check your daily luck prediction\n\n"
-        "🎉 *Fun Commands*\n\n"
-        "/ship @user1 @user2\n"
-        "→ Compatibility percentage\n\n"
-        "/roast @user\n"
-        "→ Friendly roast\n\n"
-        "/compliment @user\n"
-        "→ Random compliment\n\n"
-        "/vibecheck\n"
-        "→ Check the group mood\n\n"
-        "/rank topic: item1, item2, item3\n"
-        "→ Randomly rank things\n\n"
-        "/truth, /dare, /wouldyourather\n"
-        "→ Party prompts\n\n"
-        "/coinflip, /8ball <question>\n"
-        "→ Quick decisions\n\n"
-        "/luck @user, /fateboard\n"
-        "→ Luck check and leaderboard\n\n"
-        "/curse, /bless\n"
-        "→ Fake daily curse or blessing\n\n"
-        "/cancel\n"
-        "→ Cancel the current flow\n\n"
-        "/help\n"
-        "→ Show this menu",
+        "⏱ *Countdown*\n"
+        "/addcountdown — add a new countdown (guided, step by step)\n"
+        "/listcountdown — see all active countdowns in this group\n"
+        "/removecountdown <name> — remove a countdown by name\n\n"
+        "🎲 *Decisions*\n"
+        "/choose — can't decide? let the bot pick for you\n"
+        "/rank topic: item1, item2, item3 — randomly rank things\n\n"
+        "🤖 *AI*\n"
+        "/ask <question> — search the web + ask AI anything\n"
+        "/8ball <question> — magic 8-ball powered by AI\n\n"
+        "🔮 *Daily Fate*\n"
+        "/fate — check your personal daily luck (resets at midnight MYT)\n"
+        "/fateboard — today's fate leaderboard for the group\n"
+        "/luck @user — check someone's daily luck score\n\n"
+        "🎉 *Fun*\n"
+        "/ship @user1 @user2 — compatibility percentage (resets daily)\n"
+        "/roast @user — personalised AI roast\n"
+        "/compliment @user — personalised AI compliment\n"
+        "/vibecheck — group mood score (shifts morning / afternoon / night)\n"
+        "/truth — random truth question\n"
+        "/dare — random dare\n"
+        "/wouldyourather — random would you rather\n"
+        "/coinflip — heads or tails\n"
+        "/curse @user — fake daily curse\n"
+        "/bless @user — fake daily blessing\n\n"
+        "⚙️ *Other*\n"
+        "/cancel — cancel the current /addcountdown or /choose flow\n"
+        "/help — show this menu",
         parse_mode="Markdown",
     )
 
@@ -684,6 +679,7 @@ async def received_options(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await _delete_tracked(context)
     context.user_data.clear()
     await update.message.reply_text("❌ Cancelled.")
     return ConversationHandler.END
@@ -881,22 +877,9 @@ FATE_EXTREME_UNLUCKY_MESSAGES = [
     "MAXIMUM CURSE DETECTED. Even the laws of physics are against you today. We recommend staying very very still.",
 ]
 
-FATE_BOARD = {}
-
-
 def _remember_fate(chat_id: int, user_id: int, name: str, score: int, tier: str) -> None:
     today_str = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
-    chat_board = FATE_BOARD.setdefault(chat_id, {"date": today_str, "users": {}})
-
-    if chat_board["date"] != today_str:
-        chat_board["date"] = today_str
-        chat_board["users"] = {}
-
-    chat_board["users"][user_id] = {
-        "name": name,
-        "score": score,
-        "tier": tier,
-    }
+    save_fate_entry(chat_id, today_str, user_id, name, score, tier)
 
 
 def _get_fate(user_id: int):
@@ -1290,16 +1273,50 @@ async def ship_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def roast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     target = _target_from_mention_or_sender(update, context)
-    await update.message.reply_text(random.choice(ROAST_LINES).format(target=target))
+    fallback = random.choice(ROAST_LINES).format(target=target)
+    if not groq_client:
+        await update.message.reply_text(fallback)
+        return
+    try:
+        prompt = (
+            f"Write one short, playful, friendly roast for someone named '{target}' in a Telegram group chat. "
+            "Use their name. Keep it funny and harmless, not mean. One sentence only."
+        )
+        result = await asyncio.to_thread(_call_groq_fun, prompt)
+        await update.message.reply_text(result)
+    except Exception as e:
+        logger.warning("Groq roast failed: %s", e)
+        await update.message.reply_text(fallback)
 
 
 async def compliment_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     target = _target_from_mention_or_sender(update, context)
-    await update.message.reply_text(random.choice(COMPLIMENT_LINES).format(target=target))
+    fallback = random.choice(COMPLIMENT_LINES).format(target=target)
+    if not groq_client:
+        await update.message.reply_text(fallback)
+        return
+    try:
+        prompt = (
+            f"Write one short, warm, genuine compliment for someone named '{target}' in a Telegram group chat. "
+            "Use their name. Keep it wholesome and specific-sounding. One sentence only."
+        )
+        result = await asyncio.to_thread(_call_groq_fun, prompt)
+        await update.message.reply_text(result)
+    except Exception as e:
+        logger.warning("Groq compliment failed: %s", e)
+        await update.message.reply_text(fallback)
 
 
 async def vibecheck_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    rng = _daily_rng("vibecheck", update.effective_chat.id)
+    now = datetime.now(TIMEZONE)
+    hour = now.hour
+    if hour < 12:
+        period = "morning"
+    elif hour < 18:
+        period = "afternoon"
+    else:
+        period = "night"
+    rng = _daily_rng("vibecheck", update.effective_chat.id, period)
     score = rng.randint(0, 100)
     mood = next(message for limit, message in VIBE_TIERS if score <= limit)
 
@@ -1347,53 +1364,23 @@ async def rank_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def truth_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    fallback = random.choice(TRUTH_QUESTIONS)
-    if not groq_client:
-        await update.message.reply_text(f"🧃 Truth\n{fallback}")
-        return
-
-    try:
-        prompt = "Create one funny but answerable truth question for friends in a Telegram group chat."
-        truth = await asyncio.to_thread(_call_groq_fun, prompt)
-        await update.message.reply_text(f"🧃 Truth\n{truth}")
-    except Exception as e:
-        logger.warning("Groq truth command failed: %s", e)
-        await update.message.reply_text(f"🧃 Truth\n{fallback}")
+    await update.message.reply_text(f"🧃 Truth\n{random.choice(TRUTH_QUESTIONS)}")
 
 
 async def dare_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    fallback = random.choice(DARE_PROMPTS)
-    if not groq_client:
-        await update.message.reply_text(f"🎬 Dare\n{fallback}")
-        return
-
-    try:
-        prompt = "Create one playful, safe, non-harmful dare for friends in a Telegram group chat."
-        dare = await asyncio.to_thread(_call_groq_fun, prompt)
-        await update.message.reply_text(f"🎬 Dare\n{dare}")
-    except Exception as e:
-        logger.warning("Groq dare command failed: %s", e)
-        await update.message.reply_text(f"🎬 Dare\n{fallback}")
+    await update.message.reply_text(f"🎬 Dare\n{random.choice(DARE_PROMPTS)}")
 
 
 async def would_you_rather_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    fallback = random.choice(WOULD_YOU_RATHER_PROMPTS)
-    if not groq_client:
-        await update.message.reply_text(f"⚖️ Would You Rather\n{fallback}")
-        return
-
-    try:
-        prompt = "Create one funny would-you-rather question for friends in a Telegram group chat."
-        question = await asyncio.to_thread(_call_groq_fun, prompt)
-        await update.message.reply_text(f"⚖️ Would You Rather\n{question}")
-    except Exception as e:
-        logger.warning("Groq wouldyourather command failed: %s", e)
-        await update.message.reply_text(f"⚖️ Would You Rather\n{fallback}")
+    await update.message.reply_text(f"⚖️ Would You Rather\n{random.choice(WOULD_YOU_RATHER_PROMPTS)}")
 
 
 async def coinflip_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    msg = await update.message.reply_text("🪙 Flipping...")
+    await asyncio.sleep(1)
     result = random.choice(["Heads", "Tails"])
-    await update.message.reply_text(f"🪙 Coinflip: {result}")
+    icon = "🌕" if result == "Heads" else "🌑"
+    await msg.edit_text(f"🪙 Coinflip: {icon} {result}")
 
 
 async def eightball_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1432,27 +1419,44 @@ def _luck_result(key: str):
 
 
 async def luck_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    target = _target_from_mention_or_sender(update, context)
-    score, tier, message = _luck_result(_normalize_target(target))
+    message = update.message
+    # Try to get a stable user_id from a mention or reply
+    seed_key = None
+    for entity in (message.entities or []):
+        if entity.type == "text_mention" and getattr(entity, "user", None):
+            seed_key = str(entity.user.id)
+            target = _display_user(entity.user)
+            break
 
-    await update.message.reply_text(
+    if seed_key is None:
+        # Fall back to display name for @username mentions (no user object available)
+        target = _target_from_mention_or_sender(update, context)
+        # If it's the sender themselves, use their user_id for stability
+        if target == _display_user(update.effective_user):
+            seed_key = str(update.effective_user.id)
+        else:
+            seed_key = _normalize_target(target)
+
+    score, tier, message_text = _luck_result(seed_key)
+
+    await message.reply_text(
         f"🍀 Daily Luck — {target}\n"
         f"Tier: {tier}\n"
         f"Score: {score}/100\n"
-        f"{message}"
+        f"{message_text}"
     )
 
 
 async def fateboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     today_str = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
-    chat_board = FATE_BOARD.get(update.effective_chat.id)
+    board = get_fate_board(update.effective_chat.id, today_str)
 
-    if not chat_board or chat_board["date"] != today_str or not chat_board["users"]:
+    if not board:
         await update.message.reply_text("No fate scores yet today. Tell people to use /fate first.")
         return
 
     users = sorted(
-        chat_board["users"].values(),
+        board.values(),
         key=lambda item: item["score"],
         reverse=True,
     )
