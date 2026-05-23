@@ -66,8 +66,6 @@ from countdown_manager import (
     get_all_chats,
     remove_countdown,
     countdown_exists,
-    save_fate_entry,
-    get_fate_board,
 )
 from keep_alive import keep_alive
 
@@ -857,11 +855,22 @@ FATE_EXTREME_UNLUCKY_MESSAGES = [
     "MAXIMUM CURSE DETECTED. Even the laws of physics are against you today. We recommend staying very very still.",
 ]
 
+FATE_BOARD = {}
 
 
 def _remember_fate(chat_id: int, user_id: int, name: str, score: int, tier: str) -> None:
     today_str = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
-    save_fate_entry(chat_id, today_str, user_id, name, score, tier)
+    chat_board = FATE_BOARD.setdefault(chat_id, {"date": today_str, "users": {}})
+
+    if chat_board["date"] != today_str:
+        chat_board["date"] = today_str
+        chat_board["users"] = {}
+
+    chat_board["users"][user_id] = {
+        "name": name,
+        "score": score,
+        "tier": tier,
+    }
 
 
 def _get_fate(user_id: int):
@@ -895,9 +904,7 @@ async def fate_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     username = user.first_name or user.username or "You"
 
     score, tier, message = _get_fate(user_id)
-    asyncio.create_task(
-        asyncio.to_thread(_remember_fate, update.effective_chat.id, user_id, username, score, tier)
-    )
+    _remember_fate(update.effective_chat.id, user_id, username, score, tier)
 
     if score == 999:
         score_display = "999 ⚡ MAXIMUM"
@@ -1244,7 +1251,7 @@ async def ship_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
         return
 
-    rng = _stable_rng("ship", normalized[0], normalized[1])
+    rng = _daily_rng("ship", normalized[0], normalized[1])
     score = rng.randint(0, 10000) / 100
 
     await update.message.reply_text(
@@ -1412,16 +1419,14 @@ async def luck_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def fateboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     today_str = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
-    chat_id = update.effective_chat.id
+    chat_board = FATE_BOARD.get(update.effective_chat.id)
 
-    board = await asyncio.to_thread(get_fate_board, chat_id, today_str)
-
-    if not board:
+    if not chat_board or chat_board["date"] != today_str or not chat_board["users"]:
         await update.message.reply_text("No fate scores yet today. Tell people to use /fate first.")
         return
 
     users = sorted(
-        board.values(),
+        chat_board["users"].values(),
         key=lambda item: item["score"],
         reverse=True,
     )
@@ -1449,18 +1454,7 @@ async def bless_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 def main() -> None:
     keep_alive()
 
-    app = (
-        ApplicationBuilder()
-        .token(TOKEN)
-        .concurrent_updates(True)
-        .connection_pool_size(16)
-        .pool_timeout(30)
-        .connect_timeout(10)
-        .read_timeout(10)
-        .write_timeout(10)
-        .post_init(restore_jobs)
-        .build()
-    )
+    app = ApplicationBuilder().token(TOKEN).post_init(restore_jobs).build()
 
     countdown_conv = ConversationHandler(
         entry_points=[CommandHandler("addcountdown", add_countdown_start)],
