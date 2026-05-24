@@ -1650,13 +1650,15 @@ async def luck_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             break
 
     if seed_key is None:
-        # Fall back to display name for @username mentions (no user object available)
-        target = _target_from_mention_or_sender(update, context)
-        # If it's the sender themselves, use their user_id for stability
-        if target == _display_user(update.effective_user):
-            seed_key = str(update.effective_user.id)
+        mentioned = _mentioned_target(update, context)
+        if mentioned:
+            # @username mention with no user object — seed by normalized name
+            target = mentioned
+            seed_key = _normalize_target(mentioned)
         else:
-            seed_key = _normalize_target(target)
+            # No mention — user is checking their own luck; use user_id to match /fate
+            target = _display_user(update.effective_user)
+            seed_key = str(update.effective_user.id)
 
     score, tier, message_text = _luck_result(seed_key)
 
