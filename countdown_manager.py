@@ -11,7 +11,8 @@ Redis key structure:
       "target_date": "2025-12-31",
       "reminder_hour": 8,
       "reminder_minute": 30,
-      "created_by": 123456789
+      "created_by": 123456789,
+      "code": "a3k"
     },
     ...
   }
@@ -143,6 +144,14 @@ def get_countdown_by_code(chat_id: int, code: str) -> Optional[str]:
     return None
 
 
+def get_countdown_creator(chat_id: int, name: str) -> Optional[int]:
+    """Return the user_id of whoever created this countdown, or None."""
+    entry = _load_chat(chat_id).get(name)
+    if entry:
+        return entry.get("created_by")
+    return None
+
+
 def get_all_chats() -> dict:
     """
     Return all countdowns across all chats.
@@ -172,9 +181,10 @@ def get_all_chats() -> dict:
 # ─────────────────────────────────────────────
 # Fateboard persistence (per chat, per day)
 # Redis key: fateboard:<chat_id>:<YYYY-MM-DD>
-# TTL: 2 days so it auto-cleans itself
+# TTL: 25 hours — expires cleanly after each day,
+#      so yesterday's data never bleeds into today.
 # ─────────────────────────────────────────────
-_FATEBOARD_TTL = 60 * 60 * 48  # 48 hours
+_FATEBOARD_TTL = 60 * 60 * 25  # 25 hours (was 48 — now expires same-day + 1hr buffer)
 
 
 def _fb_key(chat_id: int, date_str: str) -> str:
@@ -432,3 +442,55 @@ def get_seen_users(chat_id: int) -> dict:
     except Exception as e:
         logger.error("Redis seen users read error for chat %s: %s", chat_id, e)
         return {}
+
+
+# ─────────────────────────────────────────────
+# Per-user reminder job count (for /remind spam cap)
+# Redis key: remind_count:<user_id>  →  int (TTL: 25h, resets daily)
+# ─────────────────────────────────────────────
+_REMIND_COUNT_TTL = 60 * 60 * 25  # 25 hours
+_REMIND_MAX_PER_USER = 10
+
+
+def _remind_count_key(user_id: int) -> str:
+    return f"remind_count:{user_id}"
+
+
+def increment_remind_count(user_id: int) -> int:
+    """
+    Increment and return the reminder count for this user.
+    The counter resets after 25 hours automatically.
+    """
+    key = _remind_count_key(user_id)
+    try:
+        new_val = redis.incr(key)
+        # Only set TTL on first increment so the window is fixed from first use
+        if new_val == 1:
+            redis.expire(key, _REMIND_COUNT_TTL)
+        return new_val
+    except Exception as e:
+        logger.error("Redis remind count error for user %s: %s", user_id, e)
+        return 1
+
+
+def get_remind_count(user_id: int) -> int:
+    """Return how many reminders this user has active in the current window."""
+    key = _remind_count_key(user_id)
+    try:
+        raw = redis.get(key)
+        if raw is None:
+            return 0
+        return int(raw)
+    except Exception:
+        return 0
+
+
+def decrement_remind_count(user_id: int) -> None:
+    """Call when a reminder fires, to free a slot for the user."""
+    key = _remind_count_key(user_id)
+    try:
+        current = get_remind_count(user_id)
+        if current > 0:
+            redis.decr(key)
+    except Exception as e:
+        logger.error("Redis remind decr error for user %s: %s", user_id, e)

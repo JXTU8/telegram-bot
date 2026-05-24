@@ -68,6 +68,7 @@ from countdown_manager import (
     remove_countdown,
     countdown_exists,
     get_countdown_by_code,
+    get_countdown_creator,
     save_fate_entry,
     get_fate_board,
     save_quote,
@@ -81,6 +82,10 @@ from countdown_manager import (
     get_top_ship_pairs,
     update_fate_streak,
     get_fate_streak,
+    increment_remind_count,
+    get_remind_count,
+    decrement_remind_count,
+    REMIND_MAX_PER_USER,
 )
 from keep_alive import keep_alive
 
@@ -111,7 +116,7 @@ else:
 ASK_NAME, ASK_DATE, ASK_TIME = range(3)
 ASK_DECISION, ASK_OPTIONS = range(3, 5)
 
-CONV_TIMEOUT = 30
+CONV_TIMEOUT = 90
 
 THINKING_MESSAGES = [
     "🎲 Rolling the dice...",
@@ -163,6 +168,78 @@ VERDICT_LINES = [
     "The timeline accepts this outcome.",
     "A decision has entered the arena.",
 ]
+
+
+
+# ---------------------------------------------
+# Helpers (grouped here for easy reference — fix 8)
+# ---------------------------------------------
+def _display_user(user) -> str:
+    return user.first_name or user.username or str(user.id)
+
+
+def _arg_text(context: ContextTypes.DEFAULT_TYPE) -> str:
+    return " ".join(context.args).strip()
+
+
+def _normalize_target(target: str) -> str:
+    return target.strip().lstrip("@").casefold()
+
+
+def _daily_rng(label: str, *parts):
+    today_str = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
+    seed = ":".join(str(part) for part in (label, today_str, *parts))
+    return random.Random(seed)
+
+
+def _stable_rng(label: str, *parts):
+    seed = ":".join(str(part) for part in (label, *parts))
+    return random.Random(seed)
+
+
+def _mentioned_target(update: Update, context: ContextTypes.DEFAULT_TYPE = None) -> str:
+    message = update.message
+    if not message:
+        return ""
+
+    ignored_usernames = set()
+    ignored_user_ids = set()
+    if context:
+        bot_username = getattr(context.bot, "username", None)
+        bot_id = getattr(context.bot, "id", None)
+        if bot_username:
+            ignored_usernames.add(bot_username.casefold())
+        if bot_id:
+            ignored_user_ids.add(bot_id)
+
+    for entity in message.entities or []:
+        if entity.type != "bot_command":
+            continue
+
+        command_text = message.parse_entity(entity)
+        if "@" in command_text:
+            ignored_usernames.add(command_text.split("@", 1)[1].casefold())
+
+    for entity in message.entities or []:
+        if entity.type not in ("mention", "text_mention"):
+            continue
+
+        if getattr(entity, "user", None):
+            if entity.user.id in ignored_user_ids:
+                continue
+            return _display_user(entity.user)
+
+        mention = message.parse_entity(entity)
+        if _normalize_target(mention) in ignored_usernames:
+            continue
+        return mention
+
+    return ""
+
+
+def _target_from_mention_or_sender(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
+    return _mentioned_target(update, context) or _display_user(update.effective_user)
+
 
 
 # ---------------------------------------------
@@ -227,10 +304,17 @@ def _schedule_reminder(app, chat_id: int, name: str, hour: int, minute: int) -> 
 # Timeout handler
 # ---------------------------------------------
 async def conversation_timeout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    # Fix 12: detect which flow timed out and give the right hint
+    if "new_countdown_name" in context.user_data or "new_countdown_date" in context.user_data:
+        hint = "Start again with /addcountdown."
+    elif "decision" in context.user_data:
+        hint = "Start again with /choose."
+    else:
+        hint = "Start again with the relevant command."
     context.user_data.clear()
     await context.bot.send_message(
         chat_id=update.effective_chat.id,
-        text="⏰ *Timed out!* You took too long to respond.\nStart again with /addcountdown or /choose.",
+        text=f"⏰ *Timed out!* You took too long to respond.\n{hint}",
         parse_mode="Markdown",
     )
     return ConversationHandler.END
@@ -829,8 +913,20 @@ async def list_countdown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 # ---------------------------------------------
 # /removecountdown <code or name>
 # ---------------------------------------------
+async def _is_chat_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Return True if the calling user is a group admin or creator."""
+    try:
+        member = await context.bot.get_chat_member(
+            update.effective_chat.id, update.effective_user.id
+        )
+        return member.status in ("administrator", "creator")
+    except Exception:
+        return False
+
+
 async def remove_countdown_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
 
     if not context.args:
         await update.message.reply_text(
@@ -851,6 +947,15 @@ async def remove_countdown_cmd(update: Update, context: ContextTypes.DEFAULT_TYP
     # Fall back to treating the arg as the full name
     if name is None:
         name = arg
+
+    # Fix 4: only the creator or a group admin may remove a countdown
+    creator_id = await asyncio.to_thread(get_countdown_creator, chat_id, name)
+    is_admin = await _is_chat_admin(update, context)
+    if creator_id is not None and user_id != creator_id and not is_admin:
+        await update.message.reply_text(
+            "⚠️ Only the person who created this countdown or a group admin can remove it."
+        )
+        return
 
     removed = await asyncio.to_thread(remove_countdown, chat_id, name)
 
@@ -876,7 +981,8 @@ async def daily_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = job.chat_id
     name = job.data["countdown_name"]
 
-    countdowns = get_all_countdowns(chat_id)
+    # Fix 1: use asyncio.to_thread so Redis calls don't block the event loop
+    countdowns = await asyncio.to_thread(get_all_countdowns, chat_id)
     entry = countdowns.get(name)
 
     if not entry:
@@ -894,7 +1000,8 @@ async def daily_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
             "Use `/addcountdown` to add a new one.",
             parse_mode="Markdown",
         )
-        remove_countdown(chat_id, name)
+        # Fix 1: async Redis removal
+        await asyncio.to_thread(remove_countdown, chat_id, name)
         job.schedule_removal()
         return
 
@@ -912,7 +1019,8 @@ async def daily_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
 # Restore jobs on startup
 # ---------------------------------------------
 async def restore_jobs(app) -> None:
-    all_data = get_all_chats()
+    # Fix 2: run blocking Redis call in a thread so it doesn't block the event loop
+    all_data = await asyncio.to_thread(get_all_chats)
     count = 0
     for chat_id, countdowns in all_data.items():
         for name, entry in countdowns.items():
@@ -1220,72 +1328,6 @@ BLESS_LINES = [
 ]
 
 
-def _display_user(user) -> str:
-    return user.first_name or user.username or str(user.id)
-
-
-def _arg_text(context: ContextTypes.DEFAULT_TYPE) -> str:
-    return " ".join(context.args).strip()
-
-
-def _normalize_target(target: str) -> str:
-    return target.strip().lstrip("@").casefold()
-
-
-def _daily_rng(label: str, *parts):
-    today_str = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
-    seed = ":".join(str(part) for part in (label, today_str, *parts))
-    return random.Random(seed)
-
-
-def _stable_rng(label: str, *parts):
-    seed = ":".join(str(part) for part in (label, *parts))
-    return random.Random(seed)
-
-
-def _mentioned_target(update: Update, context: ContextTypes.DEFAULT_TYPE = None) -> str:
-    message = update.message
-    if not message:
-        return ""
-
-    ignored_usernames = set()
-    ignored_user_ids = set()
-    if context:
-        bot_username = getattr(context.bot, "username", None)
-        bot_id = getattr(context.bot, "id", None)
-        if bot_username:
-            ignored_usernames.add(bot_username.casefold())
-        if bot_id:
-            ignored_user_ids.add(bot_id)
-
-    for entity in message.entities or []:
-        if entity.type != "bot_command":
-            continue
-
-        command_text = message.parse_entity(entity)
-        if "@" in command_text:
-            ignored_usernames.add(command_text.split("@", 1)[1].casefold())
-
-    for entity in message.entities or []:
-        if entity.type not in ("mention", "text_mention"):
-            continue
-
-        if getattr(entity, "user", None):
-            if entity.user.id in ignored_user_ids:
-                continue
-            return _display_user(entity.user)
-
-        mention = message.parse_entity(entity)
-        if _normalize_target(mention) in ignored_usernames:
-            continue
-        return mention
-
-    return ""
-
-
-def _target_from_mention_or_sender(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
-    return _mentioned_target(update, context) or _display_user(update.effective_user)
-
 
 def _ship_target(label: str, user_id=None, username: str = "", explicit_username: bool = False) -> dict:
     return {
@@ -1582,14 +1624,18 @@ async def eightball_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await update.message.reply_text(f"🎱 {fallback}")
 
 
-def _luck_result(key: str):
-    rng = _daily_rng("luck", key)
+def _luck_result(user_id_or_key: str):
+    """
+    Compute daily luck for a user.
+    Uses the same seed pattern as _get_fate so /luck @me == /fate score.
+    """
+    today_str = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
+    rng = random.Random(f"{user_id_or_key}:{today_str}")
     score = rng.randint(0, 100)
     for tier in FATE_TIERS:
         lo, hi = tier["range"]
         if lo <= score <= hi:
             return score, tier["name"], rng.choice(tier["messages"])
-
     return score, "🌤️ Neutral", "Just another day."
 
 
@@ -1597,6 +1643,7 @@ async def luck_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     message = update.message
     # Try to get a stable user_id from a mention or reply
     seed_key = None
+    target = None
     for entity in (message.entities or []):
         if entity.type == "text_mention" and getattr(entity, "user", None):
             seed_key = str(entity.user.id)
@@ -1793,11 +1840,22 @@ async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     else:
         label = f"{amount} hour{'s' if amount != 1 else ''}"
 
+    _MAX_REMIND_SECONDS = 365 * 24 * 3600  # 1 year
     if seconds < 5:
         await update.message.reply_text("⚠️ Minimum reminder time is 5 seconds.")
         return
-    if seconds > 86400:
-        await update.message.reply_text("⚠️ Maximum reminder time is 24 hours.")
+    if seconds > _MAX_REMIND_SECONDS:
+        await update.message.reply_text("⚠️ Maximum reminder time is 1 year.")
+        return
+
+    # Fix 5: enforce per-user cap of 10 active reminders
+    user_id = update.effective_user.id
+    current_count = await asyncio.to_thread(get_remind_count, user_id)
+    if current_count >= REMIND_MAX_PER_USER:
+        await update.message.reply_text(
+            f"⚠️ You already have {REMIND_MAX_PER_USER} pending reminders. "
+            "Wait for some to fire before adding more."
+        )
         return
 
     # Everything after the time expression is the reminder body
@@ -1809,12 +1867,17 @@ async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     chat_id = update.effective_chat.id
     user_mention = user.mention_html() if user else "Hey"
 
+    # Increment counter before scheduling (decrement when it fires)
+    await asyncio.to_thread(increment_remind_count, user_id)
+
     async def _fire(ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await ctx.bot.send_message(
             chat_id=chat_id,
             text=f"⏰ Reminder for {user_mention}!\n{reminder_text}",
             parse_mode="HTML",
         )
+        # Free the slot so the user can set another reminder
+        await asyncio.to_thread(decrement_remind_count, user_id)
 
     context.application.job_queue.run_once(_fire, when=seconds, chat_id=chat_id)
     await update.message.reply_text(f"⏰ Got it! I'll remind you in *{label}*.", parse_mode="Markdown")
@@ -1831,6 +1894,12 @@ async def quote_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if replied and replied.from_user and replied.text:
         author = _display_user(replied.from_user)
         text = replied.text
+    elif replied and replied.from_user and not replied.text:
+        # Fix 13: non-text reply (photo, sticker, voice, etc.)
+        await message.reply_text(
+            "⚠️ Only text messages can be quoted. Reply to a text message with /quote."
+        )
+        return
     else:
         await message.reply_text(
             "💬 *How to save a quote:*\n"
@@ -1888,9 +1957,16 @@ async def quotes_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     data = query.data
     if data == "quote:noop":
         return
-    _, chat_id_str, idx_str = data.split(":")
-    chat_id = int(chat_id_str)
-    index = int(idx_str)
+    # Fix 3: split into max 3 parts so chat_ids with ':' don't crash
+    parts = data.split(":", 2)
+    if len(parts) != 3:
+        return
+    _, chat_id_str, idx_str = parts
+    try:
+        chat_id = int(chat_id_str)
+        index = int(idx_str)
+    except ValueError:
+        return
     quotes = await asyncio.to_thread(get_all_quotes, chat_id)
     if not quotes:
         await query.edit_message_text("⚠️ No quotes found.")
