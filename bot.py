@@ -85,7 +85,6 @@ from countdown_manager import (
     increment_remind_count,
     get_remind_count,
     decrement_remind_count,
-    REMIND_MAX_PER_USER,
 )
 from keep_alive import keep_alive
 
@@ -1779,6 +1778,8 @@ async def poll_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 #           10h, 10hr, 10hrs, 10hour, 10hours
 # Usage: /remind 10m take a break  OR  /remind in 10min check oven
 # ---------------------------------------------
+REMIND_MAX_PER_USER = 10  # max active reminders per user (defined locally)
+
 _REMIND_RE = re.compile(
     r"(?:in\s+)?(\d+)\s*"
     r"(s(?:ec(?:ond)?s?)?|m(?:in(?:ute)?s?)?|h(?:(?:ou)?rs?)?)",
