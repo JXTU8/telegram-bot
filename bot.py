@@ -76,6 +76,10 @@ from countdown_manager import (
     delete_quote,
     track_seen_user,
     get_seen_users,
+    save_ship_pair,
+    get_top_ship_pairs,
+    update_fate_streak,
+    get_fate_streak,
 )
 from keep_alive import keep_alive
 
@@ -252,29 +256,39 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 # ---------------------------------------------
-# /help
+# /help — paginated with inline keyboard
 # ---------------------------------------------
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(
-        "📌 *Available Commands*\n\n"
-        "⏱ *Countdown*\n"
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
+from telegram.ext import CallbackQueryHandler
+
+HELP_PAGES = {
+    "countdown": (
+        "⏱ *Countdown*\n\n"
         "/addcountdown — add a new countdown, step by step\n"
         "/listcountdown — see all active countdowns in this group\n"
-        "/removecountdown <name> — remove a countdown by name\n\n"
-        "🎲 *Decisions*\n"
+        "/removecountdown <name> — remove a countdown by name"
+    ),
+    "decisions": (
+        "🎲 *Decisions*\n\n"
         "/choose — can't decide? let the bot pick for you\n"
         "/decide opt1, opt2, opt3 — instant pick\n"
         "/rank topic: item1, item2, item3 — randomly rank things\n"
-        "/poll question: opt1, opt2 — send a native Telegram poll\n\n"
-        "🤖 *AI*\n"
+        "/poll question: opt1, opt2 — send a native Telegram poll"
+    ),
+    "ai": (
+        "🤖 *AI*\n\n"
         "/ask <question> — search the web + ask AI anything\n"
         "/8ball <question> — magic 8-ball powered by AI\n"
-        "/hot <anything> — rate anything out of 100\n\n"
-        "🔮 *Daily Fate*\n"
+        "/hot <anything> — rate anything out of 100"
+    ),
+    "fate": (
+        "🔮 *Daily Fate*\n\n"
         "/fate — check your personal daily luck\n"
         "/fateboard — today's fate leaderboard for the group\n"
-        "/luck @user — check someone's daily luck score\n\n"
-        "🎉 *Fun*\n"
+        "/luck @user — check someone's daily luck score"
+    ),
+    "fun": (
+        "🎉 *Fun*\n\n"
         "/ship @user1 @user2 — compatibility percentage\n"
         "/roast @user — personalised AI roast\n"
         "/compliment @user — personalised AI compliment\n"
@@ -285,19 +299,80 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/wouldyourather — random would you rather\n"
         "/coinflip — heads or tails\n"
         "/curse @user — fake daily curse\n"
-        "/bless @user — fake daily blessing\n\n"
-        "💬 *Quotes*\n"
+        "/bless @user — fake daily blessing"
+    ),
+    "quotes": (
+        "💬 *Quotes*\n\n"
         "/quote — reply to any message to save it\n"
-        "/quotes — pull a random saved quote\n"
-        "/deletequote <number> — delete a quote by its number\n\n"
-        "⏰ *Reminders*\n"
+        "/quotes — browse saved quotes with prev/next\n"
+        "/deletequote <number> — delete a quote by its number"
+    ),
+    "reminders": (
+        "⏰ *Reminders*\n\n"
         "/remind 10m take a break — set a personal reminder\n"
-        "/remind 2h check the oven — supports s/sec, m/min, h/hr and more\n\n"
-        "⚙️ *Other*\n"
+        "/remind 2h check the oven — supports s/sec, m/min, h/hr and more"
+    ),
+    "other": (
+        "⚙️ *Other*\n\n"
         "/cancel — cancel the current flow\n"
-        "/help — show this menu",
+        "/help — show this menu"
+    ),
+}
+
+_HELP_PAGE_ORDER = ["countdown", "decisions", "ai", "fate", "fun", "quotes", "reminders", "other"]
+
+_HELP_PAGE_LABELS = {
+    "countdown": "⏱ Countdown",
+    "decisions": "🎲 Decisions",
+    "ai": "🤖 AI",
+    "fate": "🔮 Fate",
+    "fun": "🎉 Fun",
+    "quotes": "💬 Quotes",
+    "reminders": "⏰ Reminders",
+    "other": "⚙️ Other",
+}
+
+
+def _help_keyboard(current_page: str) -> InlineKeyboardMarkup:
+    """Build a 2-column keyboard of page buttons, highlighting the current one."""
+    buttons = []
+    row = []
+    for page_key in _HELP_PAGE_ORDER:
+        label = _HELP_PAGE_LABELS[page_key]
+        if page_key == current_page:
+            label = f"› {label} ‹"
+        row.append(InlineKeyboardButton(label, callback_data=f"help:{page_key}"))
+        if len(row) == 2:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+    return InlineKeyboardMarkup(buttons)
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    page = "countdown"
+    await update.message.reply_text(
+        HELP_PAGES[page] + "\n\n_Tap a category below:_",
         parse_mode="Markdown",
+        reply_markup=_help_keyboard(page),
     )
+
+
+async def help_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    _, page = query.data.split(":", 1)
+    if page not in HELP_PAGES:
+        return
+    try:
+        await query.edit_message_text(
+            HELP_PAGES[page] + "\n\n_Tap a category below:_",
+            parse_mode="Markdown",
+            reply_markup=_help_keyboard(page),
+        )
+    except Exception:
+        pass
 
 
 # ---------------------------------------------
@@ -534,7 +609,7 @@ async def received_date(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
     except ValueError:
         await update.message.reply_text(
-            "❌ Invalid format. Use `YYYY-MM-DD` _(e.g. 2025-12-31)_\n"
+            "⚠️ Invalid format. Use `YYYY-MM-DD` _(e.g. 2025-12-31)_\n"
             f"⏰ You have *{CONV_TIMEOUT} seconds* to reply.",
             parse_mode="Markdown",
         )
@@ -568,7 +643,7 @@ async def received_time(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         hour, minute = parsed.hour, parsed.minute
     except ValueError:
         await update.message.reply_text(
-            "❌ Invalid format. Use `HH:MM` _(e.g. 08:30)_\n"
+            "⚠️ Invalid format. Use `HH:MM` _(e.g. 08:30)_\n"
             f"⏰ You have *{CONV_TIMEOUT} seconds* to reply.",
             parse_mode="Markdown",
         )
@@ -609,7 +684,7 @@ async def received_time(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 # /choose
 # ---------------------------------------------
 async def choose_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text(
+    bot_msg = await update.message.reply_text(
         "🎲 *Decision Maker*\n\n"
         "What's the issue? Tell me what you need to decide.\n"
         "_(e.g. Should I skip class? What should I eat?)_\n\n"
@@ -617,6 +692,7 @@ async def choose_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         "Type /cancel to stop.",
         parse_mode="Markdown",
     )
+    _track(context, update.message, bot_msg)
     return ASK_DECISION
 
 
@@ -631,13 +707,14 @@ async def received_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return ASK_DECISION
 
     context.user_data["decision"] = decision
-    await update.message.reply_text(
+    bot_msg = await update.message.reply_text(
         f"Got it — *\"{decision}\"*\n\n"
         "Now give me the options, separated by commas.\n"
         "_(e.g. Yes, No, Maybe  or  Pizza, Burger, Sushi)_\n\n"
         f"⏰ You have *{CONV_TIMEOUT} seconds* to reply.",
         parse_mode="Markdown",
     )
+    _track(context, update.message, bot_msg)
     return ASK_OPTIONS
 
 
@@ -680,6 +757,9 @@ async def received_options(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         for item in odds
     )
 
+    _track(context, update.message)
+    await _delete_tracked(context)
+
     thinking_msg = await update.message.reply_text(thinking)
     await asyncio.sleep(2)
 
@@ -709,7 +789,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 # ---------------------------------------------
 async def list_countdown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
-    countdowns = get_all_countdowns(chat_id)
+    countdowns = await asyncio.to_thread(get_all_countdowns, chat_id)
 
     if not countdowns:
         await update.message.reply_text(
@@ -719,8 +799,15 @@ async def list_countdown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     today = _today()
-    lines = ["📋 *Active Countdowns:*\n"]
-    for name, entry in countdowns.items():
+
+    # Sort entries by days remaining (soonest first; overdue shown last)
+    sorted_entries = sorted(
+        countdowns.items(),
+        key=lambda kv: (date.fromisoformat(kv[1]["target_date"]) - today).days
+    )
+
+    lines = ["📋 *Active Countdowns (soonest first):*\n"]
+    for name, entry in sorted_entries:
         td = date.fromisoformat(entry["target_date"])
         days_left = (td - today).days
         h = entry["reminder_hour"]
@@ -749,7 +836,7 @@ async def remove_countdown_cmd(update: Update, context: ContextTypes.DEFAULT_TYP
 
     name = " ".join(context.args)
     chat_id = update.effective_chat.id
-    removed = remove_countdown(chat_id, name)
+    removed = await asyncio.to_thread(remove_countdown, chat_id, name)
 
     if removed:
         jname = _job_name(chat_id, name)
@@ -759,7 +846,7 @@ async def remove_countdown_cmd(update: Update, context: ContextTypes.DEFAULT_TYP
         logger.info("Chat %s removed countdown '%s'", chat_id, name)
     else:
         await update.message.reply_text(
-            f"❌ No countdown named *{name}* found.\n"
+            f"⚠️ No countdown named *{name}* found.\n"
             "Use /listcountdown to see all active countdowns.",
             parse_mode="Markdown",
         )
@@ -897,8 +984,13 @@ FATE_EXTREME_UNLUCKY_MESSAGES = [
 ]
 
 def _remember_fate(chat_id: int, user_id: int, name: str, score: int, tier: str) -> None:
+    """Sync helper — call via asyncio.to_thread."""
     today_str = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
     save_fate_entry(chat_id, today_str, user_id, name, score, tier)
+
+
+def _update_streak_sync(user_id: int, today_str: str, tier_category: str) -> int:
+    return update_fate_streak(user_id, today_str, tier_category)
 
 
 def _get_fate(user_id: int):
@@ -936,8 +1028,26 @@ async def fate_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     score, tier, message = _get_fate(user_id)
     today_str = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
 
-    _remember_fate(update.effective_chat.id, user_id, username, score, tier)
-    track_seen_user(update.effective_chat.id, user_id, username)
+    # Determine streak category
+    if score == 999:
+        tier_category = "lucky"
+    elif score == -999:
+        tier_category = "unlucky"
+    elif score >= 65:
+        tier_category = "lucky"
+    elif score <= 35:
+        tier_category = "unlucky"
+    else:
+        tier_category = "neutral"
+
+    # Non-blocking Redis writes
+    asyncio.create_task(
+        asyncio.to_thread(_remember_fate, update.effective_chat.id, user_id, username, score, tier)
+    )
+    asyncio.create_task(
+        asyncio.to_thread(track_seen_user, update.effective_chat.id, user_id, username)
+    )
+    streak = await asyncio.to_thread(_update_streak_sync, user_id, today_str, tier_category)
 
     if score == 999:
         score_display = "999 ⚡ MAXIMUM"
@@ -948,13 +1058,21 @@ async def fate_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         bar = "█" * filled + "░" * (10 - filled)
         score_display = f"{score}/100  [{bar}]"
 
+    streak_line = ""
+    if streak >= 2:
+        if tier_category == "lucky":
+            streak_line = f"\n🔥 *Lucky streak: {streak} days in a row!*"
+        elif tier_category == "unlucky":
+            streak_line = f"\n💀 *Unlucky streak: {streak} days in a row...*"
+
     await update.message.reply_text(
         f"🔮 *Daily Fate — {username}*\n"
         f"━━━━━━━━━━━━━━━\n"
         f"Tier: *{tier}*\n"
         f"Score: `{score_display}`\n"
         f"━━━━━━━━━━━━━━━\n"
-        f"_{message}_",
+        f"_{message}_"
+        f"{streak_line}",
         parse_mode="Markdown",
     )
 
@@ -1284,19 +1402,31 @@ async def ship_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
         return
 
-    rng = _stable_rng("ship", normalized[0], normalized[1])
+    rng = _daily_rng("ship", normalized[0], normalized[1])
     score = rng.randint(0, 10000) / 100
+    chat_id = update.effective_chat.id
 
     # Track users if we have real user objects
     for t in targets:
         if t.get("user_id"):
-            track_seen_user(update.effective_chat.id, t["user_id"], t["label"])
+            asyncio.create_task(
+                asyncio.to_thread(track_seen_user, chat_id, t["user_id"], t["label"])
+            )
 
+    # Persist to ship leaderboard (non-blocking)
+    pair_key = f"{normalized[0]}:{normalized[1]}"
+    asyncio.create_task(
+        asyncio.to_thread(save_ship_pair, chat_id, pair_key, target_a, target_b, score)
+    )
+
+    filled = round(score / 10)
+    bar = "█" * filled + "░" * (10 - filled)
     await update.message.reply_text(
-        f"💞 Ship Result\n"
-        f"{target_a} x {target_b}\n\n"
-        f"Compatibility: {score:.2f}%\n"
-        f"{_ship_comment(score)}"
+        f"💞 *Ship Result*\n"
+        f"{target_a} × {target_b}\n\n"
+        f"Compatibility: `{score:.2f}%`  [{bar}]\n"
+        f"_{_ship_comment(score)}_",
+        parse_mode="Markdown",
     )
 
 
@@ -1478,10 +1608,12 @@ async def luck_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def fateboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     today_str = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
-    board = get_fate_board(update.effective_chat.id, today_str)
+    board = await asyncio.to_thread(get_fate_board, update.effective_chat.id, today_str)
 
     if not board:
-        await update.message.reply_text("No fate scores yet today. Tell people to use /fate first.")
+        await update.message.reply_text(
+            "⚠️ No fate scores yet today. Tell people to use /fate first!"
+        )
         return
 
     users = sorted(
@@ -1490,11 +1622,24 @@ async def fateboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         reverse=True,
     )
 
-    lines = ["🏅 Today's Fateboard"]
+    medals = ["🥇", "🥈", "🥉"]
+    lines = ["🏅 *Today's Fateboard*\n"]
     for index, item in enumerate(users[:10], start=1):
-        lines.append(f"{index}. {item['name']} — {item['score']} ({item['tier']})")
+        rank_icon = medals[index - 1] if index <= 3 else f"{index}."
+        s = item["score"]
+        if s == 999:
+            bar = "⚡ MAX"
+        elif s == -999:
+            bar = "💀 MIN"
+        else:
+            filled = round(max(0, min(s, 100)) / 10)
+            bar = "█" * filled + "░" * (10 - filled)
+        lines.append(
+            f"{rank_icon} *{item['name']}* — {item['tier']}\n"
+            f"    Score: `{s}`  [{bar}]"
+        )
 
-    await update.message.reply_text("\n".join(lines))
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
 async def curse_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1611,7 +1756,7 @@ async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     match = _REMIND_RE.search(text)
     if not match:
         await update.message.reply_text(
-            "❌ Couldn't parse the time. Try:\n"
+            "⚠️ Couldn't parse the time. Try:\n"
             "`/remind 10m take a break`\n"
             "`/remind 2h check dinner`\n"
             "`/remind 30sec drink water`",
@@ -1691,17 +1836,68 @@ async def quote_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def quotes_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
-    total = get_quote_count(chat_id)
-    q = get_random_quote(chat_id)
-    if not q:
+    quotes = await asyncio.to_thread(get_all_quotes, chat_id)
+    if not quotes:
         await update.message.reply_text(
-            "No quotes saved yet. Reply to any message with /quote to start the archive!"
+            "⚠️ No quotes saved yet. Reply to any message with /quote to start the archive!"
         )
         return
-    await update.message.reply_text(
-        f'💬 *"{q["text"]}"*\n— {q["author"]}\n_(saved by {q["saved_by"]}) · #{q["index"]}/{total}_',
-        parse_mode="Markdown",
+
+    # Start at a random index
+    index = random.randrange(len(quotes))
+    await _send_quote_page(update.message.reply_text, chat_id, quotes, index)
+
+
+async def _send_quote_page(send_fn, chat_id: int, quotes: list, index: int) -> None:
+    total = len(quotes)
+    q = quotes[index]
+    text = (
+        f'💬 *"{q["text"]}"*\n'
+        f'— {q["author"]}\n'
+        f'_(saved by {q["saved_by"]}) · #{index + 1}/{total}_'
     )
+    prev_idx = (index - 1) % total
+    next_idx = (index + 1) % total
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("◀ Prev", callback_data=f"quote:{chat_id}:{prev_idx}"),
+        InlineKeyboardButton(f"{index + 1}/{total}", callback_data="quote:noop"),
+        InlineKeyboardButton("Next ▶", callback_data=f"quote:{chat_id}:{next_idx}"),
+    ]])
+    await send_fn(text, parse_mode="Markdown", reply_markup=keyboard)
+
+
+async def quotes_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    if data == "quote:noop":
+        return
+    _, chat_id_str, idx_str = data.split(":")
+    chat_id = int(chat_id_str)
+    index = int(idx_str)
+    quotes = await asyncio.to_thread(get_all_quotes, chat_id)
+    if not quotes:
+        await query.edit_message_text("⚠️ No quotes found.")
+        return
+    index = index % len(quotes)
+    total = len(quotes)
+    q = quotes[index]
+    text = (
+        f'💬 *"{q["text"]}"*\n'
+        f'— {q["author"]}\n'
+        f'_(saved by {q["saved_by"]}) · #{index + 1}/{total}_'
+    )
+    prev_idx = (index - 1) % total
+    next_idx = (index + 1) % total
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("◀ Prev", callback_data=f"quote:{chat_id}:{prev_idx}"),
+        InlineKeyboardButton(f"{index + 1}/{total}", callback_data="quote:noop"),
+        InlineKeyboardButton("Next ▶", callback_data=f"quote:{chat_id}:{next_idx}"),
+    ]])
+    try:
+        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=keyboard)
+    except Exception:
+        pass
 
 
 async def deletequote_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1754,18 +1950,20 @@ async def mvp_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             if not u.is_bot:
                 name = u.first_name or u.username or str(u.id)
                 candidate_pool[str(u.id)] = name
-                # Also keep seen_users up to date
-                track_seen_user(chat_id, u.id, name)
+                # Also keep seen_users up to date (non-blocking)
+                asyncio.create_task(
+                    asyncio.to_thread(track_seen_user, chat_id, u.id, name)
+                )
     except Exception as e:
         logger.warning("Could not fetch admins for mvp in chat %s: %s", chat_id, e)
 
     # Merge with seen_users (non-admins who've used any command)
-    seen = get_seen_users(chat_id)
+    seen = await asyncio.to_thread(get_seen_users, chat_id)
     candidate_pool.update(seen)
 
     if not candidate_pool:
         await update.message.reply_text(
-            "Not enough members tracked yet. Have people use a command first!"
+            "⚠️ Not enough members tracked yet. Have people use a command first!"
         )
         return
 
@@ -1834,7 +2032,17 @@ async def hot_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 def main() -> None:
     keep_alive()
 
-    app = ApplicationBuilder().token(TOKEN).post_init(restore_jobs).build()
+    app = (
+        ApplicationBuilder()
+        .token(TOKEN)
+        .concurrent_updates(True)
+        .connection_pool_size(16)
+        .connect_timeout(10.0)
+        .read_timeout(10.0)
+        .write_timeout(10.0)
+        .post_init(restore_jobs)
+        .build()
+    )
 
     countdown_conv = ConversationHandler(
         entry_points=[CommandHandler("addcountdown", add_countdown_start)],
@@ -1865,6 +2073,8 @@ def main() -> None:
 
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CallbackQueryHandler(help_callback, pattern=r"^help:"))
+    app.add_handler(CallbackQueryHandler(quotes_callback, pattern=r"^quote:"))
     app.add_handler(CommandHandler("ask", ask_command))
     app.add_handler(countdown_conv)
     app.add_handler(choose_conv)
