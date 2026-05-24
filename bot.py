@@ -67,6 +67,7 @@ from countdown_manager import (
     get_all_chats,
     remove_countdown,
     countdown_exists,
+    get_countdown_by_code,
     save_fate_entry,
     get_fate_board,
     save_quote,
@@ -654,7 +655,7 @@ async def received_time(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     target_date = context.user_data["new_countdown_date"]
     created_by = update.effective_user.id
 
-    add_countdown(chat_id, name, target_date, hour, minute, created_by)
+    code = await asyncio.to_thread(add_countdown, chat_id, name, target_date, hour, minute, created_by)
     _schedule_reminder(context.application, chat_id, name, hour, minute)
 
     today = _today()
@@ -668,9 +669,11 @@ async def received_time(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         text=(
             f"🎉 *Countdown Added!*\n\n"
             f"📛 Name: *{name}*\n"
+            f"🔑 Code: `{code}`\n"
             f"📆 Target: *{target_date}*\n"
             f"{_days_label(days_left)}\n"
-            f"🔔 Daily reminder at *{hour:02d}:{minute:02d} MYT*"
+            f"🔔 Daily reminder at *{hour:02d}:{minute:02d} MYT*\n\n"
+            f"_To remove: `/removecountdown {code}`_"
         ),
         parse_mode="Markdown",
     )
@@ -812,30 +815,43 @@ async def list_countdown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         days_left = (td - today).days
         h = entry["reminder_hour"]
         m = entry["reminder_minute"]
+        code = entry.get("code", "—")
         lines.append(
-            f"• *{name}*\n"
+            f"• *{name}* `[{code}]`\n"
             f"  📆 {td}  |  {_days_label(days_left)}\n"
             f"  🔔 Reminder at {h:02d}:{m:02d} MYT\n"
         )
 
+    lines.append("_Remove with_ `/removecountdown <code>` _or_ `/removecountdown <name>`")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
 # ---------------------------------------------
-# /removecountdown <name>
+# /removecountdown <code or name>
 # ---------------------------------------------
 async def remove_countdown_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+
     if not context.args:
         await update.message.reply_text(
-            "⚠️ Please provide the countdown name.\n"
-            "Usage: `/removecountdown <name>`\n"
-            "_(Use /listcountdown to see all names)_",
+            "⚠️ Please provide the countdown code or name.\n"
+            "Usage: `/removecountdown a3k` or `/removecountdown <name>`\n"
+            "_(Use /listcountdown to see codes)_",
             parse_mode="Markdown",
         )
         return
 
-    name = " ".join(context.args)
-    chat_id = update.effective_chat.id
+    arg = " ".join(context.args).strip()
+
+    # Try resolving as a short code first (3–4 chars, alphanumeric)
+    name = None
+    if len(arg) <= 4 and arg.isalnum():
+        name = await asyncio.to_thread(get_countdown_by_code, chat_id, arg.lower())
+
+    # Fall back to treating the arg as the full name
+    if name is None:
+        name = arg
+
     removed = await asyncio.to_thread(remove_countdown, chat_id, name)
 
     if removed:
@@ -846,7 +862,7 @@ async def remove_countdown_cmd(update: Update, context: ContextTypes.DEFAULT_TYP
         logger.info("Chat %s removed countdown '%s'", chat_id, name)
     else:
         await update.message.reply_text(
-            f"⚠️ No countdown named *{name}* found.\n"
+            f"⚠️ No countdown found for `{arg}`.\n"
             "Use /listcountdown to see all active countdowns.",
             parse_mode="Markdown",
         )

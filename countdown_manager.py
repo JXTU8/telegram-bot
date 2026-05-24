@@ -71,6 +71,20 @@ def _save_chat(chat_id: int, data: dict) -> None:
 # ─────────────────────────────────────────────
 # Public API
 # ─────────────────────────────────────────────
+_CODE_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789"
+
+
+def _gen_code(existing_codes: set) -> str:
+    """Generate a unique 3-char lowercase+digit code not already in use."""
+    import random as _random
+    for _ in range(200):
+        code = "".join(_random.choices(_CODE_CHARS, k=3))
+        if code not in existing_codes:
+            return code
+    # Extremely unlikely fallback — extend to 4 chars
+    return "".join(_random.choices(_CODE_CHARS, k=4))
+
+
 def add_countdown(
     chat_id: int,
     name: str,
@@ -78,16 +92,22 @@ def add_countdown(
     hour: int,
     minute: int,
     created_by: int,
-) -> None:
-    """Add or overwrite a named countdown for a chat."""
+) -> str:
+    """Add or overwrite a named countdown for a chat. Returns the short code."""
     data = _load_chat(chat_id)
+    existing_codes = {v.get("code", "") for v in data.values()}
+    # Preserve existing code if overwriting the same name
+    existing_code = data.get(name, {}).get("code", "")
+    code = existing_code or _gen_code(existing_codes)
     data[name] = {
         "target_date": target_date.isoformat(),
         "reminder_hour": hour,
         "reminder_minute": minute,
         "created_by": created_by,
+        "code": code,
     }
     _save_chat(chat_id, data)
+    return code
 
 
 def get_countdown(chat_id: int, name: str) -> Optional[dict]:
@@ -112,6 +132,15 @@ def remove_countdown(chat_id: int, name: str) -> bool:
 
 def countdown_exists(chat_id: int, name: str) -> bool:
     return name in _load_chat(chat_id)
+
+
+def get_countdown_by_code(chat_id: int, code: str) -> Optional[str]:
+    """Return the countdown name matching the given short code, or None."""
+    code = code.lower()
+    for name, entry in _load_chat(chat_id).items():
+        if entry.get("code", "").lower() == code:
+            return name
+    return None
 
 
 def get_all_chats() -> dict:
