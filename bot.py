@@ -26,9 +26,9 @@ Commands
 /editcountdown   -> Edit a countdown's date or time
 /choose          -> Let the bot decide for you
 /ask             -> Ask AI anything (max 500 chars)
-/fate            -> Check your daily luck
-/fateboard       -> Today's fate leaderboard with streak badges
-/streak          -> Check your current fate streak
+/luck            -> Check your (or @someone's) daily luck
+/luckboard       -> Today's luck leaderboard with streak badges
+/streak          -> Check your current luck streak
 /ship            -> Compatibility percentage
 /shipboard       -> Top ship pairs in this group
 /roast           -> Friendly roast
@@ -40,10 +40,13 @@ Commands
 /wouldyourather  -> Would you rather question
 /coinflip        -> Heads or tails
 /8ball           -> Magic 8-ball
-/luck            -> Check someone's luck (with progress bar)
 /curse           -> Fake daily curse
 /bless           -> Fake daily blessing
 /cancel          -> Cancel the current flow
+
+Deprecated (redirect stubs):
+/fate            -> Use /luck instead
+/fateboard       -> Use /luckboard instead
 """
 
 import logging
@@ -324,7 +327,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "🗑️ /removecountdown — remove a countdown\n"
         "🎲 /choose — let me decide for you\n"
         "🤖 /ask — ask me anything\n\n"
-        "🔮 /fate — check your daily luck\n"
+        "🍀 /luck — check your daily luck (or @someone's)\n"
         "🎉 /help — see all fun commands\n"
         "Type /help for all commands.",
         parse_mode="Markdown",
@@ -355,12 +358,12 @@ HELP_PAGES = {
         "/8ball <question> — magic 8-ball powered by AI\n"
         "/hot <anything> — rate anything out of 100"
     ),
-    "fate": (
-        "🔮 *Daily Fate*\n\n"
-        "/fate — check your personal daily luck\n"
-        "/fateboard — today's fate leaderboard with streak badges\n"
-        "/streak — check your current fate streak\n"
-        "/luck @user — check someone's daily luck score"
+    "luck": (
+        "🍀 *Daily Luck*\n\n"
+        "/luck — check your personal daily luck\n"
+        "/luck @user — check someone else's daily luck\n"
+        "/luckboard — today's luck leaderboard with streak badges\n"
+        "/streak — check your current luck streak"
     ),
     "fun": (
         "🎉 *Fun*\n\n"
@@ -396,13 +399,13 @@ HELP_PAGES = {
     ),
 }
 
-_HELP_PAGE_ORDER = ["countdown", "decisions", "ai", "fate", "fun", "quotes", "reminders", "other"]
+_HELP_PAGE_ORDER = ["countdown", "decisions", "ai", "luck", "fun", "quotes", "reminders", "other"]
 
 _HELP_PAGE_LABELS = {
     "countdown": "⏱ Countdown",
     "decisions": "🎲 Decisions",
     "ai": "🤖 AI",
-    "fate": "🔮 Fate",
+    "luck": "🍀 Luck",
     "fun": "🎉 Fun",
     "quotes": "💬 Quotes",
     "reminders": "⏰ Reminders",
@@ -1324,57 +1327,127 @@ def _get_fate(user_id: int):
     return score, "🌤️ Neutral", "Just another day."
 
 
-async def fate_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def luck_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /luck            — check your own daily luck
+    /luck @user      — check someone else's luck (read-only, doesn't save to luckboard)
+    """
+    message = update.message
     user = update.effective_user
-    user_id = user.id
-    username = user.first_name or user.username or "You"
 
-    score, tier, message = _get_fate(user_id)
+    # --- Resolve target ---
+    target_user_id = None
+    target_name = None
+    checking_other = False
+
+    for entity in (message.entities or []):
+        if entity.type == "text_mention" and getattr(entity, "user", None):
+            target_user_id = entity.user.id
+            target_name = _display_user(entity.user)
+            checking_other = (target_user_id != user.id)
+            break
+
+    if target_user_id is None:
+        mentioned = _mentioned_target(update, context)
+        if mentioned:
+            # @username mention — use normalised string as seed (no real user_id)
+            target_name = mentioned
+            target_user_id = None   # no numeric id for @username mentions
+            checking_other = True
+        else:
+            target_user_id = user.id
+            target_name = user.first_name or user.username or "You"
+            checking_other = False
+
+    # --- Compute luck ---
+    seed_key = str(target_user_id) if target_user_id else _normalize_target(target_name)
+    score, tier, luck_msg = _get_fate(int(seed_key) if seed_key.lstrip("-").isdigit() else 0)
+
+    # If we used a string seed (no real user_id), fall back to _luck_result helper
+    if not (seed_key.lstrip("-").isdigit()):
+        score, tier, luck_msg = _luck_result(seed_key)
+
     today_str = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
 
-    if score == 999:
-        tier_category = "lucky"
-    elif score == -999:
-        tier_category = "unlucky"
-    elif score >= 65:
-        tier_category = "lucky"
-    elif score <= 35:
-        tier_category = "unlucky"
+    if not checking_other:
+        # Own luck — save to luckboard and update streak
+        if score == 999:
+            tier_category = "lucky"
+        elif score == -999:
+            tier_category = "unlucky"
+        elif score >= 65:
+            tier_category = "lucky"
+        elif score <= 35:
+            tier_category = "unlucky"
+        else:
+            tier_category = "neutral"
+
+        asyncio.create_task(
+            asyncio.to_thread(
+                _remember_fate,
+                update.effective_chat.id, target_user_id, target_name, score, tier,
+            )
+        )
+        asyncio.create_task(
+            asyncio.to_thread(track_seen_user, update.effective_chat.id, target_user_id, target_name)
+        )
+        streak = await asyncio.to_thread(_update_streak_sync, target_user_id, today_str, tier_category)
+
+        if score == 999:
+            score_display = "999 ⚡ MAXIMUM"
+        elif score == -999:
+            score_display = "-999 💀 MINIMUM"
+        else:
+            filled = round(score / 10)
+            bar = "█" * filled + "░" * (10 - filled)
+            score_display = f"{score}/100  [{bar}]"
+
+        streak_line = ""
+        if streak >= 2:
+            if tier_category == "lucky":
+                streak_line = f"\n🔥 *Lucky streak: {streak} days in a row!*"
+            elif tier_category == "unlucky":
+                streak_line = f"\n💀 *Unlucky streak: {streak} days in a row...*"
+
+        await message.reply_text(
+            f"🍀 *Daily Luck — {target_name}*\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"Tier: *{tier}*\n"
+            f"Score: `{score_display}`\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"_{luck_msg}_"
+            f"{streak_line}",
+            parse_mode="Markdown",
+        )
     else:
-        tier_category = "neutral"
+        # Checking someone else — read-only display
+        if score == 999:
+            score_display = "999 ⚡ MAXIMUM"
+        elif score == -999:
+            score_display = "-999 💀 MINIMUM"
+        else:
+            filled = round(score / 10)
+            bar = "█" * filled + "░" * (10 - filled)
+            score_display = f"{score}/100  [{bar}]"
 
-    asyncio.create_task(
-        asyncio.to_thread(_remember_fate, update.effective_chat.id, user_id, username, score, tier)
-    )
-    asyncio.create_task(
-        asyncio.to_thread(track_seen_user, update.effective_chat.id, user_id, username)
-    )
-    streak = await asyncio.to_thread(_update_streak_sync, user_id, today_str, tier_category)
+        await message.reply_text(
+            f"🍀 *Daily Luck — {target_name}*\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"Tier: *{tier}*\n"
+            f"Score: `{score_display}`\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"_{luck_msg}_\n\n"
+            f"_They need to use /luck themselves to appear on /luckboard._",
+            parse_mode="Markdown",
+        )
 
-    if score == 999:
-        score_display = "999 ⚡ MAXIMUM"
-    elif score == -999:
-        score_display = "-999 💀 MINIMUM"
-    else:
-        filled = round(score / 10)
-        bar = "█" * filled + "░" * (10 - filled)
-        score_display = f"{score}/100  [{bar}]"
 
-    streak_line = ""
-    if streak >= 2:
-        if tier_category == "lucky":
-            streak_line = f"\n🔥 *Lucky streak: {streak} days in a row!*"
-        elif tier_category == "unlucky":
-            streak_line = f"\n💀 *Unlucky streak: {streak} days in a row...*"
-
+async def fate_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Tombstone — /fate has been replaced by /luck."""
     await update.message.reply_text(
-        f"🔮 *Daily Fate — {username}*\n"
-        f"━━━━━━━━━━━━━━━\n"
-        f"Tier: *{tier}*\n"
-        f"Score: `{score_display}`\n"
-        f"━━━━━━━━━━━━━━━\n"
-        f"_{message}_"
-        f"{streak_line}",
+        "⚠️ `/fate` has been removed.\n\n"
+        "Use `/luck` instead — it works the same way, and you can even check others with `/luck @user`!\n\n"
+        "Use `/luckboard` for the leaderboard.",
         parse_mode="Markdown",
     )
 
@@ -1549,30 +1622,66 @@ def _extract_ship_targets(update: Update, context: ContextTypes.DEFAULT_TYPE):
     replied = update.message.reply_to_message
     mentioned_targets = _ship_mentions_from_message(update)
 
+    # ── Case 1: two or more mentions → pair the first two ──────────────────
     if len(mentioned_targets) >= 2:
         return mentioned_targets[:2]
 
+    # ── Case 2: exactly ONE mention (covers users with no username!) ────────
+    # Pair the sender (or replied-to person) with the mentioned person.
+    # Without this, context.args would split "Lim Sin Yee" into separate words.
+    if len(mentioned_targets) == 1:
+        mention_target = mentioned_targets[0]
+        if replied and replied.from_user:
+            # /ship @person  while replying → ship replied person × mentioned person
+            return [
+                _ship_target(
+                    _display_user(replied.from_user),
+                    user_id=replied.from_user.id,
+                    username=replied.from_user.username or "",
+                    explicit_username=bool(replied.from_user.username),
+                ),
+                mention_target,
+            ]
+        else:
+            # /ship @person  without reply → ship sender × mentioned person
+            sender = update.effective_user
+            return [
+                _ship_target(
+                    _display_user(sender),
+                    user_id=sender.id,
+                    username=sender.username or "",
+                    explicit_username=bool(sender.username),
+                ),
+                mention_target,
+            ]
+
+    # ── Case 3: no mentions — try comma-separated plain-text names ──────────
     if "," in text:
         parts = [part.strip() for part in text.split(",") if part.strip()]
         if len(parts) >= 2:
             return [_ship_target(parts[0]), _ship_target(parts[1])]
 
-    if replied and replied.from_user and len(context.args) == 1:
-        other_target = mentioned_targets[0] if mentioned_targets else _ship_target(
-            context.args[0],
-            username=context.args[0] if context.args[0].startswith("@") else "",
-            explicit_username=context.args[0].startswith("@"),
-        )
-        return [
-            _ship_target(
-                _display_user(replied.from_user),
-                user_id=replied.from_user.id,
-                username=replied.from_user.username or "",
-                explicit_username=bool(replied.from_user.username),
-            ),
-            other_target,
-        ]
+    # ── Case 4: replying to a message + all remaining args = one target name ─
+    # Handles multi-word names typed without a comma: /ship lim sin yee
+    if replied and replied.from_user:
+        full_name = " ".join(context.args).strip() if context.args else ""
+        if full_name:
+            other_target = _ship_target(
+                full_name,
+                username=full_name if full_name.startswith("@") else "",
+                explicit_username=full_name.startswith("@"),
+            )
+            return [
+                _ship_target(
+                    _display_user(replied.from_user),
+                    user_id=replied.from_user.id,
+                    username=replied.from_user.username or "",
+                    explicit_username=bool(replied.from_user.username),
+                ),
+                other_target,
+            ]
 
+    # ── Case 5: two space-separated single-word args (last resort) ──────────
     if len(context.args) >= 2:
         return [
             _ship_target(
@@ -1610,8 +1719,11 @@ async def ship_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     targets = _extract_ship_targets(update, context)
     if len(targets) < 2:
         await update.message.reply_text(
-            "Usage: /ship @user1 @user2\n"
-            "Tip: you can also reply to someone with /ship @user"
+            "Usage:\n"
+            "/ship @user1 @user2 — ship two people\n"
+            "/ship @user — ship yourself with someone (works even if they have no username!)\n"
+            "Reply to a message + /ship @user — ship that person with someone\n"
+            "Multi-word names: /ship name one, name two"
         )
         return
 
@@ -1828,49 +1940,15 @@ def _luck_result(user_id_or_key: str):
     return score, "🌤️ Neutral", "Just another day."
 
 
-async def luck_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    message = update.message
-    seed_key = None
-    target = None
-
-    for entity in (message.entities or []):
-        if entity.type == "text_mention" and getattr(entity, "user", None):
-            seed_key = str(entity.user.id)
-            target = _display_user(entity.user)
-            break
-
-    if seed_key is None:
-        mentioned = _mentioned_target(update, context)
-        if mentioned:
-            target = mentioned
-            seed_key = _normalize_target(mentioned)
-        else:
-            target = _display_user(update.effective_user)
-            seed_key = str(update.effective_user.id)
-
-    score, tier, message_text = _luck_result(seed_key)
-
-    filled = round(score / 10)
-    bar = "█" * filled + "░" * (10 - filled)
-
-    await message.reply_text(
-        f"🍀 *Daily Luck — {target}*\n"
-        f"━━━━━━━━━━━━━━━\n"
-        f"Tier: *{tier}*\n"
-        f"Score: `{score}/100  [{bar}]`\n"
-        f"━━━━━━━━━━━━━━━\n"
-        f"_{message_text}_",
-        parse_mode="Markdown",
-    )
 
 
-async def fateboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def luckboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     today_str = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
     board = await asyncio.to_thread(get_fate_board, update.effective_chat.id, today_str)
 
     if not board:
         await update.message.reply_text(
-            "⚠️ No fate scores yet today. Tell people to use /fate first!"
+            "⚠️ No luck scores yet today. Tell people to use /luck first!"
         )
         return
 
@@ -1884,7 +1962,7 @@ async def fateboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     streak_map = {str(uid): result for uid, result in zip(user_ids, streak_results)}
 
     medals = ["🥇", "🥈", "🥉"]
-    lines = ["🏅 *Today's Fateboard*\n"]
+    lines = ["🍀 *Today's Luckboard*\n"]
 
     for i, (uid, item) in enumerate(sorted_items[:10], 1):
         rank_icon = medals[i - 1] if i <= 3 else f"{i}."
@@ -1911,6 +1989,15 @@ async def fateboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
 
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+async def fateboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Tombstone — /fateboard has been replaced by /luckboard."""
+    await update.message.reply_text(
+        "⚠️ `/fateboard` has been removed.\n\n"
+        "Use `/luckboard` instead — it shows the same leaderboard!",
+        parse_mode="Markdown",
+    )
 
 
 async def streak_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1943,7 +2030,7 @@ async def streak_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if streak == 0:
         await message.reply_text(
             f"📊 *Streak — {target}*\n"
-            f"No active streak yet. Use /fate to start one!",
+            f"No active streak yet. Use /luck to start one!",
             parse_mode="Markdown",
         )
         return
@@ -2451,6 +2538,8 @@ def main() -> None:
     app.add_handler(CommandHandler("listcountdown", list_countdown))
     app.add_handler(CommandHandler("removecountdown", remove_countdown_cmd))
     app.add_handler(CommandHandler("fate", fate_command))
+    app.add_handler(CommandHandler("luck", luck_command))
+    app.add_handler(CommandHandler("luckboard", luckboard_command))
     app.add_handler(CommandHandler("ship", ship_command))
     app.add_handler(CommandHandler("shipboard", shipboard_command))
     app.add_handler(CommandHandler("roast", roast_command))
@@ -2462,7 +2551,6 @@ def main() -> None:
     app.add_handler(CommandHandler("wouldyourather", would_you_rather_command))
     app.add_handler(CommandHandler("coinflip", coinflip_command))
     app.add_handler(CommandHandler("8ball", eightball_command))
-    app.add_handler(CommandHandler("luck", luck_command))
     app.add_handler(CommandHandler("fateboard", fateboard_command))
     app.add_handler(CommandHandler("streak", streak_command))
     app.add_handler(CommandHandler("curse", curse_command))
