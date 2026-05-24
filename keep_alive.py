@@ -12,6 +12,7 @@ import threading
 
 import requests
 from flask import Flask
+from config import _env_int
 
 logger = logging.getLogger(__name__)
 
@@ -53,14 +54,6 @@ def _self_ping() -> None:
             logger.info("Self-ping OK (%s)", resp.status_code)
         except Exception as e:
             logger.warning("Self-ping failed: %s", e)
-
-
-def _env_int(name: str, default: int) -> int:
-    try:
-        return int(os.getenv(name, str(default)))
-    except ValueError:
-        logger.warning("%s must be an integer. Using %s.", name, default)
-        return default
 
 
 def keep_alive() -> None:

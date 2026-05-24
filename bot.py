@@ -33,8 +33,8 @@ Commands
 /wouldyourather  -> Would you rather question
 /coinflip        -> Heads or tails
 /8ball           -> Magic 8-ball
-/luck            -> Check someone's luck
 /fateboard       -> Today's fate leaderboard
+/shipboard       -> Top ship pair leaderboard
 /curse           -> Fake daily curse
 /bless           -> Fake daily blessing
 /cancel          -> Cancel the current flow
@@ -60,7 +60,7 @@ from telegram.ext import (
     filters,
 )
 
-from config import TOKEN, TIMEZONE
+from config import TOKEN, TIMEZONE, _env_int
 from countdown_manager import (
     add_countdown,
     get_all_countdowns,
@@ -72,7 +72,6 @@ from countdown_manager import (
     save_fate_entry,
     get_fate_board,
     save_quote,
-    get_random_quote,
     get_quote_count,
     get_all_quotes,
     delete_quote,
@@ -191,11 +190,6 @@ def _daily_rng(label: str, *parts):
     return random.Random(seed)
 
 
-def _stable_rng(label: str, *parts):
-    seed = ":".join(str(part) for part in (label, *parts))
-    return random.Random(seed)
-
-
 def _mentioned_target(update: Update, context: ContextTypes.DEFAULT_TYPE = None) -> str:
     message = update.message
     if not message:
@@ -258,14 +252,6 @@ def _days_label(days: int) -> str:
 
 def _job_name(chat_id: int, name: str) -> str:
     return f"{chat_id}::{name}"
-
-
-def _env_int(name: str, default: int) -> int:
-    try:
-        return int(os.getenv(name, str(default)))
-    except ValueError:
-        logger.warning("%s must be an integer. Using %s.", name, default)
-        return default
 
 
 BOT_OWNER_ID = _env_int("BOT_OWNER_ID", 0)
@@ -368,12 +354,12 @@ HELP_PAGES = {
     "fate": (
         "🔮 *Daily Fate*\n\n"
         "/fate — check your personal daily luck\n"
-        "/fateboard — today's fate leaderboard for the group\n"
-        "/luck @user — check someone's daily luck score"
+        "/fateboard — today's fate leaderboard for the group"
     ),
     "fun": (
         "🎉 *Fun*\n\n"
         "/ship @user1 @user2 — compatibility percentage\n"
+        "/shipboard — top ship pairs leaderboard\n"
         "/roast @user — personalised AI roast\n"
         "/compliment @user — personalised AI compliment\n"
         "/vibecheck — group mood score\n"
@@ -464,10 +450,13 @@ async def help_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 # ---------------------------------------------
 SERPER_API_KEY = os.getenv("SERPER_API_KEY", "")
 SERPER_URL = "https://google.serper.dev/search"
-SERPER_HEADERS = {
-    "X-API-KEY": SERPER_API_KEY,
-    "Content-Type": "application/json",
-}
+# Fix 14b: only populate headers when the key is actually set; an empty key
+# would silently send bad requests and always get 401s.
+SERPER_HEADERS = (
+    {"X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json"}
+    if SERPER_API_KEY
+    else {}
+)
 SERPER_SESSION = requests.Session()
 SEARCH_CACHE_TTL_SECONDS = max(0, _env_int("SEARCH_CACHE_TTL_SECONDS", 900))
 SEARCH_CACHE_MAX_ITEMS = 128
@@ -540,10 +529,11 @@ def _search_web(query: str) -> str:
 
 
 def _call_groq(question: str, search_context: str) -> str:
-    """Call Groq with optional search context."""
+    """Call Groq with optional search context. Response is capped at ~1000 words."""
     system_msg = (
         "You are a helpful assistant. Answer concisely in plain text only. "
         "No markdown formatting, no bullet symbols, no headers. "
+        "Keep your answer under 1000 words. "
         "Use the web search results below if relevant, otherwise use your own knowledge."
     )
     user_msg = question
@@ -556,9 +546,15 @@ def _call_groq(question: str, search_context: str) -> str:
             {"role": "system", "content": system_msg},
             {"role": "user", "content": user_msg},
         ],
-        max_tokens=1024,
+        # Fix 15: ~750 tokens ≈ 1000 words; hard ceiling so replies stay readable.
+        max_tokens=750,
     )
-    return chat.choices[0].message.content.strip()
+    answer = chat.choices[0].message.content.strip()
+    # Secondary safety net: truncate at 1000 words if the model still goes over.
+    words = answer.split()
+    if len(words) > 1000:
+        answer = " ".join(words[:1000]) + "…"
+    return answer
 
 
 def _call_groq_fun(prompt: str) -> str:
@@ -699,9 +695,9 @@ async def received_date(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         )
         return ASK_DATE
 
-    if target_date < _today():
+    if target_date <= _today():
         await update.message.reply_text(
-            f"⚠️ `{target_date}` is in the past. Please choose a future date.\n"
+            f"⚠️ `{target_date}` is today or in the past. Please choose a *future* date.\n"
             f"⏰ You have *{CONV_TIMEOUT} seconds* to reply.",
             parse_mode="Markdown",
         )
@@ -899,10 +895,14 @@ async def list_countdown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         h = entry["reminder_hour"]
         m = entry["reminder_minute"]
         code = entry.get("code", "—")
+        # Fix 12: show creator user_id if present
+        created_by = entry.get("created_by")
+        creator_line = f"\n  👤 Added by user `{created_by}`" if created_by else ""
         lines.append(
             f"• *{name}* `[{code}]`\n"
             f"  📆 {td}  |  {_days_label(days_left)}\n"
-            f"  🔔 Reminder at {h:02d}:{m:02d} MYT\n"
+            f"  🔔 Reminder at {h:02d}:{m:02d} MYT"
+            f"{creator_line}\n"
         )
 
     lines.append("_Remove with_ `/removecountdown <code>` _or_ `/removecountdown <name>`")
@@ -1524,15 +1524,10 @@ async def compliment_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def vibecheck_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    now = datetime.now(TIMEZONE)
-    hour = now.hour
-    if hour < 12:
-        period = "morning"
-    elif hour < 18:
-        period = "afternoon"
-    else:
-        period = "night"
-    rng = _daily_rng("vibecheck", update.effective_chat.id, period)
+    # Fix 11: seed only by date+chat so the score stays consistent all day.
+    # Removing the morning/afternoon/night period means /vibecheck won't change
+    # mid-conversation.
+    rng = _daily_rng("vibecheck", update.effective_chat.id)
     score = rng.randint(0, 100)
     mood = next(message for limit, message in VIBE_TIERS if score <= limit)
 
@@ -1573,7 +1568,10 @@ async def rank_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text("Give me at least 2 things to rank.")
         return
 
-    random.shuffle(items)
+    # Fix 1: use _daily_rng (seeded by chat + title + items) so /rank gives the
+    # same order for the whole day instead of a new shuffle on every call.
+    rng = _daily_rng("rank", update.effective_chat.id, title, ",".join(items))
+    rng.shuffle(items)
     lines = [f"🏆 {title}"]
     lines.extend(f"{index}. {item}" for index, item in enumerate(items, start=1))
     await update.message.reply_text("\n".join(lines))
@@ -1623,53 +1621,6 @@ async def eightball_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await update.message.reply_text(f"🎱 {fallback}")
 
 
-def _luck_result(user_id_or_key: str):
-    """
-    Compute daily luck for a user.
-    Uses the same seed pattern as _get_fate so /luck @me == /fate score.
-    """
-    today_str = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
-    rng = random.Random(f"{user_id_or_key}:{today_str}")
-    score = rng.randint(0, 100)
-    for tier in FATE_TIERS:
-        lo, hi = tier["range"]
-        if lo <= score <= hi:
-            return score, tier["name"], rng.choice(tier["messages"])
-    return score, "🌤️ Neutral", "Just another day."
-
-
-async def luck_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    message = update.message
-    # Try to get a stable user_id from a mention or reply
-    seed_key = None
-    target = None
-    for entity in (message.entities or []):
-        if entity.type == "text_mention" and getattr(entity, "user", None):
-            seed_key = str(entity.user.id)
-            target = _display_user(entity.user)
-            break
-
-    if seed_key is None:
-        mentioned = _mentioned_target(update, context)
-        if mentioned:
-            # @username mention with no user object — seed by normalized name
-            target = mentioned
-            seed_key = _normalize_target(mentioned)
-        else:
-            # No mention — user is checking their own luck; use user_id to match /fate
-            target = _display_user(update.effective_user)
-            seed_key = str(update.effective_user.id)
-
-    score, tier, message_text = _luck_result(seed_key)
-
-    await message.reply_text(
-        f"🍀 Daily Luck — {target}\n"
-        f"Tier: {tier}\n"
-        f"Score: {score}/100\n"
-        f"{message_text}"
-    )
-
-
 async def fateboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     today_str = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
     board = await asyncio.to_thread(get_fate_board, update.effective_chat.id, today_str)
@@ -1698,8 +1649,27 @@ async def fateboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         else:
             filled = round(max(0, min(s, 100)) / 10)
             bar = "█" * filled + "░" * (10 - filled)
+
+        # Fix 9: fetch streak and show a 🔥 badge if streak ≥ 2
+        user_id_str = next(
+            (uid for uid, data in board.items() if data is item), None
+        )
+        streak_badge = ""
+        if user_id_str:
+            try:
+                streak_count, streak_cat = await asyncio.to_thread(
+                    get_fate_streak, int(user_id_str)
+                )
+                if streak_count >= 2:
+                    if streak_cat == "lucky":
+                        streak_badge = f" 🔥×{streak_count}"
+                    elif streak_cat == "unlucky":
+                        streak_badge = f" 💀×{streak_count}"
+            except Exception:
+                pass
+
         lines.append(
-            f"{rank_icon} *{item['name']}* — {item['tier']}\n"
+            f"{rank_icon} *{item['name']}*{streak_badge} — {item['tier']}\n"
             f"    Score: `{s}`  [{bar}]"
         )
 
@@ -1933,10 +1903,11 @@ async def quotes_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     # Start at a random index
     index = random.randrange(len(quotes))
-    await _send_quote_page(update.message.reply_text, chat_id, quotes, index)
+    owner_id = update.effective_user.id
+    await _send_quote_page(update.message.reply_text, chat_id, quotes, index, owner_id)
 
 
-async def _send_quote_page(send_fn, chat_id: int, quotes: list, index: int) -> None:
+async def _send_quote_page(send_fn, chat_id: int, quotes: list, index: int, owner_id: int) -> None:
     total = len(quotes)
     q = quotes[index]
     text = (
@@ -1946,10 +1917,11 @@ async def _send_quote_page(send_fn, chat_id: int, quotes: list, index: int) -> N
     )
     prev_idx = (index - 1) % total
     next_idx = (index + 1) % total
+    # Fix 5: embed owner_id so only that user can paginate
     keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton("◀ Prev", callback_data=f"quote:{chat_id}:{prev_idx}"),
+        InlineKeyboardButton("◀ Prev", callback_data=f"quote:{chat_id}:{prev_idx}:{owner_id}"),
         InlineKeyboardButton(f"{index + 1}/{total}", callback_data="quote:noop"),
-        InlineKeyboardButton("Next ▶", callback_data=f"quote:{chat_id}:{next_idx}"),
+        InlineKeyboardButton("Next ▶", callback_data=f"quote:{chat_id}:{next_idx}:{owner_id}"),
     ]])
     await send_fn(text, parse_mode="Markdown", reply_markup=keyboard)
 
@@ -1960,15 +1932,20 @@ async def quotes_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     data = query.data
     if data == "quote:noop":
         return
-    # Fix 3: split into max 3 parts so chat_ids with ':' don't crash
-    parts = data.split(":", 2)
-    if len(parts) != 3:
+    # Fix 5: callback_data format is quote:<chat_id>:<index>:<owner_id>
+    parts = data.split(":", 3)
+    if len(parts) != 4:
         return
-    _, chat_id_str, idx_str = parts
+    _, chat_id_str, idx_str, owner_id_str = parts
     try:
         chat_id = int(chat_id_str)
         index = int(idx_str)
+        owner_id = int(owner_id_str)
     except ValueError:
+        return
+    # Only the user who ran /quotes can paginate their session
+    if update.effective_user.id != owner_id:
+        await query.answer("Only the person who opened /quotes can flip pages.", show_alert=True)
         return
     quotes = await asyncio.to_thread(get_all_quotes, chat_id)
     if not quotes:
@@ -1985,9 +1962,9 @@ async def quotes_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     prev_idx = (index - 1) % total
     next_idx = (index + 1) % total
     keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton("◀ Prev", callback_data=f"quote:{chat_id}:{prev_idx}"),
+        InlineKeyboardButton("◀ Prev", callback_data=f"quote:{chat_id}:{prev_idx}:{owner_id}"),
         InlineKeyboardButton(f"{index + 1}/{total}", callback_data="quote:noop"),
-        InlineKeyboardButton("Next ▶", callback_data=f"quote:{chat_id}:{next_idx}"),
+        InlineKeyboardButton("Next ▶", callback_data=f"quote:{chat_id}:{next_idx}:{owner_id}"),
     ]])
     try:
         await query.edit_message_text(text, parse_mode="Markdown", reply_markup=keyboard)
@@ -2012,6 +1989,32 @@ async def deletequote_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     await update.message.reply_text(msg)
 
 
+# ---------------------------------------------
+# Fix 7: /shipboard — top ship pairs leaderboard
+# ---------------------------------------------
+async def shipboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    pairs = await asyncio.to_thread(get_top_ship_pairs, chat_id, 10)
+
+    if not pairs:
+        await update.message.reply_text(
+            "💘 No ships recorded yet. Use /ship to start pairing people!"
+        )
+        return
+
+    medals = ["🥇", "🥈", "🥉"]
+    lines = ["💘 *Top Ship Pairs*\n"]
+    for i, pair in enumerate(pairs, start=1):
+        rank_icon = medals[i - 1] if i <= 3 else f"{i}."
+        score = int(pair["score"])
+        filled = round(score / 10)
+        bar = "❤️" * filled + "🖤" * (10 - filled)
+        lines.append(
+            f"{rank_icon} *{pair['label_a']}* × *{pair['label_b']}*\n"
+            f"    {score}%  [{bar}]"
+        )
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
 # ---------------------------------------------
@@ -2186,7 +2189,6 @@ def main() -> None:
     app.add_handler(CommandHandler("wouldyourather", would_you_rather_command))
     app.add_handler(CommandHandler("coinflip", coinflip_command))
     app.add_handler(CommandHandler("8ball", eightball_command))
-    app.add_handler(CommandHandler("luck", luck_command))
     app.add_handler(CommandHandler("fateboard", fateboard_command))
     app.add_handler(CommandHandler("curse", curse_command))
     app.add_handler(CommandHandler("bless", bless_command))
@@ -2196,6 +2198,7 @@ def main() -> None:
     app.add_handler(CommandHandler("quote", quote_command))
     app.add_handler(CommandHandler("quotes", quotes_command))
     app.add_handler(CommandHandler("deletequote", deletequote_command))
+    app.add_handler(CommandHandler("shipboard", shipboard_command))
     app.add_handler(CommandHandler("mvp", mvp_command))
     app.add_handler(CommandHandler("hot", hot_command))
 

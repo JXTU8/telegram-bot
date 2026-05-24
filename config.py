@@ -1,6 +1,20 @@
+import logging
 import pytz
 import os
 import sys
+
+logger = logging.getLogger(__name__)
+
+# ─────────────────────────────────────────────
+# Shared integer env-var helper
+# ─────────────────────────────────────────────
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except ValueError:
+        logger.warning("%s must be an integer. Using %s.", name, default)
+        return default
+
 
 # ─────────────────────────────────────────────
 # Bot token — set via environment variable

@@ -449,7 +449,7 @@ def get_seen_users(chat_id: int) -> dict:
 # Redis key: remind_count:<user_id>  →  int (TTL: 25h, resets daily)
 # ─────────────────────────────────────────────
 _REMIND_COUNT_TTL = 60 * 60 * 25  # 25 hours
-_REMIND_MAX_PER_USER = 10
+# Note: the per-user cap (REMIND_MAX_PER_USER = 10) lives in bot.py — do not duplicate here.
 
 
 def _remind_count_key(user_id: int) -> str:
