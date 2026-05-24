@@ -12,7 +12,8 @@ import threading
 
 import requests
 from flask import Flask
-from config import _env_int
+
+from config import env_int
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +66,7 @@ def keep_alive() -> None:
             return
         _started = True
 
-    port = _env_int("PORT", 8080)
+    port = env_int("PORT", 8080)
 
     # Web server thread
     server_thread = threading.Thread(

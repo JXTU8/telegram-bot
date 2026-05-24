@@ -5,7 +5,10 @@ Group countdown bot - MYT (GMT+8).
 
 Flow to add a countdown:
   /addcountdown -> asks name -> asks date -> asks time -> done!
-  (30 second timeout at each step - auto cancels if no response)
+  (90 second timeout at each step - auto cancels if no response)
+
+Flow to edit a countdown:
+  /editcountdown <code> -> asks field (date/time) -> asks new value -> done!
 
 Flow to make a decision:
   /choose -> asks decision -> asks options -> dramatic reveal!
@@ -19,22 +22,25 @@ Commands
 /help            -> Command reference
 /addcountdown    -> Add a new named countdown (multi-step)
 /listcountdown   -> Show all active countdowns in this group
-/removecountdown -> Remove a countdown by name
+/removecountdown -> Remove a countdown by code or name
+/editcountdown   -> Edit a countdown's date or time
 /choose          -> Let the bot decide for you
-/ask             -> Ask AI anything
+/ask             -> Ask AI anything (max 500 chars)
 /fate            -> Check your daily luck
+/fateboard       -> Today's fate leaderboard with streak badges
+/streak          -> Check your current fate streak
 /ship            -> Compatibility percentage
+/shipboard       -> Top ship pairs in this group
 /roast           -> Friendly roast
 /compliment      -> Random compliment
-/vibecheck       -> Group mood score
-/rank            -> Random ranking
+/vibecheck       -> Group mood score (consistent all day)
+/rank            -> Daily consistent random ranking
 /truth           -> Truth question
 /dare            -> Dare challenge
 /wouldyourather  -> Would you rather question
 /coinflip        -> Heads or tails
 /8ball           -> Magic 8-ball
-/fateboard       -> Today's fate leaderboard
-/shipboard       -> Top ship pair leaderboard
+/luck            -> Check someone's luck (with progress bar)
 /curse           -> Fake daily curse
 /bless           -> Fake daily blessing
 /cancel          -> Cancel the current flow
@@ -45,14 +51,15 @@ import os
 import random
 import asyncio
 import re
+import time
 from datetime import date, datetime
-from time import monotonic
 
 import requests
 from groq import Groq
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
 from telegram.ext import (
     ApplicationBuilder,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     ConversationHandler,
@@ -60,9 +67,10 @@ from telegram.ext import (
     filters,
 )
 
-from config import TOKEN, TIMEZONE, _env_int
+from config import TOKEN, TIMEZONE, env_int
 from countdown_manager import (
     add_countdown,
+    get_countdown,
     get_all_countdowns,
     get_all_chats,
     remove_countdown,
@@ -84,6 +92,9 @@ from countdown_manager import (
     increment_remind_count,
     get_remind_count,
     decrement_remind_count,
+    save_remind_job,
+    delete_remind_job,
+    get_all_remind_jobs,
 )
 from keep_alive import keep_alive
 
@@ -113,6 +124,7 @@ else:
 # ---------------------------------------------
 ASK_NAME, ASK_DATE, ASK_TIME = range(3)
 ASK_DECISION, ASK_OPTIONS = range(3, 5)
+ASK_EDIT_FIELD, ASK_EDIT_VALUE = range(5, 7)
 
 CONV_TIMEOUT = 90
 
@@ -168,9 +180,8 @@ VERDICT_LINES = [
 ]
 
 
-
 # ---------------------------------------------
-# Helpers (grouped here for easy reference — fix 8)
+# Helpers
 # ---------------------------------------------
 def _display_user(user) -> str:
     return user.first_name or user.username or str(user.id)
@@ -208,7 +219,6 @@ def _mentioned_target(update: Update, context: ContextTypes.DEFAULT_TYPE = None)
     for entity in message.entities or []:
         if entity.type != "bot_command":
             continue
-
         command_text = message.parse_entity(entity)
         if "@" in command_text:
             ignored_usernames.add(command_text.split("@", 1)[1].casefold())
@@ -216,12 +226,10 @@ def _mentioned_target(update: Update, context: ContextTypes.DEFAULT_TYPE = None)
     for entity in message.entities or []:
         if entity.type not in ("mention", "text_mention"):
             continue
-
         if getattr(entity, "user", None):
             if entity.user.id in ignored_user_ids:
                 continue
             return _display_user(entity.user)
-
         mention = message.parse_entity(entity)
         if _normalize_target(mention) in ignored_usernames:
             continue
@@ -234,10 +242,6 @@ def _target_from_mention_or_sender(update: Update, context: ContextTypes.DEFAULT
     return _mentioned_target(update, context) or _display_user(update.effective_user)
 
 
-
-# ---------------------------------------------
-# Helpers
-# ---------------------------------------------
 def _today() -> date:
     return datetime.now(TIMEZONE).date()
 
@@ -254,7 +258,7 @@ def _job_name(chat_id: int, name: str) -> str:
     return f"{chat_id}::{name}"
 
 
-BOT_OWNER_ID = _env_int("BOT_OWNER_ID", 0)
+BOT_OWNER_ID = env_int("BOT_OWNER_ID", 0)
 BOT_OWNER_USERNAMES = {
     username.strip().lstrip("@").casefold()
     for username in os.getenv("BOT_OWNER_USERNAME", "").replace(",", " ").split()
@@ -289,9 +293,10 @@ def _schedule_reminder(app, chat_id: int, name: str, hour: int, minute: int) -> 
 # Timeout handler
 # ---------------------------------------------
 async def conversation_timeout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    # Fix 12: detect which flow timed out and give the right hint
     if "new_countdown_name" in context.user_data or "new_countdown_date" in context.user_data:
         hint = "Start again with /addcountdown."
+    elif "edit_countdown_name" in context.user_data:
+        hint = "Start again with /editcountdown."
     elif "decision" in context.user_data:
         hint = "Start again with /choose."
     else:
@@ -315,6 +320,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "I can also make decisions and answer questions!\n\n"
         "➕ /addcountdown — add a new countdown\n"
         "📋 /listcountdown — see all active countdowns\n"
+        "✏️ /editcountdown — edit a countdown's date or time\n"
         "🗑️ /removecountdown — remove a countdown\n"
         "🎲 /choose — let me decide for you\n"
         "🤖 /ask — ask me anything\n\n"
@@ -328,21 +334,19 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 # ---------------------------------------------
 # /help — paginated with inline keyboard
 # ---------------------------------------------
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
-from telegram.ext import CallbackQueryHandler
-
 HELP_PAGES = {
     "countdown": (
         "⏱ *Countdown*\n\n"
         "/addcountdown — add a new countdown, step by step\n"
         "/listcountdown — see all active countdowns in this group\n"
-        "/removecountdown <name> — remove a countdown by name"
+        "/removecountdown <code> — remove a countdown\n"
+        "/editcountdown <code> — edit a countdown's date or time"
     ),
     "decisions": (
         "🎲 *Decisions*\n\n"
         "/choose — can't decide? let the bot pick for you\n"
         "/decide opt1, opt2, opt3 — instant pick\n"
-        "/rank topic: item1, item2, item3 — randomly rank things\n"
+        "/rank topic: item1, item2, item3 — daily consistent ranking\n"
         "/poll question: opt1, opt2 — send a native Telegram poll"
     ),
     "ai": (
@@ -354,12 +358,14 @@ HELP_PAGES = {
     "fate": (
         "🔮 *Daily Fate*\n\n"
         "/fate — check your personal daily luck\n"
-        "/fateboard — today's fate leaderboard for the group"
+        "/fateboard — today's fate leaderboard with streak badges\n"
+        "/streak — check your current fate streak\n"
+        "/luck @user — check someone's daily luck score"
     ),
     "fun": (
         "🎉 *Fun*\n\n"
         "/ship @user1 @user2 — compatibility percentage\n"
-        "/shipboard — top ship pairs leaderboard\n"
+        "/shipboard — top ship pairs in this group\n"
         "/roast @user — personalised AI roast\n"
         "/compliment @user — personalised AI compliment\n"
         "/vibecheck — group mood score\n"
@@ -375,12 +381,13 @@ HELP_PAGES = {
         "💬 *Quotes*\n\n"
         "/quote — reply to any message to save it\n"
         "/quotes — browse saved quotes with prev/next\n"
-        "/deletequote <number> — delete a quote by its number"
+        "/deletequote <number> — delete a quote (admins only)"
     ),
     "reminders": (
         "⏰ *Reminders*\n\n"
         "/remind 10m take a break — set a personal reminder\n"
-        "/remind 2h check the oven — supports s/sec, m/min, h/hr and more"
+        "/remind 2h check the oven — supports s/sec, m/min, h/hr and more\n"
+        "_Reminders survive bot restarts._"
     ),
     "other": (
         "⚙️ *Other*\n\n"
@@ -450,16 +457,10 @@ async def help_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 # ---------------------------------------------
 SERPER_API_KEY = os.getenv("SERPER_API_KEY", "")
 SERPER_URL = "https://google.serper.dev/search"
-# Fix 14b: only populate headers when the key is actually set; an empty key
-# would silently send bad requests and always get 401s.
-SERPER_HEADERS = (
-    {"X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json"}
-    if SERPER_API_KEY
-    else {}
-)
 SERPER_SESSION = requests.Session()
-SEARCH_CACHE_TTL_SECONDS = max(0, _env_int("SEARCH_CACHE_TTL_SECONDS", 900))
+SEARCH_CACHE_TTL_SECONDS = max(0, env_int("SEARCH_CACHE_TTL_SECONDS", 900))
 SEARCH_CACHE_MAX_ITEMS = 128
+MAX_ASK_LENGTH = 500
 _SEARCH_CACHE = {}
 
 
@@ -471,11 +472,9 @@ def _get_cached_search(query: str):
     cached = _SEARCH_CACHE.get(_cache_key(query))
     if not cached:
         return None
-
     cached_at, result = cached
-    if monotonic() - cached_at <= SEARCH_CACHE_TTL_SECONDS:
+    if time.monotonic() - cached_at <= SEARCH_CACHE_TTL_SECONDS:
         return result
-
     _SEARCH_CACHE.pop(_cache_key(query), None)
     return None
 
@@ -484,8 +483,7 @@ def _set_cached_search(query: str, result: str) -> None:
     if len(_SEARCH_CACHE) >= SEARCH_CACHE_MAX_ITEMS:
         oldest_key = min(_SEARCH_CACHE, key=lambda key: _SEARCH_CACHE[key][0])
         _SEARCH_CACHE.pop(oldest_key, None)
-
-    _SEARCH_CACHE[_cache_key(query)] = (monotonic(), result)
+    _SEARCH_CACHE[_cache_key(query)] = (time.monotonic(), result)
 
 
 def _search_web(query: str) -> str:
@@ -497,10 +495,15 @@ def _search_web(query: str) -> str:
     if cached is not None:
         return cached
 
+    headers = {
+        "X-API-KEY": SERPER_API_KEY,
+        "Content-Type": "application/json",
+    }
+
     try:
         resp = SERPER_SESSION.post(
             SERPER_URL,
-            headers=SERPER_HEADERS,
+            headers=headers,
             json={"q": query, "num": 5},
             timeout=(3, 8),
         )
@@ -529,11 +532,10 @@ def _search_web(query: str) -> str:
 
 
 def _call_groq(question: str, search_context: str) -> str:
-    """Call Groq with optional search context. Response is capped at ~1000 words."""
+    """Call Groq with optional search context."""
     system_msg = (
         "You are a helpful assistant. Answer concisely in plain text only. "
         "No markdown formatting, no bullet symbols, no headers. "
-        "Keep your answer under 1000 words. "
         "Use the web search results below if relevant, otherwise use your own knowledge."
     )
     user_msg = question
@@ -546,15 +548,9 @@ def _call_groq(question: str, search_context: str) -> str:
             {"role": "system", "content": system_msg},
             {"role": "user", "content": user_msg},
         ],
-        # Fix 15: ~750 tokens ≈ 1000 words; hard ceiling so replies stay readable.
-        max_tokens=750,
+        max_tokens=1024,
     )
-    answer = chat.choices[0].message.content.strip()
-    # Secondary safety net: truncate at 1000 words if the model still goes over.
-    words = answer.split()
-    if len(words) > 1000:
-        answer = " ".join(words[:1000]) + "…"
-    return answer
+    return chat.choices[0].message.content.strip()
 
 
 def _call_groq_fun(prompt: str) -> str:
@@ -594,6 +590,12 @@ async def ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     question = " ".join(context.args)
+    if len(question) > MAX_ASK_LENGTH:
+        await update.message.reply_text(
+            f"⚠️ Question too long. Please keep it under {MAX_ASK_LENGTH} characters."
+        )
+        return
+
     thinking_msg = await update.message.reply_text("🤖 Searching and thinking...")
 
     try:
@@ -695,9 +697,10 @@ async def received_date(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         )
         return ASK_DATE
 
+    # Fix: reject today and past dates — countdowns must be future events
     if target_date <= _today():
         await update.message.reply_text(
-            f"⚠️ `{target_date}` is today or in the past. Please choose a *future* date.\n"
+            f"⚠️ `{target_date}` must be a future date (not today or in the past).\n"
             f"⏰ You have *{CONV_TIMEOUT} seconds* to reply.",
             parse_mode="Markdown",
         )
@@ -752,13 +755,176 @@ async def received_time(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
             f"📆 Target: *{target_date}*\n"
             f"{_days_label(days_left)}\n"
             f"🔔 Daily reminder at *{hour:02d}:{minute:02d} MYT*\n\n"
-            f"_To remove: `/removecountdown {code}`_"
+            f"_Edit: `/editcountdown {code}`  ·  Remove: `/removecountdown {code}`_"
         ),
         parse_mode="Markdown",
     )
 
     context.user_data.clear()
     logger.info("Chat %s added countdown '%s' -> %s at %02d:%02d", chat_id, name, target_date, hour, minute)
+    return ConversationHandler.END
+
+
+# ---------------------------------------------
+# /editcountdown
+# ---------------------------------------------
+async def _is_chat_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Return True if the calling user is a group admin or creator."""
+    try:
+        member = await context.bot.get_chat_member(
+            update.effective_chat.id, update.effective_user.id
+        )
+        return member.status in ("administrator", "creator")
+    except Exception:
+        return False
+
+
+async def editcountdown_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: `/editcountdown <code or name>`\n"
+            "_(Use /listcountdown to see codes)_",
+            parse_mode="Markdown",
+        )
+        return ConversationHandler.END
+
+    arg = " ".join(context.args).strip()
+
+    # Resolve code → name
+    name = None
+    if len(arg) <= 4 and arg.isalnum():
+        name = await asyncio.to_thread(get_countdown_by_code, chat_id, arg.lower())
+    if name is None:
+        name = arg
+
+    if not await asyncio.to_thread(countdown_exists, chat_id, name):
+        await update.message.reply_text(
+            f"⚠️ No countdown found for `{arg}`.\n"
+            "Use /listcountdown to see all countdowns.",
+            parse_mode="Markdown",
+        )
+        return ConversationHandler.END
+
+    # Permission check
+    creator_id = await asyncio.to_thread(get_countdown_creator, chat_id, name)
+    is_admin = await _is_chat_admin(update, context)
+    if creator_id is not None and user_id != creator_id and not is_admin:
+        await update.message.reply_text(
+            "⚠️ Only the person who created this countdown or a group admin can edit it."
+        )
+        return ConversationHandler.END
+
+    context.user_data["edit_countdown_name"] = name
+    bot_msg = await update.message.reply_text(
+        f"✏️ *Editing: {name}*\n\n"
+        "What do you want to change? Type `date` or `time`\n\n"
+        f"⏰ You have *{CONV_TIMEOUT} seconds* to reply.\n"
+        "Type /cancel to stop.",
+        parse_mode="Markdown",
+    )
+    _track(context, update.message, bot_msg)
+    return ASK_EDIT_FIELD
+
+
+async def received_edit_field(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    field = update.message.text.strip().lower()
+
+    if field not in ("date", "time"):
+        await update.message.reply_text(
+            "⚠️ Please type `date` or `time`.\n"
+            f"⏰ You have *{CONV_TIMEOUT} seconds* to reply.",
+            parse_mode="Markdown",
+        )
+        return ASK_EDIT_FIELD
+
+    context.user_data["edit_field"] = field
+    _track(context, update.message)
+
+    if field == "date":
+        prompt = "Enter the new target date:\nFormat: `YYYY-MM-DD` _(e.g. 2025-12-31)_"
+    else:
+        prompt = "Enter the new reminder time:\nFormat: `HH:MM` in 24hr MYT _(e.g. 08:30)_"
+
+    bot_msg = await update.message.reply_text(
+        f"{prompt}\n\n⏰ You have *{CONV_TIMEOUT} seconds* to reply.",
+        parse_mode="Markdown",
+    )
+    _track(context, bot_msg)
+    return ASK_EDIT_VALUE
+
+
+async def received_edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    chat_id = update.effective_chat.id
+    name = context.user_data["edit_countdown_name"]
+    field = context.user_data["edit_field"]
+    value_str = update.message.text.strip()
+
+    entry = await asyncio.to_thread(get_countdown, chat_id, name)
+    if not entry:
+        await update.message.reply_text("⚠️ Countdown no longer exists.")
+        context.user_data.clear()
+        return ConversationHandler.END
+
+    if field == "date":
+        try:
+            new_date = datetime.strptime(value_str, "%Y-%m-%d").date()
+        except ValueError:
+            await update.message.reply_text(
+                "⚠️ Invalid format. Use `YYYY-MM-DD` _(e.g. 2025-12-31)_\n"
+                f"⏰ You have *{CONV_TIMEOUT} seconds* to reply.",
+                parse_mode="Markdown",
+            )
+            return ASK_EDIT_VALUE
+
+        if new_date <= _today():
+            await update.message.reply_text(
+                f"⚠️ `{new_date}` must be a future date.\n"
+                f"⏰ You have *{CONV_TIMEOUT} seconds* to reply.",
+                parse_mode="Markdown",
+            )
+            return ASK_EDIT_VALUE
+
+        target_date = new_date
+        hour = entry["reminder_hour"]
+        minute = entry["reminder_minute"]
+    else:
+        try:
+            parsed = datetime.strptime(value_str, "%H:%M")
+            hour, minute = parsed.hour, parsed.minute
+        except ValueError:
+            await update.message.reply_text(
+                "⚠️ Invalid format. Use `HH:MM` _(e.g. 08:30)_\n"
+                f"⏰ You have *{CONV_TIMEOUT} seconds* to reply.",
+                parse_mode="Markdown",
+            )
+            return ASK_EDIT_VALUE
+
+        target_date = date.fromisoformat(entry["target_date"])
+
+    created_by = entry.get("created_by", update.effective_user.id)
+    await asyncio.to_thread(add_countdown, chat_id, name, target_date, hour, minute, created_by)
+    _schedule_reminder(context.application, chat_id, name, hour, minute)
+
+    _track(context, update.message)
+    await _delete_tracked(context)
+
+    days_left = (target_date - _today()).days
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=(
+            f"✅ *Countdown Updated — {name}*\n\n"
+            f"📆 Target: *{target_date}*\n"
+            f"{_days_label(days_left)}\n"
+            f"🔔 Daily reminder at *{hour:02d}:{minute:02d} MYT*"
+        ),
+        parse_mode="Markdown",
+    )
+
+    context.user_data.clear()
+    logger.info("Chat %s edited countdown '%s' -> %s at %02d:%02d", chat_id, name, target_date, hour, minute)
     return ConversationHandler.END
 
 
@@ -829,10 +995,7 @@ async def received_options(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     ]
 
     highest_weight = max(item["weight"] for item in odds)
-    winning_options = [
-        item["option"] for item in odds
-        if item["weight"] == highest_weight
-    ]
+    winning_options = [item["option"] for item in odds if item["weight"] == highest_weight]
     chosen = random.choice(winning_options)
     percentage_lines = "\n".join(
         f"{'👉' if item['option'] == chosen else '   '} {item['option']} - {item['percentage']:.2f}%"
@@ -881,8 +1044,8 @@ async def list_countdown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     today = _today()
+    seen = await asyncio.to_thread(get_seen_users, chat_id)
 
-    # Sort entries by days remaining (soonest first; overdue shown last)
     sorted_entries = sorted(
         countdowns.items(),
         key=lambda kv: (date.fromisoformat(kv[1]["target_date"]) - today).days
@@ -895,34 +1058,23 @@ async def list_countdown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         h = entry["reminder_hour"]
         m = entry["reminder_minute"]
         code = entry.get("code", "—")
-        # Fix 12: show creator user_id if present
-        created_by = entry.get("created_by")
-        creator_line = f"\n  👤 Added by user `{created_by}`" if created_by else ""
+        creator_id = str(entry.get("created_by", ""))
+        creator_name = seen.get(creator_id, "Unknown")
         lines.append(
             f"• *{name}* `[{code}]`\n"
             f"  📆 {td}  |  {_days_label(days_left)}\n"
-            f"  🔔 Reminder at {h:02d}:{m:02d} MYT"
-            f"{creator_line}\n"
+            f"  🔔 {h:02d}:{m:02d} MYT  |  👤 {creator_name}\n"
         )
 
-    lines.append("_Remove with_ `/removecountdown <code>` _or_ `/removecountdown <name>`")
+    lines.append(
+        "_Edit:_ `/editcountdown <code>`  ·  _Remove:_ `/removecountdown <code>`"
+    )
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
 # ---------------------------------------------
 # /removecountdown <code or name>
 # ---------------------------------------------
-async def _is_chat_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Return True if the calling user is a group admin or creator."""
-    try:
-        member = await context.bot.get_chat_member(
-            update.effective_chat.id, update.effective_user.id
-        )
-        return member.status in ("administrator", "creator")
-    except Exception:
-        return False
-
-
 async def remove_countdown_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
@@ -943,11 +1095,9 @@ async def remove_countdown_cmd(update: Update, context: ContextTypes.DEFAULT_TYP
     if len(arg) <= 4 and arg.isalnum():
         name = await asyncio.to_thread(get_countdown_by_code, chat_id, arg.lower())
 
-    # Fall back to treating the arg as the full name
     if name is None:
         name = arg
 
-    # Fix 4: only the creator or a group admin may remove a countdown
     creator_id = await asyncio.to_thread(get_countdown_creator, chat_id, name)
     is_admin = await _is_chat_admin(update, context)
     if creator_id is not None and user_id != creator_id and not is_admin:
@@ -980,7 +1130,6 @@ async def daily_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = job.chat_id
     name = job.data["countdown_name"]
 
-    # Fix 1: use asyncio.to_thread so Redis calls don't block the event loop
     countdowns = await asyncio.to_thread(get_all_countdowns, chat_id)
     entry = countdowns.get(name)
 
@@ -999,7 +1148,6 @@ async def daily_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
             "Use `/addcountdown` to add a new one.",
             parse_mode="Markdown",
         )
-        # Fix 1: async Redis removal
         await asyncio.to_thread(remove_countdown, chat_id, name)
         job.schedule_removal()
         return
@@ -1018,7 +1166,6 @@ async def daily_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
 # Restore jobs on startup
 # ---------------------------------------------
 async def restore_jobs(app) -> None:
-    # Fix 2: run blocking Redis call in a thread so it doesn't block the event loop
     all_data = await asyncio.to_thread(get_all_chats)
     count = 0
     for chat_id, countdowns in all_data.items():
@@ -1027,14 +1174,50 @@ async def restore_jobs(app) -> None:
             m = entry.get("reminder_minute", 0)
             _schedule_reminder(app, chat_id, name, h, m)
             count += 1
-    logger.info("Restored %s reminder job(s) from Redis.", count)
+    logger.info("Restored %s countdown reminder job(s) from Redis.", count)
+
+
+async def restore_remind_jobs(app) -> None:
+    """Re-schedule one-shot /remind jobs that survived a restart."""
+    all_jobs = await asyncio.to_thread(get_all_remind_jobs)
+    count = 0
+    now = time.time()
+    for chat_id, jobs in all_jobs.items():
+        for job in jobs:
+            delay = max(5.0, job["fire_at"] - now)
+            job_id = job["job_id"]
+            user_id = job["user_id"]
+            mention = job["user_mention_html"]
+            text = job["text"]
+
+            async def _fire(
+                ctx,
+                _cid=chat_id, _jid=job_id, _uid=user_id,
+                _mention=mention, _text=text,
+            ):
+                await ctx.bot.send_message(
+                    chat_id=_cid,
+                    text=f"⏰ Reminder for {_mention}!\n{_text}",
+                    parse_mode="HTML",
+                )
+                await asyncio.to_thread(delete_remind_job, _cid, _jid)
+                await asyncio.to_thread(decrement_remind_count, _uid)
+
+            app.job_queue.run_once(_fire, when=delay, chat_id=chat_id)
+            count += 1
+    logger.info("Restored %s one-shot remind job(s) from Redis.", count)
+
+
+async def on_startup(app) -> None:
+    await restore_jobs(app)
+    await restore_remind_jobs(app)
 
 
 # ---------------------------------------------
 # /fate - Daily luck predictor
 # ---------------------------------------------
-FATE_LUCKY_ID = _env_int("FATE_LUCKY_ID", 0)
-FATE_UNLUCKY_ID = _env_int("FATE_UNLUCKY_ID", 0)
+FATE_LUCKY_ID = env_int("FATE_LUCKY_ID", 0)
+FATE_UNLUCKY_ID = env_int("FATE_UNLUCKY_ID", 0)
 
 FATE_TIERS = [
     {
@@ -1106,8 +1289,8 @@ FATE_EXTREME_UNLUCKY_MESSAGES = [
     "MAXIMUM CURSE DETECTED. Even the laws of physics are against you today. We recommend staying very very still.",
 ]
 
+
 def _remember_fate(chat_id: int, user_id: int, name: str, score: int, tier: str) -> None:
-    """Sync helper — call via asyncio.to_thread."""
     today_str = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
     save_fate_entry(chat_id, today_str, user_id, name, score, tier)
 
@@ -1141,8 +1324,6 @@ def _get_fate(user_id: int):
     return score, "🌤️ Neutral", "Just another day."
 
 
-
-
 async def fate_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     user_id = user.id
@@ -1151,7 +1332,6 @@ async def fate_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     score, tier, message = _get_fate(user_id)
     today_str = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
 
-    # Determine streak category
     if score == 999:
         tier_category = "lucky"
     elif score == -999:
@@ -1163,7 +1343,6 @@ async def fate_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     else:
         tier_category = "neutral"
 
-    # Non-blocking Redis writes
     asyncio.create_task(
         asyncio.to_thread(_remember_fate, update.effective_chat.id, user_id, username, score, tier)
     )
@@ -1327,7 +1506,6 @@ BLESS_LINES = [
 ]
 
 
-
 def _ship_target(label: str, user_id=None, username: str = "", explicit_username: bool = False) -> dict:
     return {
         "label": label,
@@ -1377,10 +1555,7 @@ def _extract_ship_targets(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if "," in text:
         parts = [part.strip() for part in text.split(",") if part.strip()]
         if len(parts) >= 2:
-            return [
-                _ship_target(parts[0]),
-                _ship_target(parts[1]),
-            ]
+            return [_ship_target(parts[0]), _ship_target(parts[1])]
 
     if replied and replied.from_user and len(context.args) == 1:
         other_target = mentioned_targets[0] if mentioned_targets else _ship_target(
@@ -1418,11 +1593,9 @@ def _extract_ship_targets(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def _is_protected_ship_target(target: dict) -> bool:
     if BOT_OWNER_ID and target.get("user_id") == BOT_OWNER_ID:
         return True
-
     username = target.get("username", "")
     if target.get("explicit_username") and username in BOT_OWNER_USERNAMES:
         return True
-
     return False
 
 
@@ -1463,14 +1636,12 @@ async def ship_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     score = rng.randint(0, 10000) / 100
     chat_id = update.effective_chat.id
 
-    # Track users if we have real user objects
     for t in targets:
         if t.get("user_id"):
             asyncio.create_task(
                 asyncio.to_thread(track_seen_user, chat_id, t["user_id"], t["label"])
             )
 
-    # Persist to ship leaderboard (non-blocking)
     pair_key = f"{normalized[0]}:{normalized[1]}"
     asyncio.create_task(
         asyncio.to_thread(save_ship_pair, chat_id, pair_key, target_a, target_b, score)
@@ -1485,6 +1656,31 @@ async def ship_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         f"_{_ship_comment(score)}_",
         parse_mode="Markdown",
     )
+
+
+async def shipboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    pairs = await asyncio.to_thread(get_top_ship_pairs, chat_id, 5)
+
+    if not pairs:
+        await update.message.reply_text(
+            "💞 No ships recorded yet!\nUse /ship @user1 @user2 to get started."
+        )
+        return
+
+    medals = ["🥇", "🥈", "🥉"]
+    lines = ["💞 *Top Ship Pairs*\n"]
+    for i, pair in enumerate(pairs, 1):
+        medal = medals[i - 1] if i <= 3 else f"{i}."
+        score = pair["score"]
+        filled = round(score / 10)
+        bar = "█" * filled + "░" * (10 - filled)
+        lines.append(
+            f"{medal} *{pair['label_a']}* × *{pair['label_b']}*\n"
+            f"   `{score:.2f}%`  [{bar}]"
+        )
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
 async def roast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1524,12 +1720,10 @@ async def compliment_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def vibecheck_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # Fix 11: seed only by date+chat so the score stays consistent all day.
-    # Removing the morning/afternoon/night period means /vibecheck won't change
-    # mid-conversation.
+    # Fixed: purely daily seed — consistent result all day for the group
     rng = _daily_rng("vibecheck", update.effective_chat.id)
     score = rng.randint(0, 100)
-    mood = next(message for limit, message in VIBE_TIERS if score <= limit)
+    mood = next(msg for limit, msg in VIBE_TIERS if score <= limit)
 
     await update.message.reply_text(
         f"📡 Vibe Check\n"
@@ -1568,12 +1762,13 @@ async def rank_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text("Give me at least 2 things to rank.")
         return
 
-    # Fix 1: use _daily_rng (seeded by chat + title + items) so /rank gives the
-    # same order for the whole day instead of a new shuffle on every call.
-    rng = _daily_rng("rank", update.effective_chat.id, title, ",".join(items))
-    rng.shuffle(items)
+    # Fixed: use daily seeded RNG so the ranking is consistent all day
+    rng = _daily_rng("rank", update.effective_chat.id, title.casefold())
+    items_copy = list(items)
+    rng.shuffle(items_copy)
+
     lines = [f"🏆 {title}"]
-    lines.extend(f"{index}. {item}" for index, item in enumerate(items, start=1))
+    lines.extend(f"{i}. {item}" for i, item in enumerate(items_copy, 1))
     await update.message.reply_text("\n".join(lines))
 
 
@@ -1621,6 +1816,54 @@ async def eightball_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await update.message.reply_text(f"🎱 {fallback}")
 
 
+def _luck_result(user_id_or_key: str):
+    """Compute daily luck for a user — same seed pattern as /fate."""
+    today_str = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
+    rng = random.Random(f"{user_id_or_key}:{today_str}")
+    score = rng.randint(0, 100)
+    for tier in FATE_TIERS:
+        lo, hi = tier["range"]
+        if lo <= score <= hi:
+            return score, tier["name"], rng.choice(tier["messages"])
+    return score, "🌤️ Neutral", "Just another day."
+
+
+async def luck_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.message
+    seed_key = None
+    target = None
+
+    for entity in (message.entities or []):
+        if entity.type == "text_mention" and getattr(entity, "user", None):
+            seed_key = str(entity.user.id)
+            target = _display_user(entity.user)
+            break
+
+    if seed_key is None:
+        mentioned = _mentioned_target(update, context)
+        if mentioned:
+            target = mentioned
+            seed_key = _normalize_target(mentioned)
+        else:
+            target = _display_user(update.effective_user)
+            seed_key = str(update.effective_user.id)
+
+    score, tier, message_text = _luck_result(seed_key)
+
+    filled = round(score / 10)
+    bar = "█" * filled + "░" * (10 - filled)
+
+    await message.reply_text(
+        f"🍀 *Daily Luck — {target}*\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"Tier: *{tier}*\n"
+        f"Score: `{score}/100  [{bar}]`\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"_{message_text}_",
+        parse_mode="Markdown",
+    )
+
+
 async def fateboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     today_str = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
     board = await asyncio.to_thread(get_fate_board, update.effective_chat.id, today_str)
@@ -1631,16 +1874,20 @@ async def fateboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
         return
 
-    users = sorted(
-        board.values(),
-        key=lambda item: item["score"],
-        reverse=True,
+    sorted_items = sorted(board.items(), key=lambda kv: kv[1]["score"], reverse=True)
+
+    # Fetch streaks for all users in parallel
+    user_ids = [int(uid) for uid, _ in sorted_items]
+    streak_results = await asyncio.gather(
+        *[asyncio.to_thread(get_fate_streak, uid) for uid in user_ids]
     )
+    streak_map = {str(uid): result for uid, result in zip(user_ids, streak_results)}
 
     medals = ["🥇", "🥈", "🥉"]
     lines = ["🏅 *Today's Fateboard*\n"]
-    for index, item in enumerate(users[:10], start=1):
-        rank_icon = medals[index - 1] if index <= 3 else f"{index}."
+
+    for i, (uid, item) in enumerate(sorted_items[:10], 1):
+        rank_icon = medals[i - 1] if i <= 3 else f"{i}."
         s = item["score"]
         if s == 999:
             bar = "⚡ MAX"
@@ -1650,23 +1897,13 @@ async def fateboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             filled = round(max(0, min(s, 100)) / 10)
             bar = "█" * filled + "░" * (10 - filled)
 
-        # Fix 9: fetch streak and show a 🔥 badge if streak ≥ 2
-        user_id_str = next(
-            (uid for uid, data in board.items() if data is item), None
-        )
+        streak_count, streak_cat = streak_map.get(str(uid), (0, "neutral"))
         streak_badge = ""
-        if user_id_str:
-            try:
-                streak_count, streak_cat = await asyncio.to_thread(
-                    get_fate_streak, int(user_id_str)
-                )
-                if streak_count >= 2:
-                    if streak_cat == "lucky":
-                        streak_badge = f" 🔥×{streak_count}"
-                    elif streak_cat == "unlucky":
-                        streak_badge = f" 💀×{streak_count}"
-            except Exception:
-                pass
+        if streak_count >= 2:
+            if streak_cat == "lucky":
+                streak_badge = f" 🔥×{streak_count}"
+            elif streak_cat == "unlucky":
+                streak_badge = f" 💀×{streak_count}"
 
         lines.append(
             f"{rank_icon} *{item['name']}*{streak_badge} — {item['tier']}\n"
@@ -1674,6 +1911,55 @@ async def fateboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
 
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+async def streak_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.message
+    user_id = None
+    target = None
+
+    # Prefer text_mention (has user object → reliable user_id)
+    for entity in (message.entities or []):
+        if entity.type == "text_mention" and getattr(entity, "user", None):
+            user_id = entity.user.id
+            target = _display_user(entity.user)
+            break
+
+    if user_id is None:
+        mentioned = _mentioned_target(update, context)
+        if mentioned:
+            await message.reply_text(
+                "⚠️ Can't look up streak for @username mentions — "
+                "they need to use /fate themselves so the bot can track them.\n"
+                "Try using /streak without a mention to check your own streak."
+            )
+            return
+        # No mention — check own streak
+        user_id = update.effective_user.id
+        target = _display_user(update.effective_user)
+
+    streak, category = await asyncio.to_thread(get_fate_streak, user_id)
+
+    if streak == 0:
+        await message.reply_text(
+            f"📊 *Streak — {target}*\n"
+            f"No active streak yet. Use /fate to start one!",
+            parse_mode="Markdown",
+        )
+        return
+
+    if category == "lucky":
+        icon, label = "🔥", "Lucky streak"
+    elif category == "unlucky":
+        icon, label = "💀", "Unlucky streak"
+    else:
+        icon, label = "😐", "Neutral streak"
+
+    await message.reply_text(
+        f"📊 *Streak — {target}*\n"
+        f"{icon} {label}: *{streak} day{'s' if streak != 1 else ''}* in a row",
+        parse_mode="Markdown",
+    )
 
 
 async def curse_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1734,7 +2020,7 @@ async def poll_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text("Give at least 2 options separated by commas.")
         return
 
-    options = options[:10]  # Telegram max is 10
+    options = options[:10]
     await context.bot.send_poll(
         chat_id=update.effective_chat.id,
         question=question[:300],
@@ -1744,13 +2030,13 @@ async def poll_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 # ---------------------------------------------
-# /remind — one-shot personal reminder
+# /remind — one-shot personal reminder (survives restarts via Redis)
 # Supports: 10s, 10sec, 10secs, 10second, 10seconds,
 #           10m, 10min, 10mins, 10minute, 10minutes,
 #           10h, 10hr, 10hrs, 10hour, 10hours
 # Usage: /remind 10m take a break  OR  /remind in 10min check oven
 # ---------------------------------------------
-REMIND_MAX_PER_USER = 10  # max active reminders per user (defined locally)
+REMIND_MAX_PER_USER = 10
 
 _REMIND_RE = re.compile(
     r"(?:in\s+)?(\d+)\s*"
@@ -1767,13 +2053,12 @@ _UNIT_MAP = {
 
 def _parse_remind_seconds(unit_str: str) -> int:
     key = unit_str.lower()
-    # Try exact match first, then prefix scan
     if key in _UNIT_MAP:
         return _UNIT_MAP[key]
     for k, v in _UNIT_MAP.items():
         if key.startswith(k):
             return v
-    return 60  # fallback to minutes
+    return 60
 
 
 async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1805,7 +2090,6 @@ async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     per_unit = _parse_remind_seconds(unit_str)
     seconds = amount * per_unit
 
-    # Build a clean human-readable label
     if per_unit == 1:
         label = f"{amount} second{'s' if amount != 1 else ''}"
     elif per_unit == 60:
@@ -1813,7 +2097,7 @@ async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     else:
         label = f"{amount} hour{'s' if amount != 1 else ''}"
 
-    _MAX_REMIND_SECONDS = 365 * 24 * 3600  # 1 year
+    _MAX_REMIND_SECONDS = 365 * 24 * 3600
     if seconds < 5:
         await update.message.reply_text("⚠️ Minimum reminder time is 5 seconds.")
         return
@@ -1821,7 +2105,6 @@ async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text("⚠️ Maximum reminder time is 1 year.")
         return
 
-    # Fix 5: enforce per-user cap of 10 active reminders
     user_id = update.effective_user.id
     current_count = await asyncio.to_thread(get_remind_count, user_id)
     if current_count >= REMIND_MAX_PER_USER:
@@ -1831,7 +2114,6 @@ async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
 
-    # Everything after the time expression is the reminder body
     reminder_text = text[match.end():].strip().lstrip("to").strip()
     if not reminder_text:
         reminder_text = "You asked me to remind you of something!"
@@ -1840,24 +2122,33 @@ async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     chat_id = update.effective_chat.id
     user_mention = user.mention_html() if user else "Hey"
 
-    # Increment counter before scheduling (decrement when it fires)
+    # Persist to Redis so the reminder survives bot restarts
+    fire_at = time.time() + seconds
+    job_id = await asyncio.to_thread(
+        save_remind_job, chat_id, user_id, user_mention, reminder_text, fire_at
+    )
+
     await asyncio.to_thread(increment_remind_count, user_id)
 
-    async def _fire(ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    async def _fire(
+        ctx: ContextTypes.DEFAULT_TYPE,
+        _cid=chat_id, _jid=job_id, _uid=user_id,
+        _mention=user_mention, _text=reminder_text,
+    ) -> None:
         await ctx.bot.send_message(
-            chat_id=chat_id,
-            text=f"⏰ Reminder for {user_mention}!\n{reminder_text}",
+            chat_id=_cid,
+            text=f"⏰ Reminder for {_mention}!\n{_text}",
             parse_mode="HTML",
         )
-        # Free the slot so the user can set another reminder
-        await asyncio.to_thread(decrement_remind_count, user_id)
+        await asyncio.to_thread(delete_remind_job, _cid, _jid)
+        await asyncio.to_thread(decrement_remind_count, _uid)
 
     context.application.job_queue.run_once(_fire, when=seconds, chat_id=chat_id)
     await update.message.reply_text(f"⏰ Got it! I'll remind you in *{label}*.", parse_mode="Markdown")
 
 
 # ---------------------------------------------
-# /quote — save a quote by replying; /quotes — fetch one; /deletequote <n> — remove
+# /quote — save a quote by replying; /quotes — browse; /deletequote — remove (admins only)
 # ---------------------------------------------
 async def quote_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.message
@@ -1868,7 +2159,6 @@ async def quote_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         author = _display_user(replied.from_user)
         text = replied.text
     elif replied and replied.from_user and not replied.text:
-        # Fix 13: non-text reply (photo, sticker, voice, etc.)
         await message.reply_text(
             "⚠️ Only text messages can be quoted. Reply to a text message with /quote."
         )
@@ -1901,13 +2191,11 @@ async def quotes_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
 
-    # Start at a random index
     index = random.randrange(len(quotes))
-    owner_id = update.effective_user.id
-    await _send_quote_page(update.message.reply_text, chat_id, quotes, index, owner_id)
+    await _send_quote_page(update.message.reply_text, chat_id, quotes, index)
 
 
-async def _send_quote_page(send_fn, chat_id: int, quotes: list, index: int, owner_id: int) -> None:
+async def _send_quote_page(send_fn, chat_id: int, quotes: list, index: int) -> None:
     total = len(quotes)
     q = quotes[index]
     text = (
@@ -1917,11 +2205,10 @@ async def _send_quote_page(send_fn, chat_id: int, quotes: list, index: int, owne
     )
     prev_idx = (index - 1) % total
     next_idx = (index + 1) % total
-    # Fix 5: embed owner_id so only that user can paginate
     keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton("◀ Prev", callback_data=f"quote:{chat_id}:{prev_idx}:{owner_id}"),
+        InlineKeyboardButton("◀ Prev", callback_data=f"quote:{chat_id}:{prev_idx}"),
         InlineKeyboardButton(f"{index + 1}/{total}", callback_data="quote:noop"),
-        InlineKeyboardButton("Next ▶", callback_data=f"quote:{chat_id}:{next_idx}:{owner_id}"),
+        InlineKeyboardButton("Next ▶", callback_data=f"quote:{chat_id}:{next_idx}"),
     ]])
     await send_fn(text, parse_mode="Markdown", reply_markup=keyboard)
 
@@ -1932,20 +2219,14 @@ async def quotes_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     data = query.data
     if data == "quote:noop":
         return
-    # Fix 5: callback_data format is quote:<chat_id>:<index>:<owner_id>
-    parts = data.split(":", 3)
-    if len(parts) != 4:
+    parts = data.split(":", 2)
+    if len(parts) != 3:
         return
-    _, chat_id_str, idx_str, owner_id_str = parts
+    _, chat_id_str, idx_str = parts
     try:
         chat_id = int(chat_id_str)
         index = int(idx_str)
-        owner_id = int(owner_id_str)
     except ValueError:
-        return
-    # Only the user who ran /quotes can paginate their session
-    if update.effective_user.id != owner_id:
-        await query.answer("Only the person who opened /quotes can flip pages.", show_alert=True)
         return
     quotes = await asyncio.to_thread(get_all_quotes, chat_id)
     if not quotes:
@@ -1962,9 +2243,9 @@ async def quotes_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     prev_idx = (index - 1) % total
     next_idx = (index + 1) % total
     keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton("◀ Prev", callback_data=f"quote:{chat_id}:{prev_idx}:{owner_id}"),
+        InlineKeyboardButton("◀ Prev", callback_data=f"quote:{chat_id}:{prev_idx}"),
         InlineKeyboardButton(f"{index + 1}/{total}", callback_data="quote:noop"),
-        InlineKeyboardButton("Next ▶", callback_data=f"quote:{chat_id}:{next_idx}:{owner_id}"),
+        InlineKeyboardButton("Next ▶", callback_data=f"quote:{chat_id}:{next_idx}"),
     ]])
     try:
         await query.edit_message_text(text, parse_mode="Markdown", reply_markup=keyboard)
@@ -1974,51 +2255,39 @@ async def quotes_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 async def deletequote_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+
     if not context.args or not context.args[0].isdigit():
         total = get_quote_count(chat_id)
         await update.message.reply_text(
             f"Usage: `/deletequote <number>`\n"
             f"There are currently *{total}* quote(s) saved.\n"
-            "Use /quotes to browse them.",
+            "Use /quotes to browse them.\n"
+            "_(Group admins only)_",
             parse_mode="Markdown",
+        )
+        return
+
+    # Permission: group admins or bot owner only
+    is_admin = await _is_chat_admin(update, context)
+    is_owner = (BOT_OWNER_ID and user_id == BOT_OWNER_ID) or (
+        update.effective_user.username
+        and update.effective_user.username.casefold() in BOT_OWNER_USERNAMES
+    )
+
+    if not is_admin and not is_owner:
+        await update.message.reply_text(
+            "⚠️ Only group admins can delete quotes."
         )
         return
 
     index = int(context.args[0])
     success, msg = delete_quote(chat_id, index)
-    await update.message.reply_text(msg)
+    await update.message.reply_text(msg, parse_mode="Markdown")
 
 
 # ---------------------------------------------
-# Fix 7: /shipboard — top ship pairs leaderboard
-# ---------------------------------------------
-async def shipboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = update.effective_chat.id
-    pairs = await asyncio.to_thread(get_top_ship_pairs, chat_id, 10)
-
-    if not pairs:
-        await update.message.reply_text(
-            "💘 No ships recorded yet. Use /ship to start pairing people!"
-        )
-        return
-
-    medals = ["🥇", "🥈", "🥉"]
-    lines = ["💘 *Top Ship Pairs*\n"]
-    for i, pair in enumerate(pairs, start=1):
-        rank_icon = medals[i - 1] if i <= 3 else f"{i}."
-        score = int(pair["score"])
-        filled = round(score / 10)
-        bar = "❤️" * filled + "🖤" * (10 - filled)
-        lines.append(
-            f"{rank_icon} *{pair['label_a']}* × *{pair['label_b']}*\n"
-            f"    {score}%  [{bar}]"
-        )
-
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
-
-
-# ---------------------------------------------
-# /mvp — daily random MVP, picks from all chat members
+# /mvp — daily random MVP
 # ---------------------------------------------
 MVP_LINES = [
     "The data is in. The vibe is certified.",
@@ -2037,10 +2306,8 @@ async def mvp_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     today_str = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
     rng = random.Random(f"mvp:{chat_id}:{today_str}")
 
-    # Try to get the full member list via admins + seen users combined
-    candidate_pool: dict[str, str] = {}  # {user_id_str: name}
+    candidate_pool: dict[str, str] = {}
 
-    # Pull admins — always available via API
     try:
         admins = await context.bot.get_chat_administrators(chat_id)
         for member in admins:
@@ -2048,14 +2315,12 @@ async def mvp_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             if not u.is_bot:
                 name = u.first_name or u.username or str(u.id)
                 candidate_pool[str(u.id)] = name
-                # Also keep seen_users up to date (non-blocking)
                 asyncio.create_task(
                     asyncio.to_thread(track_seen_user, chat_id, u.id, name)
                 )
     except Exception as e:
         logger.warning("Could not fetch admins for mvp in chat %s: %s", chat_id, e)
 
-    # Merge with seen_users (non-admins who've used any command)
     seen = await asyncio.to_thread(get_seen_users, chat_id)
     candidate_pool.update(seen)
 
@@ -2073,7 +2338,6 @@ async def mvp_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         f"{rng.choice(MVP_LINES)}",
         parse_mode="Markdown",
     )
-
 
 
 # ---------------------------------------------
@@ -2138,7 +2402,7 @@ def main() -> None:
         .connect_timeout(10.0)
         .read_timeout(10.0)
         .write_timeout(10.0)
-        .post_init(restore_jobs)
+        .post_init(on_startup)
         .build()
     )
 
@@ -2148,9 +2412,7 @@ def main() -> None:
             ASK_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_name)],
             ASK_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_date)],
             ASK_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_time)],
-            ConversationHandler.TIMEOUT: [
-                MessageHandler(filters.ALL, conversation_timeout)
-            ],
+            ConversationHandler.TIMEOUT: [MessageHandler(filters.ALL, conversation_timeout)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
         conversation_timeout=CONV_TIMEOUT,
@@ -2160,10 +2422,19 @@ def main() -> None:
         entry_points=[CommandHandler("choose", choose_start)],
         states={
             ASK_DECISION: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_decision)],
-            ASK_OPTIONS: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_options)],
-            ConversationHandler.TIMEOUT: [
-                MessageHandler(filters.ALL, conversation_timeout)
-            ],
+            ASK_OPTIONS:  [MessageHandler(filters.TEXT & ~filters.COMMAND, received_options)],
+            ConversationHandler.TIMEOUT: [MessageHandler(filters.ALL, conversation_timeout)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+        conversation_timeout=CONV_TIMEOUT,
+    )
+
+    edit_conv = ConversationHandler(
+        entry_points=[CommandHandler("editcountdown", editcountdown_start)],
+        states={
+            ASK_EDIT_FIELD: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_edit_field)],
+            ASK_EDIT_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_edit_value)],
+            ConversationHandler.TIMEOUT: [MessageHandler(filters.ALL, conversation_timeout)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
         conversation_timeout=CONV_TIMEOUT,
@@ -2176,10 +2447,12 @@ def main() -> None:
     app.add_handler(CommandHandler("ask", ask_command))
     app.add_handler(countdown_conv)
     app.add_handler(choose_conv)
+    app.add_handler(edit_conv)
     app.add_handler(CommandHandler("listcountdown", list_countdown))
     app.add_handler(CommandHandler("removecountdown", remove_countdown_cmd))
     app.add_handler(CommandHandler("fate", fate_command))
     app.add_handler(CommandHandler("ship", ship_command))
+    app.add_handler(CommandHandler("shipboard", shipboard_command))
     app.add_handler(CommandHandler("roast", roast_command))
     app.add_handler(CommandHandler("compliment", compliment_command))
     app.add_handler(CommandHandler("vibecheck", vibecheck_command))
@@ -2189,7 +2462,9 @@ def main() -> None:
     app.add_handler(CommandHandler("wouldyourather", would_you_rather_command))
     app.add_handler(CommandHandler("coinflip", coinflip_command))
     app.add_handler(CommandHandler("8ball", eightball_command))
+    app.add_handler(CommandHandler("luck", luck_command))
     app.add_handler(CommandHandler("fateboard", fateboard_command))
+    app.add_handler(CommandHandler("streak", streak_command))
     app.add_handler(CommandHandler("curse", curse_command))
     app.add_handler(CommandHandler("bless", bless_command))
     app.add_handler(CommandHandler("decide", decide_command))
@@ -2198,7 +2473,6 @@ def main() -> None:
     app.add_handler(CommandHandler("quote", quote_command))
     app.add_handler(CommandHandler("quotes", quotes_command))
     app.add_handler(CommandHandler("deletequote", deletequote_command))
-    app.add_handler(CommandHandler("shipboard", shipboard_command))
     app.add_handler(CommandHandler("mvp", mvp_command))
     app.add_handler(CommandHandler("hot", hot_command))
 

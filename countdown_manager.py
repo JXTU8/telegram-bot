@@ -16,11 +16,23 @@ Redis key structure:
     },
     ...
   }
+  remind_jobs:<chat_id>  →  JSON list of pending one-shot reminders
+  [
+    {
+      "job_id": "a1b2c3d4",
+      "user_id": 123456789,
+      "user_mention_html": "<a href='tg://user?id=123'>Name</a>",
+      "text": "take a break",
+      "fire_at": 1700000000.0   (unix timestamp)
+    },
+    ...
+  ]
 """
 
 import json
 import logging
 import os
+import time as _time
 from datetime import date
 from typing import Optional
 
@@ -184,7 +196,7 @@ def get_all_chats() -> dict:
 # TTL: 25 hours — expires cleanly after each day,
 #      so yesterday's data never bleeds into today.
 # ─────────────────────────────────────────────
-_FATEBOARD_TTL = 60 * 60 * 25  # 25 hours (was 48 — now expires same-day + 1hr buffer)
+_FATEBOARD_TTL = 60 * 60 * 25  # 25 hours
 
 
 def _fb_key(chat_id: int, date_str: str) -> str:
@@ -255,26 +267,6 @@ def save_quote(chat_id: int, author_name: str, text: str, saved_by_name: str) ->
     except Exception as e:
         logger.error("Redis quote save error for chat %s: %s", chat_id, e)
         return 0
-
-
-def get_random_quote(chat_id: int) -> Optional[dict]:
-    """Return a random quote dict (with 1-based 'index' key) or None."""
-    import random as _random
-    key = _quotes_key(chat_id)
-    try:
-        raw = redis.get(key)
-        if not raw:
-            return None
-        quotes = _decode_chat_data(raw)
-        if not isinstance(quotes, list) or not quotes:
-            return None
-        idx = _random.randrange(len(quotes))
-        q = dict(quotes[idx])
-        q["index"] = idx + 1  # 1-based for display
-        return q
-    except Exception as e:
-        logger.error("Redis quote read error for chat %s: %s", chat_id, e)
-        return None
 
 
 def get_all_quotes(chat_id: int) -> list:
@@ -449,7 +441,6 @@ def get_seen_users(chat_id: int) -> dict:
 # Redis key: remind_count:<user_id>  →  int (TTL: 25h, resets daily)
 # ─────────────────────────────────────────────
 _REMIND_COUNT_TTL = 60 * 60 * 25  # 25 hours
-# Note: the per-user cap (REMIND_MAX_PER_USER = 10) lives in bot.py — do not duplicate here.
 
 
 def _remind_count_key(user_id: int) -> str:
@@ -494,3 +485,86 @@ def decrement_remind_count(user_id: int) -> None:
             redis.decr(key)
     except Exception as e:
         logger.error("Redis remind decr error for user %s: %s", user_id, e)
+
+
+# ─────────────────────────────────────────────
+# Remind job persistence (survives bot restarts)
+# Redis key: remind_jobs:<chat_id>  →  JSON list of job dicts
+# {job_id, user_id, user_mention_html, text, fire_at (unix timestamp)}
+# Jobs more than 10 minutes overdue are dropped on restore.
+# ─────────────────────────────────────────────
+def _remind_jobs_key(chat_id: int) -> str:
+    return f"remind_jobs:{chat_id}"
+
+
+def save_remind_job(
+    chat_id: int,
+    user_id: int,
+    user_mention_html: str,
+    text: str,
+    fire_at: float,
+) -> str:
+    """Persist a remind job. Returns a unique job_id string."""
+    job_id = os.urandom(4).hex()
+    key = _remind_jobs_key(chat_id)
+    try:
+        raw = redis.get(key)
+        jobs = _decode_chat_data(raw) if raw else []
+        if not isinstance(jobs, list):
+            jobs = []
+        jobs.append({
+            "job_id": job_id,
+            "user_id": user_id,
+            "user_mention_html": user_mention_html,
+            "text": text,
+            "fire_at": fire_at,
+        })
+        redis.set(key, json.dumps(jobs, separators=(",", ":")))
+    except Exception as e:
+        logger.error("Redis remind job save error for chat %s: %s", chat_id, e)
+    return job_id
+
+
+def delete_remind_job(chat_id: int, job_id: str) -> None:
+    """Remove a fired or cancelled remind job from Redis."""
+    key = _remind_jobs_key(chat_id)
+    try:
+        raw = redis.get(key)
+        jobs = _decode_chat_data(raw) if raw else []
+        if not isinstance(jobs, list):
+            return
+        jobs = [j for j in jobs if j.get("job_id") != job_id]
+        redis.set(key, json.dumps(jobs, separators=(",", ":")))
+    except Exception as e:
+        logger.error("Redis remind job delete error for chat %s: %s", chat_id, e)
+
+
+def get_all_remind_jobs() -> dict:
+    """
+    Return {chat_id: [job_dicts]} for all chats with pending remind jobs.
+    Skips jobs more than 10 minutes overdue to avoid firing stale reminders.
+    """
+    try:
+        keys = redis.keys("remind_jobs:*")
+        if not keys:
+            return {}
+        cutoff = _time.time() - 10 * 60  # drop jobs more than 10 min overdue
+        result = {}
+        for key in keys:
+            key_name = key.decode("utf-8") if isinstance(key, bytes) else str(key)
+            try:
+                chat_id = int(key_name.split(":", 1)[1])
+            except (IndexError, ValueError):
+                logger.warning("Skipping unexpected Redis key: %s", key)
+                continue
+            raw = redis.get(key)
+            jobs = _decode_chat_data(raw) if raw else []
+            if not isinstance(jobs, list):
+                continue
+            valid = [j for j in jobs if j.get("fire_at", 0) > cutoff]
+            if valid:
+                result[chat_id] = valid
+        return result
+    except Exception as e:
+        logger.error("Redis get_all_remind_jobs error: %s", e)
+        return {}

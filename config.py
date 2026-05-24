@@ -1,18 +1,15 @@
-import logging
 import pytz
 import os
 import sys
 
-logger = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────
-# Shared integer env-var helper
+# Shared utility — imported by bot.py and keep_alive.py
 # ─────────────────────────────────────────────
-def _env_int(name: str, default: int) -> int:
+def env_int(name: str, default: int) -> int:
     try:
         return int(os.getenv(name, str(default)))
     except ValueError:
-        logger.warning("%s must be an integer. Using %s.", name, default)
         return default
 
 
