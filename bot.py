@@ -43,7 +43,9 @@ Commands
 /curse           -> Fake daily curse
 /bless           -> Fake daily blessing
 /toss            -> Pick a random person from mentions or group
-/birthday        -> Set or list birthdays
+/birthday        -> List birthdays in this chat
+/addbirthday     -> Set your birthday
+/deletebirthday  -> Delete your birthday (admins can delete others)
 /remind          -> Set a personal one-shot reminder
 /cancelremind    -> List and cancel your pending reminders
 /remindall       -> Set a group-wide reminder (admins only)
@@ -113,6 +115,7 @@ from countdown_manager import (
     get_all_remind_jobs,
     delete_old_fateboard_keys,
     save_birthday,
+    delete_birthday,
     get_all_birthdays,
     get_all_birthday_chats,
 )
@@ -341,7 +344,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "🎲 /choose — let me decide for you\n"
         "🍀 /luck — check your daily luck\n"
         "⏰ /remind — set a personal reminder\n"
-        "🎂 /birthday — set or view birthdays\n"
+        "🎂 /addbirthday — set your birthday\n"
         "🎉 /help — see all commands",
         parse_mode="Markdown",
     )
@@ -406,8 +409,10 @@ HELP_PAGES = {
         "/remind 2h submit the report — supports s/m/h units\n"
         "/cancelremind — view and cancel your pending reminders\n"
         "/remindall 1h group meeting — group-wide reminder (admins only)\n"
-        "/birthday DD/MM — set your birthday\n"
-        "/birthday list — see upcoming birthdays in this chat\n"
+        "/birthday — see upcoming birthdays in this chat\n"
+        "/addbirthday DD/MM — set your birthday\n"
+        "/deletebirthday — delete your birthday\n"
+        "/deletebirthday @user — delete someone's birthday (admins only)\n"
         "_Personal reminders survive bot restarts._"
     ),
     "other": (
@@ -1255,59 +1260,9 @@ def _apply_special_luck(
     if today.month == 4 and today.day == 1:
         is_april_fools = True
 
-    # ── Day: Monday penalty (−10) / Friday bonus (+10) ───────────────────
-    if score not in (999, -999):
-        weekday = today.weekday()   # 0 = Monday … 4 = Friday
-        if weekday == 0:
-            score = max(0, score - 10)
-            day_note = "📅 _Monday penalty: −10. The calendar said no._"
-            for t in FATE_TIERS:
-                lo, hi = t["range"]
-                if lo <= score <= hi:
-                    tier = t["name"]
-                    break
-        elif weekday == 4:
-            score = min(100, score + 10)
-            day_note = "📅 _Friday buff: +10. Weekend energy activated._"
-            for t in FATE_TIERS:
-                lo, hi = t["range"]
-                if lo <= score <= hi:
-                    tier = t["name"]
-                    break
-
-    # ── Day: 13th of any month ────────────────────────────────────────────
-    if today.day == 13 and score not in (999, -999):
-        tier = "🔢 THIRTEEN"
-        luck_msg = "The 13th. Something feels slightly off today. Proceed carefully."
-
-    # ── Score-based specials (after day modifiers, before name overrides) ─
+    # ── Score-based specials (after date checks, before name overrides) ───
     if score in _SPECIAL_SCORE_CASES and score not in (999, -999):
         tier, luck_msg = _SPECIAL_SCORE_CASES[score]
-
-    # ── Name: sigma → forced LEGENDARY ───────────────────────────────────
-    if "sigma" in name_lower:
-        score = 95
-        tier = "🌟 LEGENDARY"
-        luck_msg = "The sigma ran the luck test on himself. Predictable outcome: immaculate."
-
-    # ── Name: kai → seeded random extreme ────────────────────────────────
-    if "kai" in name_lower:
-        rng = random.Random(f"kai:{seed or name_lower}:{today.isoformat()}")
-        if rng.random() < 0.5:
-            score, tier, luck_msg = (
-                999, "🌈 COSMICALLY CHOSEN",
-                "Bro is built like a Kai Cenat stream. Maximum chaos, somehow thriving.",
-            )
-        else:
-            score, tier, luck_msg = (
-                -999, "☠️ COSMICALLY CURSED",
-                "Bro is built like a Kai Cenat stream. Maximum chaos, NOT thriving today.",
-            )
-
-    # ── Name: rizz → rizzler tier ────────────────────────────────────────
-    if "rizz" in name_lower:
-        tier = "✨ RIZZLER"
-        luck_msg = "The rizz is statistically confirmed today."
 
     return score, tier, luck_msg, day_note, is_april_fools
 
@@ -2788,6 +2743,120 @@ async def birthday_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     )
 
 
+async def addbirthday_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /addbirthday DD/MM  — set your birthday (e.g. /addbirthday 25/12)
+    """
+    import calendar
+    chat_id = update.effective_chat.id
+    user = update.effective_user
+    text = _arg_text(context)
+
+    if not text:
+        await update.message.reply_text(
+            "🎂 *Set your birthday*\n\n"
+            "Usage: `/addbirthday DD/MM`\n"
+            "_(e.g. `/addbirthday 25/12` for December 25)_",
+            parse_mode="Markdown",
+        )
+        return
+
+    match = re.fullmatch(r"(\d{1,2})[/\-.](\d{1,2})", text.strip())
+    if not match:
+        await update.message.reply_text(
+            "⚠️ Use the format `DD/MM`.\n_(e.g. `/addbirthday 25/12` for December 25)_",
+            parse_mode="Markdown",
+        )
+        return
+
+    day, month = int(match.group(1)), int(match.group(2))
+    if not (1 <= month <= 12):
+        await update.message.reply_text("⚠️ Invalid month. Must be between 1 and 12.")
+        return
+    max_day = calendar.monthrange(2000, month)[1]
+    if not (1 <= day <= max_day):
+        await update.message.reply_text(f"⚠️ Invalid day for month {_MONTH_NAMES[month]}.")
+        return
+
+    name = _display_user(user)
+    await asyncio.to_thread(save_birthday, chat_id, user.id, name, day, month)
+    days_left = _days_until_birthday(day, month)
+    tag = "🎉 That's today!" if days_left == 0 else f"in {days_left} days"
+
+    await update.message.reply_text(
+        f"🎂 *Birthday saved!*\n"
+        f"*{name}* — {day:02d} {_MONTH_NAMES[month]}  _{tag}_\n\n"
+        f"Use `/birthday` to see everyone's upcoming birthdays.",
+        parse_mode="Markdown",
+    )
+
+
+async def deletebirthday_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /deletebirthday         — delete your own birthday
+    /deletebirthday @user   — delete someone else's birthday (admins only)
+    """
+    chat_id = update.effective_chat.id
+    user = update.effective_user
+
+    # Check if a mention is provided
+    target_mention = _mentioned_target(update, context)
+
+    if target_mention:
+        # Admin-only: deleting someone else
+        try:
+            member = await context.bot.get_chat_member(chat_id, user.id)
+            is_admin = member.status in ("administrator", "creator")
+        except Exception:
+            is_admin = False
+
+        if not is_admin:
+            await update.message.reply_text(
+                "⚠️ Only admins can delete someone else's birthday."
+            )
+            return
+
+        # Find the mentioned user's ID from the message entities
+        target_uid = None
+        for entity in (update.message.entities or []):
+            if entity.type == "text_mention" and entity.user:
+                target_uid = entity.user.id
+                break
+
+        if not target_uid:
+            await update.message.reply_text(
+                "⚠️ Please mention the user directly (they must be a group member with a visible account)."
+            )
+            return
+
+        deleted = await asyncio.to_thread(delete_birthday, chat_id, target_uid)
+        if deleted:
+            await update.message.reply_text(
+                f"🗑️ Birthday for *{_escape_md(target_mention)}* has been removed.",
+                parse_mode="Markdown",
+            )
+        else:
+            await update.message.reply_text(
+                f"⚠️ No birthday found for *{_escape_md(target_mention)}*.",
+                parse_mode="Markdown",
+            )
+    else:
+        # Delete own birthday
+        deleted = await asyncio.to_thread(delete_birthday, chat_id, user.id)
+        if deleted:
+            await update.message.reply_text(
+                f"🗑️ Your birthday has been removed.\n"
+                f"Use `/addbirthday DD/MM` to set it again.",
+                parse_mode="Markdown",
+            )
+        else:
+            await update.message.reply_text(
+                "⚠️ You don't have a birthday saved here yet.\n"
+                "Use `/addbirthday DD/MM` to set one.",
+                parse_mode="Markdown",
+            )
+
+
 async def birthday_check_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Runs daily at 00:01 MYT. Sends birthday greetings to each chat."""
     today = datetime.now(TIMEZONE).date()
@@ -3027,6 +3096,8 @@ def main() -> None:
     app.add_handler(CommandHandler("poll",           poll_command))
     app.add_handler(CommandHandler("toss",           toss_command))
     app.add_handler(CommandHandler("birthday",       birthday_command))
+    app.add_handler(CommandHandler("addbirthday",    addbirthday_command))
+    app.add_handler(CommandHandler("deletebirthday", deletebirthday_command))
     app.add_handler(CommandHandler("remind",         remind_command))
     app.add_handler(CommandHandler("cancelremind",   cancelremind_command))
     app.add_handler(CommandHandler("remindall",      remindall_command))
