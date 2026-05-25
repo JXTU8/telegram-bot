@@ -1213,15 +1213,137 @@ def _score_display(score: int) -> str:
     return f"{score}/100  [{bar}]"
 
 
+# ── Brainrot special cases ────────────────────────────────────────────────────
+_SPECIAL_SCORE_CASES = {
+    0:   ("🪦 ZERO",        "Completely and utterly cooked. Zero. Zilch. The void looked at you and said no."),
+    1:   ("💀 1/100",       "One. ONE. You barely exist on the luck scale today. Somehow not zero."),
+    42:  ("🌌 THE ANSWER",  "The answer to life, the universe, and everything. Deep lore detected."),
+    47:  ("🎯 HITMAN",      "Agent 47 energy. Cold. Calculated. Efficient."),
+    50:  ("⚖️ BALANCED",    "Perfectly balanced, as all things should be. Thanos nods at you."),
+    67:  ("6️⃣7️⃣SIX SEVEN",  "Six Seven."),
+    69:  ("👀 NICE",        "Nice. 😏 The universe rated you accordingly."),
+    77:  ("🎰 JACKPOT",     "Lucky 7s but make it double. The slot machine approves."),
+    100: ("👑 GIGACHAD",    "FULL MARKS. Gigachad confirmed. The simulation is bugged in your favour."),
+}
+
+
+def _apply_special_luck(
+    score: int,
+    tier: str,
+    luck_msg: str,
+    target_name: str,
+    today,          # datetime.date object
+    seed: str = "",
+) -> tuple:
+    """
+    Apply brainrot special cases on top of the base luck result.
+    Returns (score, tier, luck_msg, day_note, is_april_fools).
+    day_note is an extra footer line shown in the result message.
+    """
+    name_lower = target_name.casefold()
+    day_note = ""
+    is_april_fools = False
+
+    # ── Date: New Year (Jan 1) — always max luck ──────────────────────────
+    if today.month == 1 and today.day == 1:
+        return (
+            999, "🎆 NEW YEAR",
+            "New year. Same you. But the luck reset so technically fresh start. "
+            "The universe gives everyone max luck today. Enjoy it while it lasts.",
+            "", False,
+        )
+
+    # ── Date: April Fools — set flag, keep real score for reveal ──────────
+    if today.month == 4 and today.day == 1:
+        is_april_fools = True
+
+    # ── Day: Monday penalty (−10) / Friday bonus (+10) ───────────────────
+    if score not in (999, -999):
+        weekday = today.weekday()   # 0 = Monday … 4 = Friday
+        if weekday == 0:
+            score = max(0, score - 10)
+            day_note = "📅 _Monday penalty: −10. The calendar said no._"
+            for t in FATE_TIERS:
+                lo, hi = t["range"]
+                if lo <= score <= hi:
+                    tier = t["name"]
+                    break
+        elif weekday == 4:
+            score = min(100, score + 10)
+            day_note = "📅 _Friday buff: +10. Weekend energy activated._"
+            for t in FATE_TIERS:
+                lo, hi = t["range"]
+                if lo <= score <= hi:
+                    tier = t["name"]
+                    break
+
+    # ── Day: 13th of any month ────────────────────────────────────────────
+    if today.day == 13 and score not in (999, -999):
+        tier = "🔢 THIRTEEN"
+        luck_msg = "The 13th. Something feels slightly off today. Proceed carefully."
+
+    # ── Score-based specials (after day modifiers, before name overrides) ─
+    if score in _SPECIAL_SCORE_CASES and score not in (999, -999):
+        tier, luck_msg = _SPECIAL_SCORE_CASES[score]
+
+    # ── Name: sigma → forced LEGENDARY ───────────────────────────────────
+    if "sigma" in name_lower:
+        score = 95
+        tier = "🌟 LEGENDARY"
+        luck_msg = "The sigma ran the luck test on himself. Predictable outcome: immaculate."
+
+    # ── Name: kai → seeded random extreme ────────────────────────────────
+    if "kai" in name_lower:
+        rng = random.Random(f"kai:{seed or name_lower}:{today.isoformat()}")
+        if rng.random() < 0.5:
+            score, tier, luck_msg = (
+                999, "🌈 COSMICALLY CHOSEN",
+                "Bro is built like a Kai Cenat stream. Maximum chaos, somehow thriving.",
+            )
+        else:
+            score, tier, luck_msg = (
+                -999, "☠️ COSMICALLY CURSED",
+                "Bro is built like a Kai Cenat stream. Maximum chaos, NOT thriving today.",
+            )
+
+    # ── Name: rizz → rizzler tier ────────────────────────────────────────
+    if "rizz" in name_lower:
+        tier = "✨ RIZZLER"
+        luck_msg = "The rizz is statistically confirmed today."
+
+    return score, tier, luck_msg, day_note, is_april_fools
+
+
+def _luck_result_text(target_name: str, tier: str, score: int, luck_msg: str,
+                      streak_line: str = "", day_note: str = "",
+                      checking_other: bool = False) -> str:
+    """Build the standard luck result message string."""
+    parts = [
+        f"🍀 *Daily Luck — {target_name}*\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"Tier: *{tier}*\n"
+        f"Score: `{_score_display(score)}`\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"_{luck_msg}_"
+    ]
+    if streak_line:
+        parts.append(streak_line)
+    if day_note:
+        parts.append(f"\n{day_note}")
+    if checking_other:
+        parts.append("\n\n_They need to use /luck themselves to appear on /luckboard._")
+    return "".join(parts)
+
+
 async def luck_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    /luck            — check your own daily luck
+    /luck            — check your own daily luck (with brainrot special cases)
     /luck @user      — check someone else's luck (read-only, doesn't save to luckboard)
-    BUG FIX: @username mentions now get the same extreme luck roll as numeric IDs.
     """
     message = update.message
     user = update.effective_user
 
+    # ── Resolve target ────────────────────────────────────────────────────
     target_user_id = None
     target_name = None
     checking_other = False
@@ -1237,74 +1359,87 @@ async def luck_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         mentioned = _mentioned_target(update, context)
         if mentioned:
             target_name = mentioned
-            target_user_id = None
             checking_other = True
         else:
             target_user_id = user.id
             target_name = user.first_name or user.username or "You"
             checking_other = False
 
-    # BUG FIX: always use _get_fate_by_seed so @username gets extreme rolls too
+    # ── Compute base luck ─────────────────────────────────────────────────
     if target_user_id is not None:
         score, tier, luck_msg = _get_fate(target_user_id)
     else:
         score, tier, luck_msg = _get_fate_by_seed(_normalize_target(target_name))
 
-    today_str = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
+    today = _today()
+    today_str = today.strftime("%Y-%m-%d")
+    seed = str(target_user_id) if target_user_id else _normalize_target(target_name)
 
+    # ── Birthday override (own luck only) ─────────────────────────────────
+    if not checking_other and target_user_id:
+        bdays = await asyncio.to_thread(get_all_birthdays, update.effective_chat.id)
+        bday = bdays.get(str(target_user_id))
+        if bday and bday.get("day") == today.day and bday.get("month") == today.month:
+            score = 100
+            tier = "🎂 BIRTHDAY LEGEND"
+            luck_msg = (
+                "It's your birthday. The universe has no choice but to comply. "
+                "Maximum luck, no exceptions. You earned this one."
+            )
+
+    # ── Apply brainrot special cases ──────────────────────────────────────
+    score, tier, luck_msg, day_note, is_april_fools = _apply_special_luck(
+        score, tier, luck_msg, target_name, today, seed=seed
+    )
+
+    # ── Own luck: save to luckboard + streak ──────────────────────────────
+    streak_line = ""
     if not checking_other:
-        if score in (999,):
+        if score >= 65 or score == 999:
             tier_category = "lucky"
-        elif score == -999:
-            tier_category = "unlucky"
-        elif score >= 65:
-            tier_category = "lucky"
-        elif score <= 35:
+        elif score <= 35 or score == -999:
             tier_category = "unlucky"
         else:
             tier_category = "neutral"
 
-        task1 = asyncio.create_task(
-            asyncio.to_thread(
-                _remember_fate,
-                update.effective_chat.id, target_user_id, target_name, score, tier,
-            )
+        t1 = asyncio.create_task(
+            asyncio.to_thread(_remember_fate, update.effective_chat.id, target_user_id, target_name, score, tier)
         )
-        task1.add_done_callback(lambda t: t.exception() and logger.warning("_remember_fate error: %s", t.exception()))
-        task2 = asyncio.create_task(
+        t1.add_done_callback(lambda t: t.exception() and logger.warning("_remember_fate: %s", t.exception()))
+        t2 = asyncio.create_task(
             asyncio.to_thread(track_seen_user, update.effective_chat.id, target_user_id, target_name)
         )
-        task2.add_done_callback(lambda t: t.exception() and logger.warning("track_seen error: %s", t.exception()))
+        t2.add_done_callback(lambda t: t.exception() and logger.warning("track_seen: %s", t.exception()))
 
         streak = await asyncio.to_thread(_update_streak_sync, target_user_id, today_str, tier_category)
-        streak_line = ""
         if streak >= 2:
             if tier_category == "lucky":
                 streak_line = f"\n🔥 *Lucky streak: {streak} days in a row!*"
             elif tier_category == "unlucky":
                 streak_line = f"\n💀 *Unlucky streak: {streak} days in a row...*"
 
-        await message.reply_text(
-            f"🍀 *Daily Luck — {target_name}*\n"
-            f"━━━━━━━━━━━━━━━\n"
-            f"Tier: *{tier}*\n"
-            f"Score: `{_score_display(score)}`\n"
-            f"━━━━━━━━━━━━━━━\n"
-            f"_{luck_msg}_"
-            f"{streak_line}",
+    # ── Build final message ───────────────────────────────────────────────
+    real_text = _luck_result_text(
+        target_name, tier, score, luck_msg,
+        streak_line=streak_line, day_note=day_note,
+        checking_other=checking_other,
+    )
+
+    # ── April Fools: show fake bad result for 3s then reveal real ─────────
+    if is_april_fools:
+        fake_rng = random.Random(f"aprilfools:{seed}:{today_str}")
+        fake_score = fake_rng.randint(0, 8)
+        fake_tier = "💀 CURSED"
+        fake_msg = fake_rng.choice(FATE_TIERS[0]["messages"])
+        fake_text = _luck_result_text(target_name, fake_tier, fake_score, fake_msg)
+        sent = await message.reply_text(fake_text, parse_mode="Markdown")
+        await asyncio.sleep(3)
+        await sent.edit_text(
+            f"🎭 *April Fools!*\n\n{real_text}",
             parse_mode="Markdown",
         )
     else:
-        await message.reply_text(
-            f"🍀 *Daily Luck — {target_name}*\n"
-            f"━━━━━━━━━━━━━━━\n"
-            f"Tier: *{tier}*\n"
-            f"Score: `{_score_display(score)}`\n"
-            f"━━━━━━━━━━━━━━━\n"
-            f"_{luck_msg}_\n\n"
-            f"_They need to use /luck themselves to appear on /luckboard._",
-            parse_mode="Markdown",
-        )
+        await message.reply_text(real_text, parse_mode="Markdown")
 
 
 async def luckboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1403,13 +1538,82 @@ SHIP_OWNER_BLOCK_LINES = [
 ]
 
 SHIP_TIER_LINES = [
-    (10, "This ship is still buffering."),
-    (25, "Low battery chemistry."),
-    (45, "There is potential, but the universe is squinting."),
-    (65, "Not bad. The vibes are warming up."),
-    (80, "Strong ship energy detected."),
-    (94, "Dangerously compatible. The chat may need to sit down."),
-    (100, "Legendary ship. The timeline is shaking."),
+    (10, [
+        "This ship is still buffering.",
+        "Connection timed out. Try again never.",
+        "Ship.exe has stopped working.",
+        "404: Compatibility not found.",
+        "Zero chemistry detected. The atoms refused.",
+        "The universe reviewed this pairing and filed a complaint.",
+        "DNS not found. These two cannot locate each other.",
+        "Negative sigma rizz. Somehow.",
+        "The vibe check failed at the entrance.",
+        "Even the bot felt secondhand awkward.",
+    ]),
+    (25, [
+        "Low battery chemistry.",
+        "They could be friends. Maybe. If they try really hard.",
+        "The ship left harbour and immediately turned back.",
+        "Possible but the stars are squinting hard.",
+        "Not impossible. Just highly improbable.",
+        "The algorithm is being generous calling this a ship.",
+        "Barely above friendship territory. Barely.",
+        "The compatibility is loading. At dial-up speed.",
+        "Some potential. Buried very deep.",
+        "The universe sees it but refuses to comment.",
+    ]),
+    (45, [
+        "There is potential, but the universe is squinting.",
+        "Could work with enough delusion.",
+        "Mid compatibility. The slot machine gave 2 out of 3.",
+        "The energy is there but it is confused.",
+        "Not a no, not a yes. A nervous maybe.",
+        "The stars see something. They are not sure what.",
+        "Technically possible. Emotionally unclear.",
+        "The vibes are loading. Please stand by.",
+        "Compatible if the stars are in a generous mood.",
+        "Half the chemistry is there. The other half called in sick.",
+    ]),
+    (65, [
+        "Not bad. The vibes are warming up.",
+        "Solid base. Something could build here.",
+        "The chemistry passed the vibe check.",
+        "Compatible enough to share a menu.",
+        "The universe is cautiously optimistic about this one.",
+        "Above average rizz alignment detected.",
+        "The energy is present and accounted for.",
+        "Promising. The stars are taking notes.",
+    ]),
+    (80, [
+        "Strong ship energy detected.",
+        "This hits different. The cosmos felt it.",
+        "Certified compatible. The algorithm approves.",
+        "Above average chemistry. The group chat noticed.",
+        "Solid ship. The stars wrote a whole paragraph about this.",
+        "The compatibility radar is going off.",
+        "This ship is seaworthy. Fully certified.",
+        "Main character energy, both of them.",
+    ]),
+    (94, [
+        "Dangerously compatible. The chat may need to sit down.",
+        "The compatibility is actually concerning.",
+        "This ship has been built, launched, and is already legendary.",
+        "The universe did not expect this result. Neither did we.",
+        "Someone call the lore department. This is significant.",
+        "The rizz alignment on this is statistically suspicious.",
+        "Elite ship detected. The algorithm is shook.",
+        "The stars did not just align. They sprinted.",
+    ]),
+    (100, [
+        "Legendary ship. The timeline is shaking.",
+        "Maximum compatibility. The simulation has flagged this.",
+        "100%. The universe bows. The chat dissolves.",
+        "Perfect score. Even the bots are speechless.",
+        "This is not a ship. This is a whole cinematic universe.",
+        "The stars did not align. They fused.",
+        "Canon. This is canon. No further questions.",
+        "Certified soulmate behaviour. The algorithm is crying.",
+    ]),
 ]
 
 ROAST_LINES = [
@@ -1627,11 +1831,15 @@ def _is_protected_ship_target(target: dict) -> bool:
     return target.get("explicit_username") and username in BOT_OWNER_USERNAMES
 
 
-def _ship_comment(score: float) -> str:
-    for limit, comment in SHIP_TIER_LINES:
+def _ship_comment(score: float, seed: str = "") -> str:
+    """Pick a daily-consistent comment from the right tier pool."""
+    today_str = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
+    for limit, messages in SHIP_TIER_LINES:
         if score <= limit:
-            return comment
-    return SHIP_TIER_LINES[-1][1]
+            rng = random.Random(f"shipcomment:{seed}:{today_str}:{limit}")
+            return rng.choice(messages)
+    rng = random.Random(f"shipcomment:{seed}:{today_str}:100")
+    return rng.choice(SHIP_TIER_LINES[-1][1])
 
 
 BOT_SHIP_REFUSALS = [
@@ -1685,7 +1893,7 @@ async def ship_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     bar = "█" * filled + "░" * (10 - filled)
     await update.message.reply_text(
         f"💞 *Ship Result*\n{target_a} × {target_b}\n\n"
-        f"Compatibility: `{score:.2f}%`  [{bar}]\n_{_ship_comment(score)}_",
+        f"Compatibility: `{score:.2f}%`  [{bar}]\n_{_ship_comment(score, seed=pair_key)}_",
         parse_mode="Markdown",
     )
 
