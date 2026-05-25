@@ -1770,9 +1770,26 @@ def _ship_mentions_from_message(update: Update, bot_username: str = "", bot_id: 
 
 
 def _bot_mentioned_in_ship(update: Update, bot_username: str, bot_id: int) -> bool:
-    """Return True if the running bot appears in any mention entity."""
+    """
+    Return True if the running bot appears as an explicit mention entity
+    (i.e. a standalone @botname mention, not the @botname suffix on a /command).
+    """
     bot_username_norm = bot_username.casefold().lstrip("@")
+    # Collect offsets occupied by bot_command entities so we can skip them.
+    # When a user sends /ship@Countdownbot_6767, Telegram marks the whole
+    # "/ship@Countdownbot_6767" text as a single bot_command entity — NOT a
+    # separate mention entity — so this set will normally be empty. But being
+    # explicit here guards against edge-cases where the bot name leaks into a
+    # mention entity that overlaps a command.
+    command_offsets = set()
     for entity in (update.message.entities or []):
+        if entity.type == "bot_command":
+            command_offsets.update(range(entity.offset, entity.offset + entity.length))
+
+    for entity in (update.message.entities or []):
+        # Skip anything that overlaps a bot_command span
+        if entity.offset in command_offsets:
+            continue
         if entity.type == "text_mention" and getattr(entity, "user", None):
             if bot_id and entity.user.id == bot_id:
                 return True
