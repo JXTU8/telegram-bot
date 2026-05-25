@@ -5,28 +5,15 @@ Countdown store backed by Upstash Redis.
 Data persists across restarts and redeployments.
 
 Redis key structure:
-  countdowns:<chat_id>  →  JSON dict of all countdowns for that chat
-  {
-    "Exam": {
-      "target_date": "2025-12-31",
-      "reminder_hour": 8,
-      "reminder_minute": 30,
-      "created_by": 123456789,
-      "code": "a3k"
-    },
-    ...
-  }
-  remind_jobs:<chat_id>  →  JSON list of pending one-shot reminders
-  [
-    {
-      "job_id": "a1b2c3d4",
-      "user_id": 123456789,
-      "user_mention_html": "<a href='tg://user?id=123'>Name</a>",
-      "text": "take a break",
-      "fire_at": 1700000000.0   (unix timestamp)
-    },
-    ...
-  ]
+  countdowns:<chat_id>     →  JSON dict of countdowns for that chat
+  luckboard:<chat_id>:<YYYY-MM-DD>  →  JSON dict of luck scores (replaces fateboard:*)
+  quotes:<chat_id>         →  JSON list of quote dicts
+  ship_pairs:<chat_id>     →  JSON dict of ship pair scores
+  fate_streak:<user_id>    →  JSON dict of streak data
+  seen_users:<chat_id>     →  JSON dict of {user_id: name}
+  remind_count:<user_id>   →  int, TTL 25 h
+  remind_jobs:<chat_id>    →  JSON list of one-shot reminder dicts
+  birthdays:<chat_id>      →  JSON dict of {user_id: {name, day, month}}
 """
 
 import json
@@ -56,14 +43,18 @@ def _rkey(chat_id: int) -> str:
     return f"countdowns:{chat_id}"
 
 
-def _decode_chat_data(data) -> dict:
+def _decode_chat_data(data):
+    """Safely decode Redis response to dict or list."""
     if data is None:
         return {}
-    if isinstance(data, dict):
+    if isinstance(data, (dict, list)):
         return data
-    if isinstance(data, bytes):
+    if isinstance(data, (bytes, bytearray)):
         data = data.decode("utf-8")
-    return json.loads(data)
+    try:
+        return json.loads(data)
+    except (json.JSONDecodeError, TypeError):
+        return {}
 
 
 def _load_chat(chat_id: int) -> dict:
@@ -82,19 +73,18 @@ def _save_chat(chat_id: int, data: dict) -> None:
 
 
 # ─────────────────────────────────────────────
-# Public API
+# Countdowns — public API
 # ─────────────────────────────────────────────
 _CODE_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789"
 
 
 def _gen_code(existing_codes: set) -> str:
-    """Generate a unique 3-char lowercase+digit code not already in use."""
+    """Generate a unique 3-char alphanumeric code."""
     import random as _random
     for _ in range(200):
         code = "".join(_random.choices(_CODE_CHARS, k=3))
         if code not in existing_codes:
             return code
-    # Extremely unlikely fallback — extend to 4 chars
     return "".join(_random.choices(_CODE_CHARS, k=4))
 
 
@@ -106,10 +96,9 @@ def add_countdown(
     minute: int,
     created_by: int,
 ) -> str:
-    """Add or overwrite a named countdown for a chat. Returns the short code."""
+    """Add or overwrite a named countdown. Returns the short code."""
     data = _load_chat(chat_id)
     existing_codes = {v.get("code", "") for v in data.values()}
-    # Preserve existing code if overwriting the same name
     existing_code = data.get(name, {}).get("code", "")
     code = existing_code or _gen_code(existing_codes)
     data[name] = {
@@ -124,17 +113,14 @@ def add_countdown(
 
 
 def get_countdown(chat_id: int, name: str) -> Optional[dict]:
-    """Return a single countdown entry or None."""
     return _load_chat(chat_id).get(name)
 
 
 def get_all_countdowns(chat_id: int) -> dict:
-    """Return all countdowns for a chat."""
     return _load_chat(chat_id)
 
 
 def remove_countdown(chat_id: int, name: str) -> bool:
-    """Remove a named countdown. Returns True if it existed."""
     data = _load_chat(chat_id)
     if name in data:
         del data[name]
@@ -148,7 +134,6 @@ def countdown_exists(chat_id: int, name: str) -> bool:
 
 
 def get_countdown_by_code(chat_id: int, code: str) -> Optional[str]:
-    """Return the countdown name matching the given short code, or None."""
     code = code.lower()
     for name, entry in _load_chat(chat_id).items():
         if entry.get("code", "").lower() == code:
@@ -157,23 +142,16 @@ def get_countdown_by_code(chat_id: int, code: str) -> Optional[str]:
 
 
 def get_countdown_creator(chat_id: int, name: str) -> Optional[int]:
-    """Return the user_id of whoever created this countdown, or None."""
     entry = _load_chat(chat_id).get(name)
-    if entry:
-        return entry.get("created_by")
-    return None
+    return entry.get("created_by") if entry else None
 
 
 def get_all_chats() -> dict:
-    """
-    Return all countdowns across all chats.
-    Used to restore reminder jobs on startup.
-    """
+    """Return all countdowns across all chats (used to restore reminder jobs on startup)."""
     try:
         keys = redis.keys("countdowns:*")
         if not keys:
             return {}
-
         result = {}
         for key in keys:
             key_name = key.decode("utf-8") if isinstance(key, bytes) else str(key)
@@ -182,7 +160,6 @@ def get_all_chats() -> dict:
             except (IndexError, ValueError):
                 logger.warning("Skipping unexpected Redis key: %s", key)
                 continue
-
             result[chat_id] = _decode_chat_data(redis.get(key))
         return result
     except Exception as e:
@@ -191,16 +168,33 @@ def get_all_chats() -> dict:
 
 
 # ─────────────────────────────────────────────
-# Fateboard persistence (per chat, per day)
-# Redis key: fateboard:<chat_id>:<YYYY-MM-DD>
-# TTL: 25 hours — expires cleanly after each day,
-#      so yesterday's data never bleeds into today.
+# Luckboard (replaces fateboard — keys migrated on startup)
+# Redis key: luckboard:<chat_id>:<YYYY-MM-DD>
+# TTL: 25 hours
 # ─────────────────────────────────────────────
-_FATEBOARD_TTL = 60 * 60 * 25  # 25 hours
+_LUCKBOARD_TTL = 60 * 60 * 25  # 25 hours
 
 
-def _fb_key(chat_id: int, date_str: str) -> str:
-    return f"fateboard:{chat_id}:{date_str}"
+def _lb_key(chat_id: int, date_str: str) -> str:
+    return f"luckboard:{chat_id}:{date_str}"
+
+
+def delete_old_fateboard_keys() -> int:
+    """Delete all legacy fateboard:* keys. Called once on startup."""
+    try:
+        keys = redis.keys("fateboard:*")
+        if not keys:
+            return 0
+        for key in keys:
+            try:
+                redis.delete(key)
+            except Exception as e:
+                logger.warning("Could not delete fateboard key %s: %s", key, e)
+        logger.info("Deleted %s legacy fateboard key(s) from Redis.", len(keys))
+        return len(keys)
+    except Exception as e:
+        logger.error("Redis delete_old_fateboard_keys error: %s", e)
+        return 0
 
 
 def save_fate_entry(
@@ -211,8 +205,8 @@ def save_fate_entry(
     score: int,
     tier: str,
 ) -> None:
-    """Upsert one user's fate result into today's board for this chat."""
-    key = _fb_key(chat_id, date_str)
+    """Upsert one user's luck result into today's luckboard."""
+    key = _lb_key(chat_id, date_str)
     try:
         try:
             raw = redis.get(key)
@@ -220,48 +214,45 @@ def save_fate_entry(
             raw = None
         board = _decode_chat_data(raw) if raw is not None else {}
         board[str(user_id)] = {"name": name, "score": score, "tier": tier}
-        # Atomic write + TTL in a single REST call (no separate expire)
-        redis.set(key, json.dumps(board, separators=(",", ":")), ex=_FATEBOARD_TTL)
-        logger.info("Fateboard saved for chat %s user %s score %s", chat_id, user_id, score)
+        redis.set(key, json.dumps(board, separators=(",", ":")), ex=_LUCKBOARD_TTL)
+        logger.info("Luckboard saved chat=%s user=%s score=%s", chat_id, user_id, score)
     except Exception as e:
-        logger.error("Redis fateboard write error for chat %s: %s", chat_id, e)
+        logger.error("Redis luckboard write error for chat %s: %s", chat_id, e)
 
 
 def get_fate_board(chat_id: int, date_str: str) -> dict:
-    """Return {user_id_str: {name, score, tier}} for today's board."""
-    key = _fb_key(chat_id, date_str)
+    """Return {user_id_str: {name, score, tier}} for today's luckboard."""
+    key = _lb_key(chat_id, date_str)
     try:
         raw = redis.get(key)
         if raw is None:
             return {}
         return _decode_chat_data(raw)
     except Exception as e:
-        logger.error("Redis fateboard read error for chat %s: %s", chat_id, e)
+        logger.error("Redis luckboard read error for chat %s: %s", chat_id, e)
         return {}
 
 
 # ─────────────────────────────────────────────
-# Quote archive (per chat)
-# Redis key: quotes:<chat_id>  →  JSON list of quote dicts
-# Capped at 100 quotes per chat, no TTL (persistent)
+# Quote archive (per chat) — capped at 100
 # ─────────────────────────────────────────────
-_QUOTES_MAX = 100
+_QUOTE_CAP = 100
 
 
 def _quotes_key(chat_id: int) -> str:
     return f"quotes:{chat_id}"
 
 
-def save_quote(chat_id: int, author_name: str, text: str, saved_by_name: str) -> int:
-    """Append a quote. Returns the new total count."""
+def save_quote(chat_id: int, author: str, text: str, saved_by: str) -> int:
     key = _quotes_key(chat_id)
     try:
         raw = redis.get(key)
         quotes = _decode_chat_data(raw) if raw else []
         if not isinstance(quotes, list):
             quotes = []
-        quotes.append({"author": author_name, "text": text, "saved_by": saved_by_name})
-        quotes = quotes[-_QUOTES_MAX:]
+        quotes.append({"author": author, "text": text, "saved_by": saved_by})
+        if len(quotes) > _QUOTE_CAP:
+            quotes = quotes[-_QUOTE_CAP:]
         redis.set(key, json.dumps(quotes, separators=(",", ":")))
         return len(quotes)
     except Exception as e:
@@ -269,8 +260,17 @@ def save_quote(chat_id: int, author_name: str, text: str, saved_by_name: str) ->
         return 0
 
 
+def get_quote_count(chat_id: int) -> int:
+    key = _quotes_key(chat_id)
+    try:
+        raw = redis.get(key)
+        quotes = _decode_chat_data(raw) if raw else []
+        return len(quotes) if isinstance(quotes, list) else 0
+    except Exception:
+        return 0
+
+
 def get_all_quotes(chat_id: int) -> list:
-    """Return all quotes as a list."""
     key = _quotes_key(chat_id)
     try:
         raw = redis.get(key)
@@ -279,48 +279,28 @@ def get_all_quotes(chat_id: int) -> list:
         quotes = _decode_chat_data(raw)
         return quotes if isinstance(quotes, list) else []
     except Exception as e:
-        logger.error("Redis quotes list error for chat %s: %s", chat_id, e)
+        logger.error("Redis quotes read error for chat %s: %s", chat_id, e)
         return []
 
 
 def delete_quote(chat_id: int, index: int) -> tuple:
-    """
-    Delete quote by 1-based index.
-    Returns (success: bool, message: str).
-    """
     key = _quotes_key(chat_id)
     try:
         raw = redis.get(key)
         quotes = _decode_chat_data(raw) if raw else []
-        if not isinstance(quotes, list) or not quotes:
-            return False, "❌ No quotes saved yet."
-        if index < 1 or index > len(quotes):
-            return False, f"❌ Quote #{index} doesn't exist. There are {len(quotes)} quote(s)."
+        if not isinstance(quotes, list) or not (1 <= index <= len(quotes)):
+            total = len(quotes) if isinstance(quotes, list) else 0
+            return False, f"⚠️ Invalid number. There are {total} quote(s)."
         removed = quotes.pop(index - 1)
         redis.set(key, json.dumps(quotes, separators=(",", ":")))
-        preview = removed["text"][:60] + ("…" if len(removed["text"]) > 60 else "")
-        return True, f'🗑️ Deleted quote #{index}: *"{preview}"* — {removed["author"]}'
+        return True, f'✅ Deleted quote #{index}: *"{removed["text"]}"* — {removed["author"]}'
     except Exception as e:
         logger.error("Redis quote delete error for chat %s: %s", chat_id, e)
-        return False, "❌ Something went wrong while deleting the quote."
-
-
-def get_quote_count(chat_id: int) -> int:
-    key = _quotes_key(chat_id)
-    try:
-        raw = redis.get(key)
-        if not raw:
-            return 0
-        quotes = _decode_chat_data(raw)
-        return len(quotes) if isinstance(quotes, list) else 0
-    except Exception:
-        return 0
+        return False, "❌ Failed to delete quote."
 
 
 # ─────────────────────────────────────────────
-# Ship pair leaderboard (per chat)
-# Redis key: ship_pairs:<chat_id>  →  JSON dict
-# {pair_key: {label_a, label_b, score}}
+# Ship pairs (per chat)
 # ─────────────────────────────────────────────
 def _ship_pairs_key(chat_id: int) -> str:
     return f"ship_pairs:{chat_id}"
@@ -353,12 +333,9 @@ def get_top_ship_pairs(chat_id: int, limit: int = 5) -> list:
 
 
 # ─────────────────────────────────────────────
-# Fate streak (per user)
-# Redis key: fate_streak:<user_id>  →  {date, streak, category}
-# category: "lucky" | "unlucky" | "neutral"
-# TTL: 49 hours — resets if you miss a day
+# Fate/luck streak (per user) — TTL 49 h
 # ─────────────────────────────────────────────
-_STREAK_TTL = 60 * 60 * 49  # 49 hours
+_STREAK_TTL = 60 * 60 * 49
 
 
 def _streak_key(user_id: int) -> str:
@@ -377,7 +354,6 @@ def update_fate_streak(user_id: int, date_str: str, tier_category: str) -> int:
         yesterday_str = (today - timedelta(days=1)).isoformat()
 
         if data.get("date") == date_str:
-            # Already logged today, return existing streak
             return data.get("streak", 1)
         elif data.get("date") == yesterday_str and data.get("category") == tier_category:
             streak = data.get("streak", 1) + 1
@@ -408,8 +384,7 @@ def get_fate_streak(user_id: int) -> tuple:
 
 
 # ─────────────────────────────────────────────
-# Seen users (per chat) — for /mvp
-# Redis key: seen_users:<chat_id>  →  {user_id_str: name}
+# Seen users (per chat) — for /mvp, /toss
 # ─────────────────────────────────────────────
 def _seen_key(chat_id: int) -> str:
     return f"seen_users:{chat_id}"
@@ -437,10 +412,9 @@ def get_seen_users(chat_id: int) -> dict:
 
 
 # ─────────────────────────────────────────────
-# Per-user reminder job count (for /remind spam cap)
-# Redis key: remind_count:<user_id>  →  int (TTL: 25h, resets daily)
+# Per-user reminder count (spam cap, TTL 25 h)
 # ─────────────────────────────────────────────
-_REMIND_COUNT_TTL = 60 * 60 * 25  # 25 hours
+_REMIND_COUNT_TTL = 60 * 60 * 25
 
 
 def _remind_count_key(user_id: int) -> str:
@@ -448,14 +422,10 @@ def _remind_count_key(user_id: int) -> str:
 
 
 def increment_remind_count(user_id: int) -> int:
-    """
-    Increment and return the reminder count for this user.
-    The counter resets after 25 hours automatically.
-    """
+    """Atomically increment and return the new count. Sets TTL on first increment."""
     key = _remind_count_key(user_id)
     try:
         new_val = redis.incr(key)
-        # Only set TTL on first increment so the window is fixed from first use
         if new_val == 1:
             redis.expire(key, _REMIND_COUNT_TTL)
         return new_val
@@ -465,33 +435,26 @@ def increment_remind_count(user_id: int) -> int:
 
 
 def get_remind_count(user_id: int) -> int:
-    """Return how many reminders this user has active in the current window."""
     key = _remind_count_key(user_id)
     try:
         raw = redis.get(key)
-        if raw is None:
-            return 0
-        return int(raw)
+        return int(raw) if raw is not None else 0
     except Exception:
         return 0
 
 
 def decrement_remind_count(user_id: int) -> None:
-    """Call when a reminder fires, to free a slot for the user."""
     key = _remind_count_key(user_id)
     try:
-        current = get_remind_count(user_id)
-        if current > 0:
+        if get_remind_count(user_id) > 0:
             redis.decr(key)
     except Exception as e:
         logger.error("Redis remind decr error for user %s: %s", user_id, e)
 
 
 # ─────────────────────────────────────────────
-# Remind job persistence (survives bot restarts)
-# Redis key: remind_jobs:<chat_id>  →  JSON list of job dicts
-# {job_id, user_id, user_mention_html, text, fire_at (unix timestamp)}
-# Jobs more than 10 minutes overdue are dropped on restore.
+# Remind job persistence (survives restarts)
+# Redis key: remind_jobs:<chat_id>  →  JSON list
 # ─────────────────────────────────────────────
 def _remind_jobs_key(chat_id: int) -> str:
     return f"remind_jobs:{chat_id}"
@@ -526,7 +489,7 @@ def save_remind_job(
 
 
 def delete_remind_job(chat_id: int, job_id: str) -> None:
-    """Remove a fired or cancelled remind job from Redis."""
+    """Remove a fired or cancelled remind job."""
     key = _remind_jobs_key(chat_id)
     try:
         raw = redis.get(key)
@@ -539,16 +502,34 @@ def delete_remind_job(chat_id: int, job_id: str) -> None:
         logger.error("Redis remind job delete error for chat %s: %s", chat_id, e)
 
 
+def get_user_remind_jobs(chat_id: int, user_id: int) -> list:
+    """Return still-pending remind jobs for a specific user in a chat."""
+    key = _remind_jobs_key(chat_id)
+    try:
+        raw = redis.get(key)
+        jobs = _decode_chat_data(raw) if raw else []
+        if not isinstance(jobs, list):
+            return []
+        now = _time.time()
+        return [
+            j for j in jobs
+            if j.get("user_id") == user_id and j.get("fire_at", 0) > now
+        ]
+    except Exception as e:
+        logger.error("Redis user remind jobs error for chat %s: %s", chat_id, e)
+        return []
+
+
 def get_all_remind_jobs() -> dict:
     """
     Return {chat_id: [job_dicts]} for all chats with pending remind jobs.
-    Skips jobs more than 10 minutes overdue to avoid firing stale reminders.
+    Drops jobs more than 10 minutes overdue.
     """
     try:
         keys = redis.keys("remind_jobs:*")
         if not keys:
             return {}
-        cutoff = _time.time() - 10 * 60  # drop jobs more than 10 min overdue
+        cutoff = _time.time() - 10 * 60
         result = {}
         for key in keys:
             key_name = key.decode("utf-8") if isinstance(key, bytes) else str(key)
@@ -567,4 +548,56 @@ def get_all_remind_jobs() -> dict:
         return result
     except Exception as e:
         logger.error("Redis get_all_remind_jobs error: %s", e)
+        return {}
+
+
+# ─────────────────────────────────────────────
+# Birthdays (per chat)
+# Redis key: birthdays:<chat_id>  →  {user_id_str: {name, day, month}}
+# No TTL — birthdays are permanent until the user updates them.
+# ─────────────────────────────────────────────
+def _birthday_key(chat_id: int) -> str:
+    return f"birthdays:{chat_id}"
+
+
+def save_birthday(chat_id: int, user_id: int, name: str, day: int, month: int) -> None:
+    key = _birthday_key(chat_id)
+    try:
+        raw = redis.get(key)
+        data = _decode_chat_data(raw) if raw else {}
+        data[str(user_id)] = {"name": name, "day": day, "month": month}
+        redis.set(key, json.dumps(data, separators=(",", ":")))
+        logger.info("Birthday saved user=%s chat=%s %02d/%02d", user_id, chat_id, day, month)
+    except Exception as e:
+        logger.error("Redis birthday save error for chat %s: %s", chat_id, e)
+
+
+def get_all_birthdays(chat_id: int) -> dict:
+    """Return {user_id_str: {name, day, month}} for this chat."""
+    key = _birthday_key(chat_id)
+    try:
+        raw = redis.get(key)
+        return _decode_chat_data(raw) if raw else {}
+    except Exception as e:
+        logger.error("Redis birthday read error for chat %s: %s", chat_id, e)
+        return {}
+
+
+def get_all_birthday_chats() -> dict:
+    """Return {chat_id: {user_id_str: {name, day, month}}} across all chats."""
+    try:
+        keys = redis.keys("birthdays:*")
+        if not keys:
+            return {}
+        result = {}
+        for key in keys:
+            key_name = key.decode("utf-8") if isinstance(key, bytes) else str(key)
+            try:
+                chat_id = int(key_name.split(":", 1)[1])
+            except (IndexError, ValueError):
+                continue
+            result[chat_id] = _decode_chat_data(redis.get(key))
+        return result
+    except Exception as e:
+        logger.error("Redis get_all_birthday_chats error: %s", e)
         return {}
