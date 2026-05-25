@@ -244,12 +244,24 @@ def _quotes_key(chat_id: int) -> str:
 
 
 def save_quote(chat_id: int, author: str, text: str, saved_by: str) -> int:
+    """
+    Append a quote.  Returns the new total count, or -1 if an identical
+    (text + author) quote already exists in the archive.
+    """
     key = _quotes_key(chat_id)
     try:
         raw = redis.get(key)
         quotes = _decode_chat_data(raw) if raw else []
         if not isinstance(quotes, list):
             quotes = []
+        # Dedup: reject exact same text from the same author
+        text_norm = text.strip().casefold()
+        if any(
+            q.get("text", "").strip().casefold() == text_norm
+            and q.get("author", "") == author
+            for q in quotes
+        ):
+            return -1  # caller should inform the user it's a duplicate
         quotes.append({"author": author, "text": text, "saved_by": saved_by})
         if len(quotes) > _QUOTE_CAP:
             quotes = quotes[-_QUOTE_CAP:]
@@ -300,10 +312,24 @@ def delete_quote(chat_id: int, index: int) -> tuple:
 
 
 # ─────────────────────────────────────────────
-# Ship pairs (per chat)
+# Ship pairs (per chat) — rolling 48-hour window
+# Key rotates every 48 h so the board auto-resets.
+# Redis key: ship_pairs:<chat_id>:<bucket>
+# where bucket = unix_epoch // 172800
 # ─────────────────────────────────────────────
+_SHIP_PAIRS_WINDOW = 48 * 3600  # 48 hours in seconds
+
+
 def _ship_pairs_key(chat_id: int) -> str:
-    return f"ship_pairs:{chat_id}"
+    bucket = int(_time.time()) // _SHIP_PAIRS_WINDOW
+    return f"ship_pairs:{chat_id}:{bucket}"
+
+
+def get_shipboard_reset_time() -> int:
+    """Return seconds until the current 48-hour ship window resets."""
+    now = int(_time.time())
+    bucket = now // _SHIP_PAIRS_WINDOW
+    return (bucket + 1) * _SHIP_PAIRS_WINDOW - now
 
 
 def save_ship_pair(
@@ -314,7 +340,10 @@ def save_ship_pair(
         raw = redis.get(key)
         pairs = _decode_chat_data(raw) if raw else {}
         pairs[pair_key] = {"label_a": label_a, "label_b": label_b, "score": score}
-        redis.set(key, json.dumps(pairs, separators=(",", ":")))
+        # TTL = remaining seconds in this window + 1 h grace so the key never
+        # disappears while the window is still active.
+        ttl = get_shipboard_reset_time() + 3600
+        redis.set(key, json.dumps(pairs, separators=(",", ":")), ex=ttl)
     except Exception as e:
         logger.error("Redis ship pair save error for chat %s: %s", chat_id, e)
 

@@ -101,6 +101,7 @@ from countdown_manager import (
     get_seen_users,
     save_ship_pair,
     get_top_ship_pairs,
+    get_shipboard_reset_time,
     update_fate_streak,
     get_fate_streak,
     increment_remind_count,
@@ -411,6 +412,7 @@ HELP_PAGES = {
     ),
     "other": (
         "⚙️ *Other*\n\n"
+        "/stats — group activity summary\n"
         "/cancel — cancel the current flow\n"
         "/help — show this menu"
     ),
@@ -466,12 +468,8 @@ async def help_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             parse_mode="Markdown",
             reply_markup=_help_keyboard(page),
         )
-    except Exception:
-        pass
-
-
-# ---------------------------------------------
-# /ask - Serper Google search + Groq AI
+    except Exception as e:
+        logger.debug("help_callback edit skipped (message unchanged): %s", e)
 # thread-safe search cache
 # ---------------------------------------------
 SERPER_API_KEY = os.getenv("SERPER_API_KEY", "")
@@ -671,7 +669,7 @@ async def received_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         )
         return ASK_NAME
     chat_id = update.effective_chat.id
-    if countdown_exists(chat_id, name):
+    if await asyncio.to_thread(countdown_exists, chat_id, name):
         await update.message.reply_text(
             f"⚠️ A countdown named *{name}* already exists.\n"
             f"Please use a different name.\n⏰ You have *{CONV_TIMEOUT} seconds* to reply.",
@@ -1931,12 +1929,20 @@ async def ship_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def shipboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    pairs = await asyncio.to_thread(get_top_ship_pairs, update.effective_chat.id, 5)
+    chat_id = update.effective_chat.id
+    pairs = await asyncio.to_thread(get_top_ship_pairs, chat_id, 5)
+    reset_secs = await asyncio.to_thread(get_shipboard_reset_time)
+    reset_h = reset_secs // 3600
+    reset_m = (reset_secs % 3600) // 60
     if not pairs:
-        await update.message.reply_text("💞 No ships recorded yet!\nUse /ship @user1 @user2 to get started.")
+        await update.message.reply_text(
+            "💞 No ships recorded yet!\nUse /ship @user1 @user2 to get started.\n"
+            f"_Board resets in {reset_h}h {reset_m}m._",
+            parse_mode="Markdown",
+        )
         return
     medals = ["🥇", "🥈", "🥉"]
-    lines = ["💞 *Top Ship Pairs*\n"]
+    lines = [f"💞 *Top Ship Pairs*\n_Resets in {reset_h}h {reset_m}m_\n"]
     for i, pair in enumerate(pairs, 1):
         medal = medals[i - 1] if i <= 3 else f"{i}."
         score = pair["score"]
@@ -2279,7 +2285,10 @@ async def quote_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not text:
         await message.reply_text("The quote can't be empty!")
         return
-    count = save_quote(update.effective_chat.id, author, text, saved_by)
+    count = await asyncio.to_thread(save_quote, update.effective_chat.id, author, text, saved_by)
+    if count == -1:
+        await message.reply_text("⚠️ That quote is already in the archive!")
+        return
     await message.reply_text(
         f'💬 Saved!\n*"{text}"* — {author}\n_#{count} in this chat_',
         parse_mode="Markdown",
@@ -2322,15 +2331,15 @@ async def quotes_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     text, keyboard = _build_quote_page(chat_id, quotes, index)
     try:
         await query.edit_message_text(text, parse_mode="Markdown", reply_markup=keyboard)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("quotes_callback edit skipped (message unchanged): %s", e)
 
 
 async def deletequote_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
     if not context.args or not context.args[0].isdigit():
-        total = get_quote_count(chat_id)
+        total = await asyncio.to_thread(get_quote_count, chat_id)
         await update.message.reply_text(
             f"Usage: `/deletequote <number>`\n"
             f"There are currently *{total}* quote(s) saved.\n"
@@ -2347,7 +2356,7 @@ async def deletequote_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("⚠️ Only group admins can delete quotes.")
         return
     index = int(context.args[0])
-    success, msg = delete_quote(chat_id, index)
+    success, msg = await asyncio.to_thread(delete_quote, chat_id, index)
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 
@@ -2797,6 +2806,138 @@ async def birthday_check_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 # ---------------------------------------------
+# /stats — group activity summary
+# ---------------------------------------------
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    today_str = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
+
+    # Fetch everything concurrently to keep it fast
+    quote_count, seen_users, top_pairs, board = await asyncio.gather(
+        asyncio.to_thread(get_quote_count, chat_id),
+        asyncio.to_thread(get_seen_users, chat_id),
+        asyncio.to_thread(get_top_ship_pairs, chat_id, 1),
+        asyncio.to_thread(get_fate_board, chat_id, today_str),
+    )
+    reset_secs = await asyncio.to_thread(get_shipboard_reset_time)
+
+    member_count = len(seen_users)
+    reset_h = reset_secs // 3600
+    reset_m = (reset_secs % 3600) // 60
+
+    # Top ship pair in the current 48h window
+    if top_pairs:
+        p = top_pairs[0]
+        ship_line = f"{_escape_md(p['label_a'])} × {_escape_md(p['label_b'])} `{p['score']:.1f}%`"
+    else:
+        ship_line = "No ships yet this cycle"
+
+    # Today's luckboard summary
+    luck_count = len(board)
+    if board:
+        top_uid = max(board, key=lambda k: board[k]["score"])
+        t = board[top_uid]
+        lucky_line = f"{_escape_md(t['name'])} — {t['tier']} (`{t['score']}`)"
+    else:
+        lucky_line = "Nobody checked today"
+
+    lines = [
+        "📊 *Group Stats*\n",
+        f"👥 Members tracked: *{member_count}*",
+        f"💬 Quotes saved: *{quote_count}*",
+        f"\n🍀 *Today's Luck*",
+        f"Checks: *{luck_count}*",
+        f"Luckiest: {lucky_line}",
+        f"\n💞 *Ships* _(resets in {reset_h}h {reset_m}m)_",
+        f"Top pair: {ship_line}",
+    ]
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+# ---------------------------------------------
+# /lucktest — owner-only luck score preview
+# ---------------------------------------------
+async def lucktest_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /lucktest <score>
+    Owner-only. Preview exactly what the luck result looks like for any score
+    (0–100, or 999 / -999 for cosmic specials).  Uses your own name so name-based
+    specials (sigma, kai, rizz…) apply as they would for you.
+    Nothing is saved to the luckboard.
+    """
+    user = update.effective_user
+    is_owner = (BOT_OWNER_ID and user.id == BOT_OWNER_ID) or (
+        user.username and user.username.casefold() in BOT_OWNER_USERNAMES
+    )
+    if not is_owner:
+        return  # silently ignore non-owners
+
+    raw_arg = _arg_text(context)
+    if not raw_arg or not raw_arg.lstrip("-").lstrip("+").isdigit():
+        await update.message.reply_text(
+            "🔧 *Luck Test* _(owner only)_\n\n"
+            "Usage: `/lucktest <score>`\n"
+            "Score: `0`–`100`, `999` _(cosmic lucky)_, or `-999` _(cosmic cursed)_\n\n"
+            "Shows the full luck card for that score, including today's day modifier "
+            "and any name-based specials, without saving anything.",
+            parse_mode="Markdown",
+        )
+        return
+
+    try:
+        raw_score = int(raw_arg)
+    except ValueError:
+        await update.message.reply_text("⚠️ That doesn't look like a number.")
+        return
+
+    # Clamp to valid range; 999 / -999 pass through unchanged
+    if raw_score not in (999, -999):
+        score = max(0, min(100, raw_score))
+    else:
+        score = raw_score
+
+    # Derive base tier + a sample message for this score
+    if score == 999:
+        tier = "🌈 COSMICALLY CHOSEN"
+        luck_msg = FATE_EXTREME_LUCKY_MESSAGES[0]
+    elif score == -999:
+        tier = "☠️ COSMICALLY CURSED"
+        luck_msg = FATE_EXTREME_UNLUCKY_MESSAGES[0]
+    else:
+        tier = "🌤️ Neutral"
+        luck_msg = "Just another day."
+        for t in FATE_TIERS:
+            lo, hi = t["range"]
+            if lo <= score <= hi:
+                tier = t["name"]
+                luck_msg = t["messages"][0]
+                break
+
+    target_name = _display_user(user)
+    today = _today()
+
+    # Run through the same pipeline as the real /luck command
+    final_score, final_tier, final_msg, day_note, _ = _apply_special_luck(
+        score, tier, luck_msg, target_name, today, seed=str(user.id)
+    )
+
+    result_text = _luck_result_text(
+        target_name, final_tier, final_score, final_msg, day_note=day_note
+    )
+
+    clamp_note = (
+        f"_Input clamped: {raw_score} → {score}_\n\n"
+        if raw_score != score else ""
+    )
+    await update.message.reply_text(
+        f"🔧 *Luck Test — Input score: {raw_score}*\n{clamp_note}\n"
+        f"{result_text}\n\n"
+        "_Preview only — nothing saved._",
+        parse_mode="Markdown",
+    )
+
+
+# ---------------------------------------------
 # Main
 # ---------------------------------------------
 def main() -> None:
@@ -2894,6 +3035,8 @@ def main() -> None:
     app.add_handler(CommandHandler("deletequote",    deletequote_command))
     app.add_handler(CommandHandler("mvp",            mvp_command))
     app.add_handler(CommandHandler("hot",            hot_command))
+    app.add_handler(CommandHandler("stats",          stats_command))
+    app.add_handler(CommandHandler("lucktest",       lucktest_command))
 
     logger.info("Bot is running...")
     app.run_polling()
