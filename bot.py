@@ -43,9 +43,7 @@ Commands
 /curse           -> Fake daily curse
 /bless           -> Fake daily blessing
 /toss            -> Pick a random person from mentions or group
-/birthday        -> List birthdays in this chat
-/addbirthday     -> Set your birthday
-/deletebirthday  -> Delete your birthday (admins can delete others)
+/birthday        -> Set or list birthdays
 /remind          -> Set a personal one-shot reminder
 /cancelremind    -> List and cancel your pending reminders
 /remindall       -> Set a group-wide reminder (admins only)
@@ -115,7 +113,6 @@ from countdown_manager import (
     get_all_remind_jobs,
     delete_old_fateboard_keys,
     save_birthday,
-    delete_birthday,
     get_all_birthdays,
     get_all_birthday_chats,
 )
@@ -344,7 +341,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "🎲 /choose — let me decide for you\n"
         "🍀 /luck — check your daily luck\n"
         "⏰ /remind — set a personal reminder\n"
-        "🎂 /addbirthday — set your birthday\n"
+        "🎂 /birthday — set or view birthdays\n"
         "🎉 /help — see all commands",
         parse_mode="Markdown",
     )
@@ -409,10 +406,8 @@ HELP_PAGES = {
         "/remind 2h submit the report — supports s/m/h units\n"
         "/cancelremind — view and cancel your pending reminders\n"
         "/remindall 1h group meeting — group-wide reminder (admins only)\n"
-        "/birthday — see upcoming birthdays in this chat\n"
-        "/addbirthday DD/MM — set your birthday\n"
-        "/deletebirthday — delete your birthday\n"
-        "/deletebirthday @user — delete someone's birthday (admins only)\n"
+        "/birthday DD/MM — set your birthday\n"
+        "/birthday list — see upcoming birthdays in this chat\n"
         "_Personal reminders survive bot restarts._"
     ),
     "other": (
@@ -2743,120 +2738,6 @@ async def birthday_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     )
 
 
-async def addbirthday_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    /addbirthday DD/MM  — set your birthday (e.g. /addbirthday 25/12)
-    """
-    import calendar
-    chat_id = update.effective_chat.id
-    user = update.effective_user
-    text = _arg_text(context)
-
-    if not text:
-        await update.message.reply_text(
-            "🎂 *Set your birthday*\n\n"
-            "Usage: `/addbirthday DD/MM`\n"
-            "_(e.g. `/addbirthday 25/12` for December 25)_",
-            parse_mode="Markdown",
-        )
-        return
-
-    match = re.fullmatch(r"(\d{1,2})[/\-.](\d{1,2})", text.strip())
-    if not match:
-        await update.message.reply_text(
-            "⚠️ Use the format `DD/MM`.\n_(e.g. `/addbirthday 25/12` for December 25)_",
-            parse_mode="Markdown",
-        )
-        return
-
-    day, month = int(match.group(1)), int(match.group(2))
-    if not (1 <= month <= 12):
-        await update.message.reply_text("⚠️ Invalid month. Must be between 1 and 12.")
-        return
-    max_day = calendar.monthrange(2000, month)[1]
-    if not (1 <= day <= max_day):
-        await update.message.reply_text(f"⚠️ Invalid day for month {_MONTH_NAMES[month]}.")
-        return
-
-    name = _display_user(user)
-    await asyncio.to_thread(save_birthday, chat_id, user.id, name, day, month)
-    days_left = _days_until_birthday(day, month)
-    tag = "🎉 That's today!" if days_left == 0 else f"in {days_left} days"
-
-    await update.message.reply_text(
-        f"🎂 *Birthday saved!*\n"
-        f"*{name}* — {day:02d} {_MONTH_NAMES[month]}  _{tag}_\n\n"
-        f"Use `/birthday` to see everyone's upcoming birthdays.",
-        parse_mode="Markdown",
-    )
-
-
-async def deletebirthday_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    /deletebirthday         — delete your own birthday
-    /deletebirthday @user   — delete someone else's birthday (admins only)
-    """
-    chat_id = update.effective_chat.id
-    user = update.effective_user
-
-    # Check if a mention is provided
-    target_mention = _mentioned_target(update, context)
-
-    if target_mention:
-        # Admin-only: deleting someone else
-        try:
-            member = await context.bot.get_chat_member(chat_id, user.id)
-            is_admin = member.status in ("administrator", "creator")
-        except Exception:
-            is_admin = False
-
-        if not is_admin:
-            await update.message.reply_text(
-                "⚠️ Only admins can delete someone else's birthday."
-            )
-            return
-
-        # Find the mentioned user's ID from the message entities
-        target_uid = None
-        for entity in (update.message.entities or []):
-            if entity.type == "text_mention" and entity.user:
-                target_uid = entity.user.id
-                break
-
-        if not target_uid:
-            await update.message.reply_text(
-                "⚠️ Please mention the user directly (they must be a group member with a visible account)."
-            )
-            return
-
-        deleted = await asyncio.to_thread(delete_birthday, chat_id, target_uid)
-        if deleted:
-            await update.message.reply_text(
-                f"🗑️ Birthday for *{_escape_md(target_mention)}* has been removed.",
-                parse_mode="Markdown",
-            )
-        else:
-            await update.message.reply_text(
-                f"⚠️ No birthday found for *{_escape_md(target_mention)}*.",
-                parse_mode="Markdown",
-            )
-    else:
-        # Delete own birthday
-        deleted = await asyncio.to_thread(delete_birthday, chat_id, user.id)
-        if deleted:
-            await update.message.reply_text(
-                f"🗑️ Your birthday has been removed.\n"
-                f"Use `/addbirthday DD/MM` to set it again.",
-                parse_mode="Markdown",
-            )
-        else:
-            await update.message.reply_text(
-                "⚠️ You don't have a birthday saved here yet.\n"
-                "Use `/addbirthday DD/MM` to set one.",
-                parse_mode="Markdown",
-            )
-
-
 async def birthday_check_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Runs daily at 00:01 MYT. Sends birthday greetings to each chat."""
     today = datetime.now(TIMEZONE).date()
@@ -3096,8 +2977,6 @@ def main() -> None:
     app.add_handler(CommandHandler("poll",           poll_command))
     app.add_handler(CommandHandler("toss",           toss_command))
     app.add_handler(CommandHandler("birthday",       birthday_command))
-    app.add_handler(CommandHandler("addbirthday",    addbirthday_command))
-    app.add_handler(CommandHandler("deletebirthday", deletebirthday_command))
     app.add_handler(CommandHandler("remind",         remind_command))
     app.add_handler(CommandHandler("cancelremind",   cancelremind_command))
     app.add_handler(CommandHandler("remindall",      remindall_command))
