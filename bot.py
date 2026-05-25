@@ -1790,9 +1790,32 @@ def _bot_mentioned_in_ship(update: Update, bot_username: str, bot_id: int) -> bo
     return False
 
 
+def _is_real_reply(message) -> bool:
+    """
+    Return True only if this message is a genuine user-initiated reply.
+
+    In Telegram forum topics (supergroups with topics enabled) every message
+    in a thread carries reply_to_message pointing at the thread-head message
+    whose message_id == message.message_thread_id.  That is NOT an intentional
+    reply — it is just Telegram's way of associating the message with its topic.
+    We must not treat it as one, otherwise the topic author gets silently
+    injected as the first ship target for everyone who types /ship @user in
+    that topic.
+    """
+    if not message or not message.reply_to_message:
+        return False
+    # If the replied-to message is the forum topic head, it is not a real reply.
+    thread_id = getattr(message, "message_thread_id", None)
+    if thread_id and message.reply_to_message.message_id == thread_id:
+        return False
+    return True
+
+
 def _extract_ship_targets(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = _arg_text(context)
-    replied = update.message.reply_to_message
+    message = update.message
+    replied = message.reply_to_message if message else None
+    real_reply = _is_real_reply(message)
     bot_username = getattr(context.bot, "username", "") or ""
     bot_id = getattr(context.bot, "id", 0) or 0
     mentioned_targets = _ship_mentions_from_message(update, bot_username, bot_id)
@@ -1800,7 +1823,7 @@ def _extract_ship_targets(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return mentioned_targets[:2]
     if len(mentioned_targets) == 1:
         mention_target = mentioned_targets[0]
-        if replied and replied.from_user:
+        if real_reply and replied.from_user:
             return [_ship_target(_display_user(replied.from_user), user_id=replied.from_user.id,
                                  username=replied.from_user.username or "",
                                  explicit_username=bool(replied.from_user.username)), mention_target]
@@ -1813,7 +1836,7 @@ def _extract_ship_targets(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parts = [p.strip() for p in text.split(",") if p.strip()]
         if len(parts) >= 2:
             return [_ship_target(parts[0]), _ship_target(parts[1])]
-    if replied and replied.from_user:
+    if real_reply and replied.from_user:
         full_name = " ".join(context.args).strip() if context.args else ""
         if full_name:
             other = _ship_target(full_name, username=full_name if full_name.startswith("@") else "",
