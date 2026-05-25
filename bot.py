@@ -1736,6 +1736,13 @@ HOT_VERDICTS = [
 ]
 
 
+def _escape_md(text: str) -> str:
+    """Escape Telegram Markdown v1 special characters in user-supplied text."""
+    for ch in ("_", "*", "`", "["):
+        text = text.replace(ch, f"\\{ch}")
+    return text
+
+
 def _ship_target(label, user_id=None, username="", explicit_username=False):
     return {"label": label, "user_id": user_id,
             "username": username.strip().lstrip("@").casefold(),
@@ -1770,26 +1777,9 @@ def _ship_mentions_from_message(update: Update, bot_username: str = "", bot_id: 
 
 
 def _bot_mentioned_in_ship(update: Update, bot_username: str, bot_id: int) -> bool:
-    """
-    Return True if the running bot appears as an explicit mention entity
-    (i.e. a standalone @botname mention, not the @botname suffix on a /command).
-    """
+    """Return True if the running bot appears in any mention entity."""
     bot_username_norm = bot_username.casefold().lstrip("@")
-    # Collect offsets occupied by bot_command entities so we can skip them.
-    # When a user sends /ship@Countdownbot_6767, Telegram marks the whole
-    # "/ship@Countdownbot_6767" text as a single bot_command entity — NOT a
-    # separate mention entity — so this set will normally be empty. But being
-    # explicit here guards against edge-cases where the bot name leaks into a
-    # mention entity that overlaps a command.
-    command_offsets = set()
     for entity in (update.message.entities or []):
-        if entity.type == "bot_command":
-            command_offsets.update(range(entity.offset, entity.offset + entity.length))
-
-    for entity in (update.message.entities or []):
-        # Skip anything that overlaps a bot_command span
-        if entity.offset in command_offsets:
-            continue
         if entity.type == "text_mention" and getattr(entity, "user", None):
             if bot_id and entity.user.id == bot_id:
                 return True
@@ -1908,8 +1898,10 @@ async def ship_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     task.add_done_callback(lambda t2: t2.exception())
     filled = round(score / 10)
     bar = "█" * filled + "░" * (10 - filled)
+    a_safe = _escape_md(target_a)
+    b_safe = _escape_md(target_b)
     await update.message.reply_text(
-        f"💞 *Ship Result*\n{target_a} × {target_b}\n\n"
+        f"💞 *Ship Result*\n{a_safe} × {b_safe}\n\n"
         f"Compatibility: `{score:.2f}%`  [{bar}]\n_{_ship_comment(score, seed=pair_key)}_",
         parse_mode="Markdown",
     )
@@ -1927,7 +1919,9 @@ async def shipboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         score = pair["score"]
         filled = round(score / 10)
         bar = "█" * filled + "░" * (10 - filled)
-        lines.append(f"{medal} *{pair['label_a']}* × *{pair['label_b']}*\n   `{score:.2f}%`  [{bar}]")
+        a_safe = _escape_md(pair['label_a'])
+        b_safe = _escape_md(pair['label_b'])
+        lines.append(f"{medal} *{a_safe}* × *{b_safe}*\n   `{score:.2f}%`  [{bar}]")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
