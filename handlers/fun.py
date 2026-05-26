@@ -1,0 +1,488 @@
+"""
+handlers/fun.py
+───────────────
+Fun commands: ship, roast, compliment, vibecheck, rank, truth, dare,
+wouldyourather, coinflip, 8ball, curse, bless, mvp, hot, toss, decide, poll.
+"""
+
+import asyncio
+import logging
+import random
+from datetime import datetime
+
+from telegram import Update
+from telegram.ext import ContextTypes
+
+from config import TIMEZONE
+from constants import (
+    VERDICT_LINES,
+    SHIP_OWNER_BLOCK_LINES, SHIP_TIER_LINES, BOT_SHIP_REFUSALS,
+    ROAST_LINES, COMPLIMENT_LINES, VIBE_TIERS,
+    TRUTH_QUESTIONS, DARE_PROMPTS, WOULD_YOU_RATHER_PROMPTS,
+    EIGHT_BALL_ANSWERS, CURSE_LINES, BLESS_LINES, MVP_LINES, HOT_VERDICTS,
+    TOSS_VERDICTS,
+)
+from countdown_manager import track_seen_user, get_seen_users, save_ship_pair, get_top_ship_pairs, get_shipboard_reset_time
+from handlers.ai import groq_client, _call_groq_fun
+from helpers import (
+    _display_user, _arg_text, _normalize_target, _daily_rng,
+    _mentioned_target, _target_from_mention_or_sender, _escape_md,
+    BOT_OWNER_ID, BOT_OWNER_USERNAMES,
+)
+
+logger = logging.getLogger(__name__)
+
+
+# ── Ship helpers ──────────────────────────────────────────────────────────────
+
+def _ship_target(label, user_id=None, username="", explicit_username=False):
+    return {"label": label, "user_id": user_id,
+            "username": username.strip().lstrip("@").casefold(),
+            "explicit_username": explicit_username}
+
+
+def _ship_mentions_from_message(update: Update, bot_username: str = "", bot_id: int = 0) -> list:
+    message = update.message
+    if not message:
+        return []
+    bot_username_norm = bot_username.casefold().lstrip("@")
+    targets = []
+    for entity in message.entities or []:
+        if entity.type == "text_mention" and getattr(entity, "user", None):
+            if bot_id and entity.user.id == bot_id:
+                continue
+            targets.append(_ship_target(_display_user(entity.user), user_id=entity.user.id,
+                                        username=entity.user.username or "",
+                                        explicit_username=bool(entity.user.username)))
+        elif entity.type == "mention":
+            mention = message.parse_entity(entity)
+            if bot_username_norm and mention.lstrip("@").casefold() == bot_username_norm:
+                continue
+            targets.append(_ship_target(mention, username=mention, explicit_username=True))
+    return targets
+
+
+def _bot_mentioned_in_ship(update: Update, bot_username: str, bot_id: int) -> bool:
+    bot_username_norm = bot_username.casefold().lstrip("@")
+    for entity in (update.message.entities or []):
+        if entity.type == "text_mention" and getattr(entity, "user", None):
+            if bot_id and entity.user.id == bot_id:
+                return True
+        elif entity.type == "mention":
+            mention = update.message.parse_entity(entity)
+            if bot_username_norm and mention.lstrip("@").casefold() == bot_username_norm:
+                return True
+    return False
+
+
+def _is_real_reply(message) -> bool:
+    if not message or not message.reply_to_message:
+        return False
+    thread_id = getattr(message, "message_thread_id", None)
+    if thread_id and message.reply_to_message.message_id == thread_id:
+        return False
+    return True
+
+
+def _extract_ship_targets(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = _arg_text(context)
+    message = update.message
+    replied = message.reply_to_message if message else None
+    real_reply = _is_real_reply(message)
+    bot_username = getattr(context.bot, "username", "") or ""
+    bot_id = getattr(context.bot, "id", 0) or 0
+    mentioned_targets = _ship_mentions_from_message(update, bot_username, bot_id)
+    if len(mentioned_targets) >= 2:
+        return mentioned_targets[:2]
+    if len(mentioned_targets) == 1:
+        mention_target = mentioned_targets[0]
+        if real_reply and replied.from_user:
+            return [_ship_target(_display_user(replied.from_user), user_id=replied.from_user.id,
+                                 username=replied.from_user.username or "",
+                                 explicit_username=bool(replied.from_user.username)), mention_target]
+        else:
+            sender = update.effective_user
+            return [_ship_target(_display_user(sender), user_id=sender.id,
+                                 username=sender.username or "",
+                                 explicit_username=bool(sender.username)), mention_target]
+    if "," in text:
+        parts = [p.strip() for p in text.split(",") if p.strip()]
+        if len(parts) >= 2:
+            return [_ship_target(parts[0]), _ship_target(parts[1])]
+    if real_reply and replied.from_user:
+        full_name = " ".join(context.args).strip() if context.args else ""
+        if full_name:
+            other = _ship_target(full_name, username=full_name if full_name.startswith("@") else "",
+                                  explicit_username=full_name.startswith("@"))
+            return [_ship_target(_display_user(replied.from_user), user_id=replied.from_user.id,
+                                  username=replied.from_user.username or "",
+                                  explicit_username=bool(replied.from_user.username)), other]
+    if len(context.args) >= 2:
+        return [
+            _ship_target(context.args[0], username=context.args[0] if context.args[0].startswith("@") else "",
+                         explicit_username=context.args[0].startswith("@")),
+            _ship_target(context.args[1], username=context.args[1] if context.args[1].startswith("@") else "",
+                         explicit_username=context.args[1].startswith("@")),
+        ]
+    return []
+
+
+def _is_protected_ship_target(target: dict) -> bool:
+    if BOT_OWNER_ID and target.get("user_id") == BOT_OWNER_ID:
+        return True
+    username = target.get("username", "")
+    return target.get("explicit_username") and username in BOT_OWNER_USERNAMES
+
+
+def _ship_comment(score: float, seed: str = "") -> str:
+    today_str = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
+    for limit, messages in SHIP_TIER_LINES:
+        if score <= limit:
+            rng = random.Random(f"shipcomment:{seed}:{today_str}:{limit}")
+            return rng.choice(messages)
+    rng = random.Random(f"shipcomment:{seed}:{today_str}:100")
+    return rng.choice(SHIP_TIER_LINES[-1][1])
+
+
+# ── /ship ─────────────────────────────────────────────────────────────────────
+
+async def ship_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    bot_username = getattr(context.bot, "username", "") or ""
+    bot_id = getattr(context.bot, "id", 0) or 0
+    if _bot_mentioned_in_ship(update, bot_username, bot_id):
+        await update.message.reply_text(random.choice(BOT_SHIP_REFUSALS))
+        return
+
+    targets = _extract_ship_targets(update, context)
+    if len(targets) < 2:
+        await update.message.reply_text(
+            "Usage:\n/ship @user1 @user2 — ship two people\n"
+            "/ship @user — ship yourself with someone\nReply to a message + /ship @user — ship them\n"
+            "Multi-word names: /ship name one, name two"
+        )
+        return
+    for target in targets:
+        if _is_protected_ship_target(target):
+            await update.message.reply_text(random.choice(SHIP_OWNER_BLOCK_LINES))
+            return
+    target_a, target_b = targets[0]["label"], targets[1]["label"]
+    normalized = sorted([_normalize_target(target_a), _normalize_target(target_b)])
+    if normalized[0] == normalized[1]:
+        await update.message.reply_text(
+            f"💞 Ship Result\n{target_a} x {target_b}\n\n"
+            "Compatibility: 100.00%\nThat is not a ship. That is self-love with documentation."
+        )
+        return
+    rng = _daily_rng("ship", normalized[0], normalized[1])
+    score = rng.randint(0, 10000) / 100
+    chat_id = update.effective_chat.id
+    for t in targets:
+        if t.get("user_id"):
+            task = asyncio.create_task(asyncio.to_thread(track_seen_user, chat_id, t["user_id"], t["label"]))
+            task.add_done_callback(lambda t2: t2.exception())
+    pair_key = f"{normalized[0]}:{normalized[1]}"
+    task = asyncio.create_task(asyncio.to_thread(save_ship_pair, chat_id, pair_key, target_a, target_b, score))
+    task.add_done_callback(lambda t2: t2.exception())
+    filled = round(score / 10)
+    bar = "█" * filled + "░" * (10 - filled)
+    a_safe = _escape_md(target_a)
+    b_safe = _escape_md(target_b)
+    await update.message.reply_text(
+        f"💞 *Ship Result*\n{a_safe} × {b_safe}\n\n"
+        f"Compatibility: `{score:.2f}%`  [{bar}]\n_{_ship_comment(score, seed=pair_key)}_",
+        parse_mode="Markdown",
+    )
+
+
+async def shipboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    pairs = await asyncio.to_thread(get_top_ship_pairs, chat_id, 5)
+    reset_secs = await asyncio.to_thread(get_shipboard_reset_time)
+    reset_h = reset_secs // 3600
+    reset_m = (reset_secs % 3600) // 60
+    if not pairs:
+        await update.message.reply_text(
+            "💞 No ships recorded yet!\nUse /ship @user1 @user2 to get started.\n"
+            f"_Board resets in {reset_h}h {reset_m}m._",
+            parse_mode="Markdown",
+        )
+        return
+    medals = ["🥇", "🥈", "🥉"]
+    lines = [f"💞 *Top Ship Pairs*\n_Resets in {reset_h}h {reset_m}m_\n"]
+    for i, pair in enumerate(pairs, 1):
+        medal = medals[i - 1] if i <= 3 else f"{i}."
+        score = pair["score"]
+        filled = round(score / 10)
+        bar = "█" * filled + "░" * (10 - filled)
+        a_safe = _escape_md(pair['label_a'])
+        b_safe = _escape_md(pair['label_b'])
+        lines.append(f"{medal} *{a_safe}* × *{b_safe}*\n   `{score:.2f}%`  [{bar}]")
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+# ── /roast & /compliment ──────────────────────────────────────────────────────
+
+async def roast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    target = _target_from_mention_or_sender(update, context)
+    fallback = random.choice(ROAST_LINES).format(target=target)
+    if not groq_client:
+        await update.message.reply_text(fallback)
+        return
+    try:
+        prompt = (f"Write one short, playful, friendly roast for someone named '{target}' in a Telegram group. "
+                  "Use their name. Keep it funny and harmless, not mean. One sentence only.")
+        await update.message.reply_text(await asyncio.to_thread(_call_groq_fun, prompt))
+    except Exception as e:
+        logger.warning("Groq roast failed: %s", e)
+        await update.message.reply_text(fallback)
+
+
+async def compliment_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    target = _target_from_mention_or_sender(update, context)
+    fallback = random.choice(COMPLIMENT_LINES).format(target=target)
+    if not groq_client:
+        await update.message.reply_text(fallback)
+        return
+    try:
+        prompt = (f"Write one short, warm, genuine compliment for someone named '{target}' in a Telegram group. "
+                  "Use their name. Keep it wholesome. One sentence only.")
+        await update.message.reply_text(await asyncio.to_thread(_call_groq_fun, prompt))
+    except Exception as e:
+        logger.warning("Groq compliment failed: %s", e)
+        await update.message.reply_text(fallback)
+
+
+# ── /vibecheck ────────────────────────────────────────────────────────────────
+
+async def vibecheck_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    rng = _daily_rng("vibecheck", update.effective_chat.id)
+    score = rng.randint(0, 100)
+    mood = next(msg for limit, msg in VIBE_TIERS if score <= limit)
+    await update.message.reply_text(f"📡 Vibe Check\nGroup mood: {score}/100\n{mood}")
+
+
+# ── /rank ─────────────────────────────────────────────────────────────────────
+
+def _parse_rank_text(text: str):
+    title, item_text = ("Random Ranking", text)
+    if ":" in text:
+        title, item_text = [p.strip() for p in text.split(":", 1)]
+        title = title or "Random Ranking"
+    if "," in item_text:
+        items = [i.strip() for i in item_text.split(",") if i.strip()]
+    else:
+        items = [i.strip() for i in item_text.split() if i.strip()]
+    return title, items[:12], len(items) > 12
+
+
+async def rank_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    text = _arg_text(context)
+    if not text:
+        await update.message.reply_text(
+            "Usage: /rank topic: item1, item2, item3\nExample: /rank food: pizza, burger, sushi"
+        )
+        return
+    title, items, truncated = _parse_rank_text(text)
+    if len(items) < 2:
+        await update.message.reply_text("Give me at least 2 things to rank.")
+        return
+    rng = _daily_rng("rank", update.effective_chat.id, title.casefold())
+    items_copy = list(items)
+    rng.shuffle(items_copy)
+    lines = [f"🏆 {title}"]
+    lines.extend(f"{i}. {item}" for i, item in enumerate(items_copy, 1))
+    if truncated:
+        lines.append("_(Only the first 12 items were ranked)_")
+    await update.message.reply_text("\n".join(lines))
+
+
+# ── /truth, /dare, /wouldyourather ───────────────────────────────────────────
+
+async def truth_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(f"🧃 Truth\n{random.choice(TRUTH_QUESTIONS)}")
+
+
+async def dare_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(f"🎬 Dare\n{random.choice(DARE_PROMPTS)}")
+
+
+async def would_you_rather_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(f"⚖️ Would You Rather\n{random.choice(WOULD_YOU_RATHER_PROMPTS)}")
+
+
+# ── /coinflip ─────────────────────────────────────────────────────────────────
+
+async def coinflip_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    msg = await update.message.reply_text("🪙 Flipping...")
+    await asyncio.sleep(1)
+    result = random.choice(["Heads", "Tails"])
+    icon = "🌕" if result == "Heads" else "🌑"
+    await msg.edit_text(f"🪙 Coinflip: {icon} {result}")
+
+
+# ── /8ball ────────────────────────────────────────────────────────────────────
+
+async def eightball_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    question = _arg_text(context)
+    if not question:
+        await update.message.reply_text("Usage: /8ball <question>")
+        return
+    fallback = random.choice(EIGHT_BALL_ANSWERS)
+    if not groq_client:
+        await update.message.reply_text(f"🎱 {fallback}")
+        return
+    try:
+        prompt = f"Answer this like a playful magic 8-ball. Keep it under 20 words. Question: {question}"
+        answer = await asyncio.to_thread(_call_groq_fun, prompt)
+        await update.message.reply_text(f"🎱 {answer}")
+    except Exception as e:
+        logger.warning("Groq 8ball failed: %s", e)
+        await update.message.reply_text(f"🎱 {fallback}")
+
+
+# ── /curse & /bless ───────────────────────────────────────────────────────────
+
+async def curse_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    target = _target_from_mention_or_sender(update, context)
+    await update.message.reply_text(random.choice(CURSE_LINES).format(target=target))
+
+
+async def bless_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    target = _target_from_mention_or_sender(update, context)
+    await update.message.reply_text(random.choice(BLESS_LINES).format(target=target))
+
+
+# ── /mvp ─────────────────────────────────────────────────────────────────────
+
+async def mvp_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    today_str = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
+    rng = random.Random(f"mvp:{chat_id}:{today_str}")
+    candidate_pool: dict = {}
+    try:
+        admins = await context.bot.get_chat_administrators(chat_id)
+        for member in admins:
+            u = member.user
+            if not u.is_bot:
+                name = u.first_name or u.username or str(u.id)
+                candidate_pool[str(u.id)] = name
+                task = asyncio.create_task(asyncio.to_thread(track_seen_user, chat_id, u.id, name))
+                task.add_done_callback(lambda t: t.exception())
+    except Exception as e:
+        logger.warning("Could not fetch admins for mvp in chat %s: %s", chat_id, e)
+    seen = await asyncio.to_thread(get_seen_users, chat_id)
+    candidate_pool.update(seen)
+    if not candidate_pool:
+        await update.message.reply_text("⚠️ Not enough members tracked yet. Have people use a command first!")
+        return
+    winner_id = rng.choice(list(candidate_pool.keys()))
+    winner_name = candidate_pool[winner_id]
+    await update.message.reply_text(
+        f"🏆 *Today's MVP — {winner_name}*\n{rng.choice(MVP_LINES)}",
+        parse_mode="Markdown",
+    )
+
+
+# ── /hot ──────────────────────────────────────────────────────────────────────
+
+async def hot_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    text = _arg_text(context)
+    if not text:
+        await update.message.reply_text("Usage: /hot <anything>\nExample: /hot sleeping through alarms")
+        return
+    today_str = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
+    rng = random.Random(f"hot:{_normalize_target(text)}:{today_str}")
+    score = rng.randint(0, 100)
+    fallback = next(v for limit, v in HOT_VERDICTS if score <= limit)
+    if groq_client:
+        try:
+            prompt = (f"Rate '{text}' in one short punchy sentence. "
+                      f"The score is {score}/100 — match that energy. Be funny. Plain text only. No intro.")
+            verdict = await asyncio.to_thread(_call_groq_fun, prompt)
+        except Exception as e:
+            logger.warning("Groq hot failed: %s", e)
+            verdict = fallback
+    else:
+        verdict = fallback
+    await update.message.reply_text(
+        f"🌡️ *Hot or Not — {text}*\nScore: {score}/100\n{verdict}",
+        parse_mode="Markdown",
+    )
+
+
+# ── /decide ───────────────────────────────────────────────────────────────────
+
+async def decide_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    text = _arg_text(context)
+    if not text:
+        await update.message.reply_text(
+            "Usage: /decide option1, option2, option3\nExample: /decide pizza, burger, sushi"
+        )
+        return
+    options = [o.strip() for o in text.split(",") if o.strip()]
+    if len(options) < 2:
+        await update.message.reply_text("Give me at least 2 options separated by commas.")
+        return
+    chosen = random.choice(options)
+    await update.message.reply_text(f"🎯 {chosen}\n{random.choice(VERDICT_LINES)}")
+
+
+# ── /poll ─────────────────────────────────────────────────────────────────────
+
+async def poll_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    text = _arg_text(context)
+    if not text or ":" not in text:
+        await update.message.reply_text(
+            "Usage: /poll question: option1, option2, option3\n"
+            "Example: /poll Where to makan?: McD, KFC, Mamak"
+        )
+        return
+    question, opts_text = text.split(":", 1)
+    question = question.strip()
+    options = [o.strip() for o in opts_text.split(",") if o.strip()]
+    if not question:
+        await update.message.reply_text("The question can't be empty.")
+        return
+    if len(options) < 2:
+        await update.message.reply_text("Give at least 2 options separated by commas.")
+        return
+    if len(question) > 300:
+        await update.message.reply_text(
+            f"⚠️ Question was too long ({len(question)} chars) and will be trimmed to 300 characters."
+        )
+    await context.bot.send_poll(
+        chat_id=update.effective_chat.id,
+        question=question[:300],
+        options=[o[:100] for o in options[:10]],
+        is_anonymous=False,
+    )
+
+
+# ── /toss ─────────────────────────────────────────────────────────────────────
+
+async def toss_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.message
+    targets = []
+    for entity in (message.entities or []):
+        if entity.type == "text_mention" and getattr(entity, "user", None):
+            if not entity.user.is_bot:
+                targets.append(_display_user(entity.user))
+        elif entity.type == "mention":
+            mention = message.parse_entity(entity)
+            bot_username = getattr(context.bot, "username", None)
+            if bot_username and _normalize_target(mention) == bot_username.casefold():
+                continue
+            targets.append(mention.lstrip("@"))
+    if not targets:
+        seen = await asyncio.to_thread(get_seen_users, update.effective_chat.id)
+        if not seen:
+            await update.message.reply_text(
+                "⚠️ No one tracked yet! Have group members use a few commands first, then try again."
+            )
+            return
+        targets = list(seen.values())
+    chosen = random.choice(targets)
+    await update.message.reply_text(
+        f"🎰 *The Pick*\n\n➡️ *{chosen}*\n\n_{random.choice(TOSS_VERDICTS)}_",
+        parse_mode="Markdown",
+    )
