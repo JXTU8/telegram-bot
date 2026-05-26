@@ -115,24 +115,69 @@ def _search_web(query: str) -> str:
         return ""
 
 
-def _call_groq(question: str, search_context: str) -> str:
+def _call_groq(question: str, search_context: str, history: list | None = None) -> str:
     system_msg = (
-        "You are a helpful assistant. Answer concisely in plain text only. "
+        "You are a helpful assistant in an ongoing conversation. "
+        "Answer concisely in plain text only. "
         "No markdown formatting, no bullet symbols, no headers. "
         "Use the web search results below if relevant, otherwise use your own knowledge."
     )
     user_msg = question
     if search_context:
         user_msg = f"Web search results for context:\n{search_context}\n\nQuestion: {question}"
+
+    messages = [{"role": "system", "content": system_msg}]
+    if history:
+        messages.extend(history)
+    messages.append({"role": "user", "content": user_msg})
+
     chat = groq_client.chat.completions.create(
         model="llama-3.3-70b-versatile",
-        messages=[
-            {"role": "system", "content": system_msg},
-            {"role": "user", "content": user_msg},
-        ],
+        messages=messages,
         max_tokens=1024,
     )
     return chat.choices[0].message.content.strip()
+
+
+# ── Ask conversation context (Redis-backed, TTL 6 h) ─────────────────────────
+# Key: ask_ctx:<chat_id>:<message_id>  →  JSON list of {role, content} dicts
+# Stored after every bot /ask reply so follow-ups can load full history.
+
+_ASK_CTX_TTL = 6 * 3600   # 6 hours — enough for a session
+_ASK_PREFIX  = "🤖 Q: "   # sentinel used to detect bot /ask replies
+
+
+def _ask_ctx_key(chat_id: int, message_id: int) -> str:
+    return f"ask_ctx:{chat_id}:{message_id}"
+
+
+def _save_ask_context(chat_id: int, message_id: int, history: list) -> None:
+    """Persist full conversation history keyed to the bot reply's message_id."""
+    import json
+    try:
+        from db import redis
+        redis.set(
+            _ask_ctx_key(chat_id, message_id),
+            json.dumps(history, separators=(",", ":")),
+            ex=_ASK_CTX_TTL,
+        )
+    except Exception as e:
+        logger.warning("ask_ctx save failed for msg %s: %s", message_id, e)
+
+
+def _load_ask_context(chat_id: int, message_id: int) -> list | None:
+    """Load history stored for a previous bot reply. Returns None on miss."""
+    import json
+    try:
+        from db import redis
+        raw = redis.get(_ask_ctx_key(chat_id, message_id))
+        if not raw:
+            return None
+        data = json.loads(raw) if isinstance(raw, (str, bytes)) else raw
+        return data if isinstance(data, list) else None
+    except Exception as e:
+        logger.warning("ask_ctx load failed for msg %s: %s", message_id, e)
+        return None
 
 
 def _call_groq_fun(prompt: str) -> str:
@@ -166,28 +211,79 @@ async def ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     if not context.args:
         await update.message.reply_text(
-            "Usage: `/ask <your question>`\n_(e.g. `/ask what is tung tung tung sahur?`)_",
+            "Usage: `/ask <your question>`\n_(e.g. `/ask what is tung tung tung sahur?`)_\n\n"
+            "_💡 Tip: reply to my answer and use /ask again to follow up!_",
             parse_mode="Markdown",
         )
         return
+
     question = " ".join(context.args)
     if len(question) > MAX_ASK_LENGTH:
         await update.message.reply_text(
             f"⚠️ Question too long. Please keep it under {MAX_ASK_LENGTH} characters."
         )
         return
-    thinking_msg = await update.message.reply_text("🤖 Searching and thinking...")
+
+    # ── Detect reply-chaining: load history from the replied-to bot message ──
+    history: list | None = None
+    replied = update.message.reply_to_message
+    chat_id = update.effective_chat.id
+
+    if (
+        replied
+        and replied.from_user
+        and replied.from_user.id == context.bot.id
+        and replied.text
+        and replied.text.startswith(_ASK_PREFIX)
+    ):
+        history = await asyncio.to_thread(
+            _load_ask_context, chat_id, replied.message_id
+        )
+        if history:
+            logger.info(
+                "ask follow-up from user %s (depth %s, prev msg %s)",
+                update.effective_user.id, len(history) // 2, replied.message_id,
+            )
+
+    is_followup = bool(history)
+    thinking_msg = await update.message.reply_text(
+        "🤖 Thinking..." if is_followup else "🤖 Searching and thinking..."
+    )
+
     try:
-        search_context = await asyncio.to_thread(_search_web, question)
-        answer = await asyncio.to_thread(_call_groq, question, search_context)
+        # Skip web search for follow-ups — use existing context instead
+        search_context = "" if is_followup else await asyncio.to_thread(_search_web, question)
+        answer = await asyncio.to_thread(_call_groq, question, search_context, history)
+
+        # ── Build and persist the updated history for the next follow-up ─────
+        # Cap at 6 turns (3 exchanges) so the context window stays manageable
+        prior = history or []
+        new_history = prior + [
+            {"role": "user",      "content": question},
+            {"role": "assistant", "content": answer},
+        ]
+        if len(new_history) > 6:
+            new_history = new_history[-6:]
+
+        # ── Send the reply ────────────────────────────────────────────────────
         max_len = 3900
         header = f"🤖 Q: {question}\n\n"
         first_chunk_limit = max(1, max_len - len(header))
         first_chunk = answer[:first_chunk_limit]
         remaining_answer = answer[first_chunk_limit:]
+
         await thinking_msg.edit_text(header + first_chunk)
+
+        # Persist context keyed to the bot's reply so the user can follow up
+        await asyncio.to_thread(_save_ask_context, chat_id, thinking_msg.message_id, new_history)
+
         for i in range(0, len(remaining_answer), max_len):
-            await thinking_msg.reply_text(remaining_answer[i:i + max_len])
+            overflow_msg = await thinking_msg.reply_text(remaining_answer[i:i + max_len])
+            # Also key the overflow chunk in case user replies to it
+            await asyncio.to_thread(
+                _save_ask_context, chat_id, overflow_msg.message_id, new_history
+            )
+
     except Exception as e:
         logger.error("Ask error: %s", e)
         await thinking_msg.edit_text("❌ Something went wrong with the AI. Please try again later.")
