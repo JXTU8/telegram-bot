@@ -27,6 +27,7 @@ from stores.birthday_store import get_all_birthdays
 
 from helpers import (
     _display_user, _mentioned_target, _normalize_target, _today,
+    _escape_md,
     BOT_OWNER_ID, _is_owner, owner_only, _arg_text,
 )
 from config import env_int
@@ -115,8 +116,9 @@ def _apply_special_luck(score, tier, luck_msg, target_name, today, seed=""):
 
 def _luck_result_text(target_name, tier, score, luck_msg,
                       streak_line="", day_note="", checking_other=False) -> str:
+    target_safe = _escape_md(target_name)
     parts = [
-        f"🍀 *Daily Luck — {target_name}*\n"
+        f"🍀 *Daily Luck — {target_safe}*\n"
         f"━━━━━━━━━━━━━━━\n"
         f"Tier: *{tier}*\n"
         f"Score: `{_score_display(score)}`\n"
@@ -263,7 +265,7 @@ async def luckboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 else ""
             )
         lines.append(
-            f"{rank_icon} *{item['name']}*{streak_badge} — {item['tier']}\n"
+            f"{rank_icon} *{_escape_md(item['name'])}*{streak_badge} — {item['tier']}\n"
             f"    Score: `{_score_display(s)}`"
         )
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
@@ -294,7 +296,7 @@ async def streak_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     streak, category = await asyncio.to_thread(get_fate_streak, user_id)
     if streak == 0:
         await message.reply_text(
-            f"📊 *Streak — {target}*\nNo active streak yet. Use /luck to start one!",
+            f"📊 *Streak — {_escape_md(target)}*\nNo active streak yet. Use /luck to start one!",
             parse_mode="Markdown",
         )
         return
@@ -304,7 +306,7 @@ async def streak_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         else ("😐", "Neutral streak")
     )
     await message.reply_text(
-        f"📊 *Streak — {target}*\n"
+        f"📊 *Streak — {_escape_md(target)}*\n"
         f"{icon} {label}: *{streak} day{'s' if streak != 1 else ''}* in a row",
         parse_mode="Markdown",
     )

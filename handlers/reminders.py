@@ -15,9 +15,9 @@ from telegram.ext import ContextTypes
 from stores.reminder_store import (
     increment_remind_count, decrement_remind_count,
     save_remind_job, delete_remind_job, try_claim_remind_job,
-    get_user_remind_jobs, get_all_remind_jobs,
+    get_user_remind_jobs, get_remind_job, get_all_remind_jobs,
 )
-from helpers import _display_user, _arg_text, _is_chat_admin, _is_owner
+from helpers import _display_user, _arg_text, _is_chat_admin, _is_owner, _escape_md
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +113,10 @@ async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     job_id = await asyncio.to_thread(
         save_remind_job, chat_id, user_id, user_mention, reminder_text, fire_at
     )
+    if not job_id:
+        await asyncio.to_thread(decrement_remind_count, user_id)
+        await update.message.reply_text("❌ Couldn't save that reminder. Please try again in a moment.")
+        return
 
     async def _fire(
         ctx: ContextTypes.DEFAULT_TYPE,
@@ -124,9 +128,10 @@ async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if not claimed:
             logger.info("Remind job %s already claimed by another scheduler, skipping.", _jid)
             return
-        # Verify the job is still in Redis (user may have cancelled it)
-        existing = await asyncio.to_thread(get_user_remind_jobs, _cid, _uid)
-        if not any(j.get("job_id") == _jid for j in existing):
+        # Verify the job is still in Redis (user may have cancelled it).
+        # At fire time, fire_at is usually <= now, so pending-only lookups skip it.
+        existing = await asyncio.to_thread(get_remind_job, _cid, _uid, _jid)
+        if not existing:
             logger.info("Remind job %s was cancelled, skipping fire.", _jid)
             return
         await ctx.bot.send_message(
@@ -164,7 +169,7 @@ async def cancelremind_command(update: Update, context: ContextTypes.DEFAULT_TYP
             time_str = f"{int(remaining / 60)}m"
         else:
             time_str = f"{remaining / 3600:.1f}h"
-        preview = (job.get("text") or "")[:40]
+        preview = _escape_md((job.get("text") or "")[:40])
         lines.append(f"{i}. _{preview}_ — fires in {time_str}")
         buttons.append([InlineKeyboardButton(
             f"❌ Cancel #{i}",
@@ -207,7 +212,7 @@ async def cancelremind_callback(update: Update, context: ContextTypes.DEFAULT_TY
         time_str = (f"{int(secs_left)}s" if secs_left < 60
                     else f"{int(secs_left / 60)}m" if secs_left < 3600
                     else f"{secs_left / 3600:.1f}h")
-        preview = (job.get("text") or "")[:40]
+        preview = _escape_md((job.get("text") or "")[:40])
         lines.append(f"{i}. _{preview}_ — fires in {time_str}")
         buttons.append([InlineKeyboardButton(
             f"❌ Cancel #{i}",
@@ -273,12 +278,13 @@ async def remindall_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         reminder_text = "Group reminder!"
 
     chat_id = update.effective_chat.id
-    set_by = _display_user(user)
+    set_by = _escape_md(_display_user(user))
+    reminder_text_safe = _escape_md(reminder_text)
 
     async def _fire_group(ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await ctx.bot.send_message(
             chat_id=chat_id,
-            text=f"📢 *Group Reminder* (set by {set_by})\n\n{reminder_text}",
+            text=f"📢 *Group Reminder* (set by {set_by})\n\n{reminder_text_safe}",
             parse_mode="Markdown",
         )
 
@@ -314,8 +320,8 @@ async def restore_remind_jobs(app) -> None:
                 if not claimed:
                     logger.info("Restored remind job %s already claimed, skipping.", _jid)
                     return
-                existing = await asyncio.to_thread(get_user_remind_jobs, _cid, _uid)
-                if not any(j.get("job_id") == _jid for j in existing):
+                existing = await asyncio.to_thread(get_remind_job, _cid, _uid, _jid)
+                if not existing:
                     logger.info("Restored remind job %s was cancelled, skipping.", _jid)
                     return
                 await ctx.bot.send_message(

@@ -81,7 +81,7 @@ def save_remind_job(
     text: str,
     fire_at: float,
 ) -> str:
-    """Persist a remind job. Returns a unique job_id string."""
+    """Persist a remind job. Returns a unique job_id string, or empty string on failure."""
     job_id = os.urandom(4).hex()
     key = _remind_jobs_key(chat_id)
     try:
@@ -94,9 +94,10 @@ def save_remind_job(
             "fire_at": fire_at,
         })
         redis.set(key, json.dumps(jobs, separators=(",", ":")))
+        return job_id
     except Exception as e:
         logger.error("Redis remind job save error for chat %s: %s", chat_id, e)
-    return job_id
+        return ""
 
 
 def delete_remind_job(chat_id: int, job_id: str) -> None:
@@ -138,6 +139,20 @@ def get_user_remind_jobs(chat_id: int, user_id: int) -> list:
     except Exception as e:
         logger.error("Redis user remind jobs error for chat %s: %s", chat_id, e)
         return []
+
+
+def get_remind_job(chat_id: int, user_id: int, job_id: str) -> dict:
+    """Return a specific remind job even when it is due or slightly overdue."""
+    key = _remind_jobs_key(chat_id)
+    try:
+        jobs = _decode_list(redis.get(key))
+        for job in jobs:
+            if job.get("user_id") == user_id and job.get("job_id") == job_id:
+                return job
+        return {}
+    except Exception as e:
+        logger.error("Redis remind job lookup error for chat %s job %s: %s", chat_id, job_id, e)
+        return {}
 
 
 def get_all_remind_jobs() -> dict:

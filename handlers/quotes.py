@@ -12,7 +12,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
 from stores.quote_store import save_quote, get_all_quotes, get_quote_count, delete_quote
-from helpers import _display_user, _is_chat_admin, _is_owner
+from helpers import _display_user, _is_chat_admin, _is_owner, _escape_md
 
 logger = logging.getLogger(__name__)
 
@@ -24,9 +24,9 @@ def _build_quote_page(chat_id: int, quotes: list, index: int):
     total = len(quotes)
     q = quotes[index]
     text = (
-        f'💬 *"{q["text"]}"*\n'
-        f'— {q["author"]}\n'
-        f'_(saved by {q["saved_by"]}) · #{index + 1}/{total}_'
+        f'💬 *"{_escape_md(q["text"])}"*\n'
+        f'— {_escape_md(q["author"])}\n'
+        f'_(saved by {_escape_md(q["saved_by"])}) · #{index + 1}/{total}_'
     )
     prev_idx = (index - 1) % total
     next_idx = (index + 1) % total
@@ -67,7 +67,7 @@ async def quote_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await message.reply_text("⚠️ That quote is already in the archive!")
         return
     await message.reply_text(
-        f'💬 Saved!\n*"{text}"* — {author}\n_#{count} in this chat_',
+        f'💬 Saved!\n*"{_escape_md(text)}"* — {_escape_md(author)}\n_#{count} in this chat_',
         parse_mode="Markdown",
     )
 
@@ -136,4 +136,4 @@ async def deletequote_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     index = int(context.args[0])
     success, msg = await asyncio.to_thread(delete_quote, chat_id, index)
-    await update.message.reply_text(msg, parse_mode="Markdown")
+    await update.message.reply_text(msg)

@@ -16,6 +16,7 @@ from collections import OrderedDict
 import requests
 from groq import Groq
 from telegram import Update
+from telegram.error import TelegramError
 from telegram.ext import ContextTypes, ConversationHandler
 
 from config import env_int
@@ -259,12 +260,17 @@ async def received_options(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         chat_id=update.effective_chat.id, text=thinking
     )
     await asyncio.sleep(2)
-    await thinking_msg.edit_text(
+    result_text = (
         f"🎯 Decision: {decision}\n"
         f"━━━━━━━━━━━━━━━\n"
         f"✅ The answer is... {chosen}!\n"
         f"━━━━━━━━━━━━━━━\n"
-        f"📊 Odds:\n{percentage_lines}\n\n{verdict}",
+        f"📊 Odds:\n{percentage_lines}\n\n{verdict}"
     )
+    try:
+        await thinking_msg.edit_text(result_text)
+    except TelegramError as e:
+        logger.warning("Choose edit failed, sending fresh result: %s", e)
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=result_text)
     context.user_data.clear()
     return ConversationHandler.END

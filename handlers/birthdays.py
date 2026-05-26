@@ -10,6 +10,7 @@ import json
 import logging
 import random
 import re
+from datetime import date
 
 from telegram import Update
 from telegram.ext import ContextTypes
@@ -27,15 +28,34 @@ logger = logging.getLogger(__name__)
 
 def _days_until_birthday(day: int, month: int) -> int:
     today = _today()
-    this_year = today.replace(month=month, day=day)
+    this_year = _birthday_date_for_year(today.year, day, month)
     if this_year < today:
-        try:
-            next_bday = this_year.replace(year=today.year + 1)
-        except ValueError:
-            next_bday = this_year.replace(year=today.year + 1, day=28)
+        next_bday = _birthday_date_for_year(today.year + 1, day, month)
     else:
         next_bday = this_year
     return (next_bday - today).days
+
+
+def _birthday_date_for_year(year: int, day: int, month: int) -> date:
+    try:
+        return date(year, month, day)
+    except ValueError:
+        if month == 2 and day == 29:
+            return date(year, 2, 28)
+        raise
+
+
+def _is_birthday_today(day: int, month: int) -> bool:
+    today = _today()
+    if day == today.day and month == today.month:
+        return True
+    return (
+        day == 29
+        and month == 2
+        and today.day == 28
+        and today.month == 2
+        and not calendar.isleap(today.year)
+    )
 
 
 def _remove_birthday(chat_id: int, user_id: int) -> bool:
@@ -89,7 +109,7 @@ async def birthday_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 tag = "Tomorrow!"
             else:
                 tag = f"in {days_left} days"
-            lines.append(f"• *{name}* — {d:02d} {_MONTH_NAMES[m]}  _{tag}_")
+            lines.append(f"• *{_escape_md(name)}* — {d:02d} {_MONTH_NAMES[m]}  _{tag}_")
         await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
         return
 
@@ -116,7 +136,7 @@ async def birthday_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     tag = "🎉 That's today!" if days_left == 0 else f"in {days_left} days"
     await update.message.reply_text(
         f"🎂 *Birthday saved!*\n"
-        f"*{name}* — {day:02d} {_MONTH_NAMES[month]}  _{tag}_\n\n"
+        f"*{_escape_md(name)}* — {day:02d} {_MONTH_NAMES[month]}  _{tag}_\n\n"
         f"Use `/birthday` to see everyone's upcoming birthdays.",
         parse_mode="Markdown",
     )
@@ -161,7 +181,7 @@ async def addbirthday_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     tag = "🎉 That's today!" if days_left == 0 else f"in {days_left} days"
     await update.message.reply_text(
         f"🎂 *Birthday saved!*\n"
-        f"*{name}* — {day:02d} {_MONTH_NAMES[month]}  _{tag}_\n\n"
+        f"*{_escape_md(name)}* — {day:02d} {_MONTH_NAMES[month]}  _{tag}_\n\n"
         f"Use `/birthday` to see everyone's upcoming birthdays.",
         parse_mode="Markdown",
     )
@@ -233,7 +253,7 @@ async def birthday_check_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     for chat_id, bdays in all_chats.items():
         for uid_str, info in bdays.items():
             d, m = info.get("day", 0), info.get("month", 0)
-            if d == today.day and m == today.month:
+            if _is_birthday_today(d, m):
                 name = info.get("name", "Someone")
                 msg = random.choice(BIRTHDAY_MESSAGES).format(name=name)
                 try:

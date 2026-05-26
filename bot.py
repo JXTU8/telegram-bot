@@ -16,7 +16,7 @@ from telegram.ext import (
 
 from config import TOKEN, TIMEZONE
 from keep_alive import keep_alive
-from countdown_manager import delete_old_fateboard_keys
+from stores.luck_store import delete_old_fateboard_keys
 
 # ── Handlers ──────────────────────────────────────────────────────────────────
 from handlers.misc import (

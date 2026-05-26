@@ -62,8 +62,27 @@ def owner_only(func):
 
 
 # ── User display ──────────────────────────────────────────────────────────────
+_INVISIBLE_NAME_CHARS = str.maketrans(
+    "",
+    "",
+    "\u180e\u200b\u200c\u200d\u2060\u2800\u3164\ufeff",
+)
+
+
+def _has_visible_text(text: str) -> bool:
+    return bool(str(text or "").translate(_INVISIBLE_NAME_CHARS).strip())
+
+
+def _display_name_or_id(name: str, user_id) -> str:
+    return str(name).strip() if _has_visible_text(name) else str(user_id)
+
+
 def _display_user(user) -> str:
-    return user.first_name or user.username or str(user.id)
+    if _has_visible_text(getattr(user, "first_name", "")):
+        return user.first_name.strip()
+    if _has_visible_text(getattr(user, "username", "")):
+        return user.username.strip()
+    return str(user.id)
 
 
 def _arg_text(context: ContextTypes.DEFAULT_TYPE) -> str:

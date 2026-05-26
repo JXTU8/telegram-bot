@@ -68,7 +68,7 @@ def delete_quote(chat_id: int, index: int) -> tuple:
             return False, f"⚠️ Invalid number. There are {len(quotes)} quote(s)."
         removed = quotes.pop(index - 1)
         redis.set(key, json.dumps(quotes, separators=(",", ":")))
-        return True, f'✅ Deleted quote #{index}: *"{removed["text"]}"* — {removed["author"]}'
+        return True, f'✅ Deleted quote #{index}: "{removed["text"]}" — {removed["author"]}'
     except Exception as e:
         logger.error("Redis quote delete error for chat %s: %s", chat_id, e)
         return False, "❌ Failed to delete quote."

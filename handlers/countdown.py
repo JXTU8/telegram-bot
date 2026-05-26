@@ -22,6 +22,7 @@ from stores.user_store import get_seen_users
 from helpers import (
     _today, _days_label, _job_name,
     _track, _delete_tracked, _is_chat_admin,
+    _escape_md,
     ASK_NAME, ASK_DATE, ASK_TIME,
     ASK_EDIT_FIELD, ASK_EDIT_VALUE,
     CONV_TIMEOUT,
@@ -137,8 +138,9 @@ async def received_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         )
         return ASK_NAME
     context.user_data["new_countdown_name"] = name
+    name_safe = _escape_md(name)
     bot_msg = await update.message.reply_text(
-        f"✅ Name set to *{name}*\n\n"
+        f"✅ Name set to *{name_safe}*\n\n"
         "Step 2/3 — What is the target date?\n"
         "Format: `YYYY-MM-DD` _(e.g. 2025-12-31)_\n\n"
         f"⏰ You have *{CONV_TIMEOUT} seconds* to reply.",
@@ -210,11 +212,12 @@ async def received_time(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     days_left = (target_date - today).days
     _track(context, update.message)
     await _delete_tracked(context)
+    name_safe = _escape_md(name)
     await context.bot.send_message(
         chat_id=chat_id,
         text=(
             f"🎉 *Countdown Added!*\n\n"
-            f"📛 Name: *{name}*\n"
+            f"📛 Name: *{name_safe}*\n"
             f"🔑 Code: `{code}`\n"
             f"📆 Target: *{target_date}*\n"
             f"{_days_label(days_left)}\n"
@@ -259,8 +262,9 @@ async def editcountdown_start(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return ConversationHandler.END
     context.user_data["edit_countdown_name"] = name
+    name_safe = _escape_md(name)
     bot_msg = await update.message.reply_text(
-        f"✏️ *Editing: {name}*\n\n"
+        f"✏️ *Editing: {name_safe}*\n\n"
         "What do you want to change? Type `date` or `time`\n\n"
         f"⏰ You have *{CONV_TIMEOUT} seconds* to reply.\n"
         "Type /cancel to stop.",
@@ -348,10 +352,11 @@ async def received_edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE
     _track(context, update.message)
     await _delete_tracked(context)
     days_left = (target_date - _today()).days
+    name_safe = _escape_md(name)
     await context.bot.send_message(
         chat_id=chat_id,
         text=(
-            f"✅ *Countdown Updated — {name}*\n\n"
+            f"✅ *Countdown Updated — {name_safe}*\n\n"
             f"📆 Target: *{target_date}*\n"
             f"{_days_label(days_left)}\n"
             f"🔔 Daily reminder at *{hour:02d}:{minute:02d} MYT*"
@@ -402,9 +407,10 @@ async def list_countdown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         m = entry.get("reminder_minute", DEFAULT_REMINDER_MINUTE)
         code = entry.get("code", "—")
         creator_id = str(entry.get("created_by", ""))
-        creator_name = seen.get(creator_id, "Unknown")
+        creator_name = _escape_md(seen.get(creator_id, "Unknown"))
+        name_safe = _escape_md(name)
         lines.append(
-            f"• *{name}* `[{code}]`\n"
+            f"• *{name_safe}* `[{code}]`\n"
             f"  📆 {td}  |  {_days_label(days_left)}\n"
             f"  🔔 {h:02d}:{m:02d} MYT  |  👤 {creator_name}\n"
         )
@@ -443,7 +449,10 @@ async def remove_countdown_cmd(update: Update, context: ContextTypes.DEFAULT_TYP
         jname = _job_name(chat_id, name)
         for job in context.job_queue.get_jobs_by_name(jname):
             job.schedule_removal()
-        await update.message.reply_text(f"🗑️ Countdown *{name}* has been removed.", parse_mode="Markdown")
+        await update.message.reply_text(
+            f"🗑️ Countdown *{_escape_md(name)}* has been removed.",
+            parse_mode="Markdown",
+        )
         logger.info("Chat %s removed countdown '%s'", chat_id, name)
     else:
         await update.message.reply_text(

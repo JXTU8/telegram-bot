@@ -28,6 +28,7 @@ from handlers.ai import groq_client, _call_groq_fun
 from helpers import (
     _display_user, _arg_text, _normalize_target, _daily_rng,
     _mentioned_target, _target_from_mention_or_sender, _escape_md,
+    _display_name_or_id,
     BOT_OWNER_ID, BOT_OWNER_USERNAMES, _is_owner,
 )
 
@@ -374,7 +375,7 @@ async def mvp_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         for member in admins:
             u = member.user
             if not u.is_bot:
-                name = u.first_name or u.username or str(u.id)
+                name = _display_user(u)
                 candidate_pool[str(u.id)] = name
                 task = asyncio.create_task(asyncio.to_thread(track_seen_user, chat_id, u.id, name))
                 task.add_done_callback(
@@ -383,12 +384,15 @@ async def mvp_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     except Exception as e:
         logger.warning("Could not fetch admins for mvp in chat %s: %s", chat_id, e)
     seen = await asyncio.to_thread(get_seen_users, chat_id)
-    candidate_pool.update(seen)
+    for uid, name in seen.items():
+        safe_name = _display_name_or_id(name, uid)
+        if uid not in candidate_pool or candidate_pool[uid] == str(uid):
+            candidate_pool[uid] = safe_name
     if not candidate_pool:
         await update.message.reply_text("⚠️ Not enough members tracked yet. Have people use a command first!")
         return
     winner_id = rng.choice(list(candidate_pool.keys()))
-    winner_name = candidate_pool[winner_id]
+    winner_name = _display_name_or_id(candidate_pool[winner_id], winner_id)
     await update.message.reply_text(
         f"🏆 *Today's MVP — {_escape_md(winner_name)}*\n{rng.choice(MVP_LINES)}",
         parse_mode="Markdown",
@@ -417,7 +421,7 @@ async def hot_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     else:
         verdict = fallback
     await update.message.reply_text(
-        f"🌡️ *Hot or Not — {text}*\nScore: {score}/100\n{verdict}",
+        f"🌡️ *Hot or Not — {_escape_md(text)}*\nScore: {score}/100\n{verdict}",
         parse_mode="Markdown",
     )
 
@@ -511,6 +515,6 @@ async def toss_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         targets = list(seen.values())
     chosen = random.choice(targets)
     await update.message.reply_text(
-        f"🎰 *The Pick*\n\n➡️ *{chosen}*\n\n_{random.choice(TOSS_VERDICTS)}_",
+        f"🎰 *The Pick*\n\n➡️ *{_escape_md(chosen)}*\n\n_{random.choice(TOSS_VERDICTS)}_",
         parse_mode="Markdown",
     )
