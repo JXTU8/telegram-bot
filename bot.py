@@ -31,7 +31,7 @@ from handlers.countdown import (
     restore_jobs,
 )
 from handlers.ai import (
-    ask_command,
+    ask_command, ask_followup_handler,
     choose_start, received_decision, received_options,
 )
 from handlers.luck import (
@@ -197,6 +197,7 @@ def main() -> None:
     app.add_handler(CommandHandler("profile",         profile_command))
     app.add_handler(CommandHandler("status",          status_command))
     app.add_handler(CommandHandler("lucktest",        lucktest_command))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.REPLY, ask_followup_handler))
     app.add_handler(MessageHandler(filters.ALL, seen_user_tracker), group=1)
     app.add_error_handler(error_handler)
 

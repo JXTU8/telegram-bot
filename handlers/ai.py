@@ -141,10 +141,9 @@ def _call_groq(question: str, search_context: str, history: list | None = None) 
 
 # ── Ask conversation context (Redis-backed, TTL 6 h) ─────────────────────────
 # Key: ask_ctx:<chat_id>:<message_id>  →  JSON list of {role, content} dicts
-# Stored after every bot /ask reply so follow-ups can load the full history.
 
-_ASK_CTX_TTL = 6 * 3600   # 6 hours
-_ASK_PREFIX  = "🤖 Q: "   # sentinel to detect bot /ask replies
+_ASK_CTX_TTL = 6 * 3600
+_ASK_PREFIX  = "🤖 Q: "
 
 
 def _ask_ctx_key(chat_id: int, message_id: int) -> str:
@@ -199,63 +198,26 @@ def _call_groq_fun(prompt: str) -> str:
     return chat.choices[0].message.content.strip()
 
 
-# ── /ask command ──────────────────────────────────────────────────────────────
+# ── Shared ask processing ─────────────────────────────────────────────────────
 
-async def ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not groq_client:
-        await update.message.reply_text(
-            "⚠️ AI is not configured. Ask the admin to set up the `GROQ_API_KEY`."
-        )
-        return
-    if not context.args:
-        await update.message.reply_text(
-            "Usage: `/ask <your question>`\n_(e.g. `/ask what is tung tung tung sahur?`)_\n\n"
-            "_💡 Tip: reply to my answer and use /ask again to follow up!_",
-            parse_mode="Markdown",
-        )
-        return
-
-    question = " ".join(context.args)
-    if len(question) > MAX_ASK_LENGTH:
-        await update.message.reply_text(
-            f"⚠️ Question too long. Please keep it under {MAX_ASK_LENGTH} characters."
-        )
-        return
-
-    # ── Detect reply-chaining: load history from the replied-to bot message ──
-    history: list | None = None
-    replied = update.message.reply_to_message
-    chat_id = update.effective_chat.id
-
-    if (
-        replied
-        and replied.from_user
-        and replied.from_user.id == context.bot.id
-        and replied.text
-        and replied.text.startswith(_ASK_PREFIX)
-    ):
-        history = await asyncio.to_thread(
-            _load_ask_context, chat_id, replied.message_id
-        )
-        if history:
-            logger.info(
-                "ask follow-up from user %s (depth %s, prev msg %s)",
-                update.effective_user.id, len(history) // 2, replied.message_id,
-            )
-
-    thinking_msg = await update.message.reply_text("🤖 Searching and thinking...")
-
+async def _process_ask(
+    question: str,
+    history: list | None,
+    chat_id: int,
+    reply_target,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Core logic shared by /ask and the plain-text follow-up handler."""
+    thinking_msg = await reply_target.reply_text("🤖 Searching and thinking...")
     try:
-        # Always search — follow-ups benefit from fresh web context too
         search_context = await asyncio.to_thread(_search_web, question)
         answer = await asyncio.to_thread(_call_groq, question, search_context, history)
 
-        # ── Persist updated history for the next follow-up (cap at 3 exchanges) ──
         prior = history or []
         new_history = (prior + [
             {"role": "user",      "content": question},
             {"role": "assistant", "content": answer},
-        ])[-6:]   # keep last 3 exchanges (6 turns)
+        ])[-6:]   # cap at 3 exchanges
 
         max_len = 3900
         header = f"🤖 Q: {question}\n\n"
@@ -271,10 +233,94 @@ async def ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await asyncio.to_thread(
                 _save_ask_context, chat_id, overflow_msg.message_id, new_history
             )
-
     except Exception as e:
         logger.error("Ask error: %s", e)
         await thinking_msg.edit_text("❌ Something went wrong with the AI. Please try again later.")
+
+
+# ── /ask command ──────────────────────────────────────────────────────────────
+
+async def ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not groq_client:
+        await update.message.reply_text(
+            "⚠️ AI is not configured. Ask the admin to set up the `GROQ_API_KEY`."
+        )
+        return
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: `/ask <your question>`\n_(e.g. `/ask what is tung tung tung sahur?`)_\n\n"
+            "_💡 Tip: just reply to my answer to follow up — no command needed!_",
+            parse_mode="Markdown",
+        )
+        return
+
+    question = " ".join(context.args)
+    if len(question) > MAX_ASK_LENGTH:
+        await update.message.reply_text(
+            f"⚠️ Question too long. Please keep it under {MAX_ASK_LENGTH} characters."
+        )
+        return
+
+    chat_id = update.effective_chat.id
+    replied = update.message.reply_to_message
+    history = None
+
+    if (
+        replied
+        and replied.from_user
+        and replied.from_user.id == context.bot.id
+        and replied.text
+        and replied.text.startswith(_ASK_PREFIX)
+    ):
+        history = await asyncio.to_thread(_load_ask_context, chat_id, replied.message_id)
+
+    await _process_ask(question, history, chat_id, update.message, context)
+
+
+# ── Plain-text reply follow-up handler ───────────────────────────────────────
+
+async def ask_followup_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Fires when a user sends a plain-text reply (no /ask command) directly to a
+    bot /ask answer. Treats the reply text as the follow-up question automatically.
+    """
+    if not groq_client:
+        return
+
+    message = update.message
+    if not message or not message.text:
+        return
+
+    replied = message.reply_to_message
+    if (
+        not replied
+        or not replied.from_user
+        or replied.from_user.id != context.bot.id
+        or not replied.text
+        or not replied.text.startswith(_ASK_PREFIX)
+    ):
+        return   # not a reply to a /ask bot message — ignore silently
+
+    question = message.text.strip()
+    if not question or len(question) > MAX_ASK_LENGTH:
+        return
+
+    chat_id = update.effective_chat.id
+    history = await asyncio.to_thread(_load_ask_context, chat_id, replied.message_id)
+
+    if history is None:
+        await message.reply_text(
+            "⚠️ This conversation has expired (older than 6 hours). "
+            "Start a new one with `/ask <question>`.",
+            parse_mode="Markdown",
+        )
+        return
+
+    logger.info(
+        "ask_followup from user %s (depth %s, prev msg %s)",
+        update.effective_user.id, len(history) // 2, replied.message_id,
+    )
+    await _process_ask(question, history, chat_id, message, context)
 
 
 # ── /choose flow ──────────────────────────────────────────────────────────────
