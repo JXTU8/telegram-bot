@@ -14,7 +14,7 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from constants import BIRTHDAY_MESSAGES, _MONTH_NAMES
-from countdown_manager import save_birthday, get_all_birthdays, delete_birthday
+from countdown_manager import save_birthday, get_all_birthdays, get_all_birthday_chats
 from helpers import _display_user, _arg_text, _mentioned_target, _escape_md, _today
 
 logger = logging.getLogger(__name__)
@@ -33,6 +33,24 @@ def _days_until_birthday(day: int, month: int) -> int:
     else:
         next_bday = this_year
     return (next_bday - today).days
+
+
+def _remove_birthday(chat_id: int, user_id: int) -> bool:
+    """Delete a user's birthday entry. Returns True if it existed."""
+    from countdown_manager import redis, _birthday_key, _decode_chat_data
+    import json
+    key = _birthday_key(chat_id)
+    try:
+        raw = redis.get(key)
+        data = _decode_chat_data(raw) if raw else {}
+        if str(user_id) not in data:
+            return False
+        del data[str(user_id)]
+        redis.set(key, json.dumps(data, separators=(",", ":")))
+        return True
+    except Exception as e:
+        logger.error("Redis birthday delete error for chat %s: %s", chat_id, e)
+        return False
 
 
 # ── /birthday ─────────────────────────────────────────────────────────────────
@@ -99,7 +117,7 @@ async def birthday_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await update.message.reply_text(
         f"🎂 *Birthday saved!*\n"
         f"*{name}* — {day:02d} {_MONTH_NAMES[month]}  _{tag}_\n\n"
-        f"Use `/birthday list` to see everyone's birthday.",
+        f"Use `/birthday` to see everyone's upcoming birthdays.",
         parse_mode="Markdown",
     )
 
@@ -107,9 +125,6 @@ async def birthday_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 # ── /addbirthday ──────────────────────────────────────────────────────────────
 
 async def addbirthday_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    /addbirthday DD/MM  — set your birthday (e.g. /addbirthday 25/12)
-    """
     chat_id = update.effective_chat.id
     user = update.effective_user
     text = _arg_text(context)
@@ -155,10 +170,6 @@ async def addbirthday_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 # ── /deletebirthday ───────────────────────────────────────────────────────────
 
 async def deletebirthday_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    /deletebirthday         — delete your own birthday
-    /deletebirthday @user   — delete someone else's birthday (admins only)
-    """
     chat_id = update.effective_chat.id
     user = update.effective_user
     target_mention = _mentioned_target(update, context)
@@ -186,7 +197,7 @@ async def deletebirthday_command(update: Update, context: ContextTypes.DEFAULT_T
             )
             return
 
-        deleted = await asyncio.to_thread(delete_birthday, chat_id, target_uid)
+        deleted = await asyncio.to_thread(_remove_birthday, chat_id, target_uid)
         if deleted:
             await update.message.reply_text(
                 f"🗑️ Birthday for *{_escape_md(target_mention)}* has been removed.",
@@ -198,7 +209,7 @@ async def deletebirthday_command(update: Update, context: ContextTypes.DEFAULT_T
                 parse_mode="Markdown",
             )
     else:
-        deleted = await asyncio.to_thread(delete_birthday, chat_id, user.id)
+        deleted = await asyncio.to_thread(_remove_birthday, chat_id, user.id)
         if deleted:
             await update.message.reply_text(
                 "🗑️ Your birthday has been removed.\n"
@@ -218,7 +229,7 @@ async def deletebirthday_command(update: Update, context: ContextTypes.DEFAULT_T
 async def birthday_check_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Runs daily at 00:01 MYT. Sends birthday greetings to each chat."""
     today = _today()
-    all_chats = await asyncio.to_thread(get_all_birthdays)
+    all_chats = await asyncio.to_thread(get_all_birthday_chats)
     for chat_id, bdays in all_chats.items():
         for uid_str, info in bdays.items():
             d, m = info.get("day", 0), info.get("month", 0)

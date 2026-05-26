@@ -5,6 +5,7 @@ Entry point. Registers all handlers and starts the bot.
 All logic lives in handlers/ — edit this file only when adding/removing commands.
 """
 
+import asyncio
 import logging
 from datetime import datetime
 
@@ -78,7 +79,7 @@ logger = logging.getLogger(__name__)
 
 async def on_startup(app) -> None:
     """Runs once after the bot connects. Restores all persistent jobs from Redis."""
-    await delete_old_fateboard_keys(app)
+    await asyncio.to_thread(delete_old_fateboard_keys)
     await restore_jobs(app)
     await restore_remind_jobs(app)
 
