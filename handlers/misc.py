@@ -60,14 +60,14 @@ HELP_PAGES = {
         "🎲 *Decisions*\n\n"
         "/choose — can't decide? let the bot pick for you\n"
         "/decide opt1, opt2, opt3 — instant pick\n"
-        "/rank topic: item1, item2, item3 — daily consistent ranking\n"
+        "/rank topic: item1, item2, item3 — rank anything\n"
         "/toss — pick a random person from mentions or the group\n"
         "/poll question: opt1, opt2 — send a native Telegram poll"
     ),
     "ai": (
         "🤖 *AI*\n\n"
-        "/ask <question> — search the web + ask AI anything\n"
-        "/8ball <question> — magic 8-ball powered by AI\n"
+        "/ask <question> — ask AI anything\n"
+        "/8ball <question> — magic 8-ball\n"
         "/hot <anything> — rate anything out of 100"
     ),
     "luck": (
@@ -81,17 +81,17 @@ HELP_PAGES = {
         "🎉 *Fun*\n\n"
         "/ship @user1 @user2 — compatibility percentage\n"
         "/shipboard — top ship pairs in this group\n"
-        "/roast @user — personalised AI roast\n"
-        "/compliment @user — personalised AI compliment\n"
+        "/roast @user — personalised roast\n"
+        "/compliment @user — personalised compliment\n"
         "/vibecheck — group mood score\n"
-        "/mvp — today's most valuable group member\n"
+        "/mvp — today's MVP\n"
         "/mvpboard — all-time MVP leaderboard\n"
         "/truth — random truth question\n"
-        "/dare — random dare\n"
+        "/dare — random dare question\n"
         "/wouldyourather — random would you rather\n"
         "/coinflip — heads or tails\n"
-        "/curse @user — fake daily curse\n"
-        "/bless @user — fake daily blessing"
+        "/curse @user — daily curse\n"
+        "/bless @user — daily blessing"
     ),
     "quotes": (
         "💬 *Quotes*\n\n"
@@ -102,20 +102,17 @@ HELP_PAGES = {
     "reminders": (
         "⏰ *Reminders*\n\n"
         "/remind 10m take a break — set a personal reminder\n"
-        "/remind 2h submit the report — supports s/m/h units\n"
         "/cancelremind — view and cancel your pending reminders\n"
         "/remindall 1h group meeting — group-wide reminder (admins only)\n"
         "/birthday — see upcoming birthdays in this chat\n"
         "/addbirthday DD/MM — set your birthday\n"
         "/deletebirthday — delete your birthday\n"
         "/deletebirthday @user — delete someone's birthday (admins only)\n"
-        "_Personal reminders survive bot restarts._"
     ),
     "other": (
         "⚙️ *Other*\n\n"
         "/stats — group activity summary\n"
         "/profile — your bot profile in this chat\n"
-        "/status — owner-only health check\n"
         "/cancel — cancel the current flow\n"
         "/help — show this menu"
     ),
