@@ -252,7 +252,12 @@ async def received_options(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     )
     _track(context, update.message)
     await _delete_tracked(context)
-    thinking_msg = await update.message.reply_text(thinking)
+    # Do NOT use update.message.reply_text here — that message was just deleted,
+    # and Telegram will reject the reply_to_message_id, silently killing the rest
+    # of this function. Send a fresh message instead.
+    thinking_msg = await context.bot.send_message(
+        chat_id=update.effective_chat.id, text=thinking
+    )
     await asyncio.sleep(2)
     await thinking_msg.edit_text(
         f"🎯 Decision: {decision}\n"

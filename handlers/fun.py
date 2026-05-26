@@ -390,7 +390,7 @@ async def mvp_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     winner_id = rng.choice(list(candidate_pool.keys()))
     winner_name = candidate_pool[winner_id]
     await update.message.reply_text(
-        f"🏆 *Today's MVP — {winner_name}*\n{rng.choice(MVP_LINES)}",
+        f"🏆 *Today's MVP — {_escape_md(winner_name)}*\n{rng.choice(MVP_LINES)}",
         parse_mode="Markdown",
     )
 
