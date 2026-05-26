@@ -220,7 +220,14 @@ async def _process_ask(
         ])[-6:]   # cap at 3 exchanges
 
         max_len = 3900
-        header = f"🤖 Q: {question}\n\n"
+        if history:
+            original_q = next((h["content"] for h in history if h["role"] == "user"), None)
+            if original_q and original_q != question:
+                header = f"🤖 Q: {original_q}\n↩️ {question}\n\n"
+            else:
+                header = f"🤖 Q: {question}\n\n"
+        else:
+            header = f"🤖 Q: {question}\n\n"
         first_chunk_limit = max(1, max_len - len(header))
         first_chunk = answer[:first_chunk_limit]
         remaining_answer = answer[first_chunk_limit:]
