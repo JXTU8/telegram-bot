@@ -141,10 +141,10 @@ def _call_groq(question: str, search_context: str, history: list | None = None) 
 
 # ── Ask conversation context (Redis-backed, TTL 6 h) ─────────────────────────
 # Key: ask_ctx:<chat_id>:<message_id>  →  JSON list of {role, content} dicts
-# Stored after every bot /ask reply so follow-ups can load full history.
+# Stored after every bot /ask reply so follow-ups can load the full history.
 
-_ASK_CTX_TTL = 6 * 3600   # 6 hours — enough for a session
-_ASK_PREFIX  = "🤖 Q: "   # sentinel used to detect bot /ask replies
+_ASK_CTX_TTL = 6 * 3600   # 6 hours
+_ASK_PREFIX  = "🤖 Q: "   # sentinel to detect bot /ask replies
 
 
 def _ask_ctx_key(chat_id: int, message_id: int) -> str:
@@ -152,7 +152,6 @@ def _ask_ctx_key(chat_id: int, message_id: int) -> str:
 
 
 def _save_ask_context(chat_id: int, message_id: int, history: list) -> None:
-    """Persist full conversation history keyed to the bot reply's message_id."""
     import json
     try:
         from db import redis
@@ -166,7 +165,6 @@ def _save_ask_context(chat_id: int, message_id: int, history: list) -> None:
 
 
 def _load_ask_context(chat_id: int, message_id: int) -> list | None:
-    """Load history stored for a previous bot reply. Returns None on miss."""
     import json
     try:
         from db import redis
@@ -245,27 +243,20 @@ async def ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 update.effective_user.id, len(history) // 2, replied.message_id,
             )
 
-    is_followup = bool(history)
-    thinking_msg = await update.message.reply_text(
-        "🤖 Thinking..." if is_followup else "🤖 Searching and thinking..."
-    )
+    thinking_msg = await update.message.reply_text("🤖 Searching and thinking...")
 
     try:
-        # Skip web search for follow-ups — use existing context instead
-        search_context = "" if is_followup else await asyncio.to_thread(_search_web, question)
+        # Always search — follow-ups benefit from fresh web context too
+        search_context = await asyncio.to_thread(_search_web, question)
         answer = await asyncio.to_thread(_call_groq, question, search_context, history)
 
-        # ── Build and persist the updated history for the next follow-up ─────
-        # Cap at 6 turns (3 exchanges) so the context window stays manageable
+        # ── Persist updated history for the next follow-up (cap at 3 exchanges) ──
         prior = history or []
-        new_history = prior + [
+        new_history = (prior + [
             {"role": "user",      "content": question},
             {"role": "assistant", "content": answer},
-        ]
-        if len(new_history) > 6:
-            new_history = new_history[-6:]
+        ])[-6:]   # keep last 3 exchanges (6 turns)
 
-        # ── Send the reply ────────────────────────────────────────────────────
         max_len = 3900
         header = f"🤖 Q: {question}\n\n"
         first_chunk_limit = max(1, max_len - len(header))
@@ -273,13 +264,10 @@ async def ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         remaining_answer = answer[first_chunk_limit:]
 
         await thinking_msg.edit_text(header + first_chunk)
-
-        # Persist context keyed to the bot's reply so the user can follow up
         await asyncio.to_thread(_save_ask_context, chat_id, thinking_msg.message_id, new_history)
 
         for i in range(0, len(remaining_answer), max_len):
             overflow_msg = await thinking_msg.reply_text(remaining_answer[i:i + max_len])
-            # Also key the overflow chunk in case user replies to it
             await asyncio.to_thread(
                 _save_ask_context, chat_id, overflow_msg.message_id, new_history
             )
