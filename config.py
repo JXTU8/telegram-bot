@@ -26,7 +26,9 @@ if not TOKEN:
 TIMEZONE = pytz.timezone("Asia/Kuala_Lumpur")
 
 # ─────────────────────────────────────────────
-# Daily reminder time (24-hour, MYT)
+# Default countdown reminder time (24-hour, MYT).
+# Used as the suggested default in /addcountdown.
+# Override via env vars DEFAULT_REMINDER_HOUR / DEFAULT_REMINDER_MINUTE.
 # ─────────────────────────────────────────────
-REMINDER_HOUR   = 12
-REMINDER_MINUTE = 0
+DEFAULT_REMINDER_HOUR: int   = env_int("DEFAULT_REMINDER_HOUR", 12)
+DEFAULT_REMINDER_MINUTE: int = env_int("DEFAULT_REMINDER_MINUTE", 0)

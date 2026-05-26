@@ -14,7 +14,7 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from constants import BIRTHDAY_MESSAGES, _MONTH_NAMES
-from countdown_manager import save_birthday, get_all_birthdays, get_all_birthday_chats
+from stores.birthday_store import save_birthday, get_all_birthdays, get_all_birthday_chats
 from helpers import _display_user, _arg_text, _mentioned_target, _escape_md, _today
 
 logger = logging.getLogger(__name__)

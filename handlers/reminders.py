@@ -12,12 +12,12 @@ import time
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
-from countdown_manager import (
+from stores.reminder_store import (
     increment_remind_count, decrement_remind_count,
-    save_remind_job, delete_remind_job,
+    save_remind_job, delete_remind_job, try_claim_remind_job,
     get_user_remind_jobs, get_all_remind_jobs,
 )
-from helpers import _display_user, _arg_text, _is_chat_admin, BOT_OWNER_ID, BOT_OWNER_USERNAMES
+from helpers import _display_user, _arg_text, _is_chat_admin, _is_owner
 
 logger = logging.getLogger(__name__)
 
@@ -119,6 +119,12 @@ async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         _cid=chat_id, _jid=job_id, _uid=user_id,
         _mention=user_mention, _text=reminder_text,
     ) -> None:
+        # Atomically claim this job — prevents double-fire on rapid restarts
+        claimed = await asyncio.to_thread(try_claim_remind_job, _jid)
+        if not claimed:
+            logger.info("Remind job %s already claimed by another scheduler, skipping.", _jid)
+            return
+        # Verify the job is still in Redis (user may have cancelled it)
         existing = await asyncio.to_thread(get_user_remind_jobs, _cid, _uid)
         if not any(j.get("job_id") == _jid for j in existing):
             logger.info("Remind job %s was cancelled, skipping fire.", _jid)
@@ -222,10 +228,7 @@ async def cancelremind_callback(update: Update, context: ContextTypes.DEFAULT_TY
 async def remindall_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     is_admin = await _is_chat_admin(update, context)
     user = update.effective_user
-    is_owner = (BOT_OWNER_ID and user.id == BOT_OWNER_ID) or (
-        user.username and user.username.casefold() in BOT_OWNER_USERNAMES
-    )
-    if not is_admin and not is_owner:
+    if not is_admin and not _is_owner(user):
         await update.message.reply_text("⚠️ Only group admins can use /remindall.")
         return
 
@@ -305,9 +308,15 @@ async def restore_remind_jobs(app) -> None:
                 _cid=chat_id, _jid=job_id, _uid=user_id,
                 _mention=mention, _text=text,
             ):
+                # Claim the job atomically — if another scheduler already claimed
+                # it (e.g. previous restart's closure still running), skip.
+                claimed = await asyncio.to_thread(try_claim_remind_job, _jid)
+                if not claimed:
+                    logger.info("Restored remind job %s already claimed, skipping.", _jid)
+                    return
                 existing = await asyncio.to_thread(get_user_remind_jobs, _cid, _uid)
                 if not any(j.get("job_id") == _jid for j in existing):
-                    logger.info("Remind job %s was cancelled, skipping.", _jid)
+                    logger.info("Restored remind job %s was cancelled, skipping.", _jid)
                     return
                 await ctx.bot.send_message(
                     chat_id=_cid,

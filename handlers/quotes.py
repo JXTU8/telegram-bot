@@ -11,8 +11,8 @@ import random
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
-from countdown_manager import save_quote, get_all_quotes, get_quote_count, delete_quote
-from helpers import _display_user, _is_chat_admin, BOT_OWNER_ID, BOT_OWNER_USERNAMES
+from stores.quote_store import save_quote, get_all_quotes, get_quote_count, delete_quote
+from helpers import _display_user, _is_chat_admin, _is_owner
 
 logger = logging.getLogger(__name__)
 
@@ -117,7 +117,7 @@ async def quotes_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 async def deletequote_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
+    user = update.effective_user
 
     if not context.args or not context.args[0].isdigit():
         total = await asyncio.to_thread(get_quote_count, chat_id)
@@ -130,11 +130,7 @@ async def deletequote_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     is_admin = await _is_chat_admin(update, context)
-    is_owner = (BOT_OWNER_ID and user_id == BOT_OWNER_ID) or (
-        update.effective_user.username
-        and update.effective_user.username.casefold() in BOT_OWNER_USERNAMES
-    )
-    if not is_admin and not is_owner:
+    if not is_admin and not _is_owner(user):
         await update.message.reply_text("⚠️ Only group admins can delete quotes.")
         return
 

@@ -17,12 +17,18 @@ from constants import (
     FATE_TIERS, FATE_EXTREME_LUCKY_MESSAGES, FATE_EXTREME_UNLUCKY_MESSAGES,
     _SPECIAL_SCORE_CASES,
 )
-from countdown_manager import (
+from stores.luck_store import (
     save_fate_entry, get_fate_board,
-    track_seen_user, update_fate_streak, get_fate_streak,
-    delete_old_fateboard_keys, get_all_birthdays,
+    update_fate_streak, get_fate_streak,
+    delete_old_fateboard_keys,
 )
-from helpers import _display_user, _mentioned_target, _normalize_target, _today, BOT_OWNER_ID
+from stores.user_store import track_seen_user
+from stores.birthday_store import get_all_birthdays
+
+from helpers import (
+    _display_user, _mentioned_target, _normalize_target, _today,
+    BOT_OWNER_ID, _is_owner, owner_only, _arg_text,
+)
 from config import env_int
 
 logger = logging.getLogger(__name__)
@@ -191,11 +197,15 @@ async def luck_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         t1 = asyncio.create_task(
             asyncio.to_thread(_remember_fate, update.effective_chat.id, target_user_id, target_name, score, tier)
         )
-        t1.add_done_callback(lambda t: t.exception() and logger.warning("_remember_fate: %s", t.exception()))
+        t1.add_done_callback(
+            lambda t: t.exception() and logger.warning("_remember_fate failed: %s", t.exception())
+        )
         t2 = asyncio.create_task(
             asyncio.to_thread(track_seen_user, update.effective_chat.id, target_user_id, target_name)
         )
-        t2.add_done_callback(lambda t: t.exception() and logger.warning("track_seen: %s", t.exception()))
+        t2.add_done_callback(
+            lambda t: t.exception() and logger.warning("track_seen_user failed: %s", t.exception())
+        )
 
         streak = await asyncio.to_thread(_update_streak_sync, target_user_id, today_str, tier_category)
         if streak >= 2:
@@ -300,17 +310,10 @@ async def streak_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     )
 
 
-# ── /lucktest (owner-only preview) ───────────────────────────────────────────
+# ── /lucktest (owner-only) ────────────────────────────────────────────────────
 
+@owner_only
 async def lucktest_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    from helpers import BOT_OWNER_USERNAMES, _arg_text
-    user = update.effective_user
-    is_owner = (BOT_OWNER_ID and user.id == BOT_OWNER_ID) or (
-        user.username and user.username.casefold() in BOT_OWNER_USERNAMES
-    )
-    if not is_owner:
-        return
-
     raw_arg = _arg_text(context)
     if not raw_arg or not raw_arg.lstrip("-").lstrip("+").isdigit():
         await update.message.reply_text(
@@ -350,11 +353,11 @@ async def lucktest_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 luck_msg = t["messages"][0]
                 break
 
-    target_name = _display_user(user)
+    target_name = _display_user(update.effective_user)
     today = _today()
 
     final_score, final_tier, final_msg, day_note, _ = _apply_special_luck(
-        score, tier, luck_msg, target_name, today, seed=str(user.id)
+        score, tier, luck_msg, target_name, today, seed=str(update.effective_user.id)
     )
 
     result_text = _luck_result_text(target_name, final_tier, final_score, final_msg, day_note=day_note)

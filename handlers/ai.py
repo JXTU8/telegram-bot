@@ -11,12 +11,14 @@ import os
 import random
 import threading
 import time
+from collections import OrderedDict
 
 import requests
 from groq import Groq
 from telegram import Update
 from telegram.ext import ContextTypes, ConversationHandler
 
+from config import env_int
 from constants import THINKING_MESSAGES, VERDICT_LINES
 from helpers import _track, _delete_tracked, ASK_DECISION, ASK_OPTIONS, CONV_TIMEOUT
 
@@ -32,17 +34,18 @@ else:
     groq_client = None
     logger.warning("GROQ_API_KEY not set — /ask, /roast, /compliment, /8ball, /hot will use fallbacks.")
 
-# ── Serper web search + cache ─────────────────────────────────────────────────
+# ── Serper web search + LRU cache ────────────────────────────────────────────
 
 SERPER_API_KEY = os.getenv("SERPER_API_KEY", "")
 SERPER_URL = "https://google.serper.dev/search"
 SERPER_SESSION = requests.Session()
 
-from config import env_int
 SEARCH_CACHE_TTL_SECONDS = max(0, env_int("SEARCH_CACHE_TTL_SECONDS", 900))
 SEARCH_CACHE_MAX_ITEMS = 128
 MAX_ASK_LENGTH = 500
-_SEARCH_CACHE: dict = {}
+
+# OrderedDict gives O(1) LRU eviction (move_to_end + popitem(last=False))
+_SEARCH_CACHE: OrderedDict = OrderedDict()
 _search_cache_lock = threading.Lock()
 
 
@@ -51,23 +54,29 @@ def _cache_key(query: str) -> str:
 
 
 def _get_cached_search(query: str):
+    key = _cache_key(query)
     with _search_cache_lock:
-        cached = _SEARCH_CACHE.get(_cache_key(query))
-        if not cached:
+        if key not in _SEARCH_CACHE:
             return None
-        cached_at, result = cached
+        cached_at, result = _SEARCH_CACHE[key]
         if time.monotonic() - cached_at <= SEARCH_CACHE_TTL_SECONDS:
+            # Move to end (most recently used)
+            _SEARCH_CACHE.move_to_end(key)
             return result
-        _SEARCH_CACHE.pop(_cache_key(query), None)
+        # Expired — evict
+        del _SEARCH_CACHE[key]
         return None
 
 
 def _set_cached_search(query: str, result: str) -> None:
+    key = _cache_key(query)
     with _search_cache_lock:
-        if len(_SEARCH_CACHE) >= SEARCH_CACHE_MAX_ITEMS:
-            oldest_key = min(_SEARCH_CACHE, key=lambda k: _SEARCH_CACHE[k][0])
-            _SEARCH_CACHE.pop(oldest_key, None)
-        _SEARCH_CACHE[_cache_key(query)] = (time.monotonic(), result)
+        if key in _SEARCH_CACHE:
+            _SEARCH_CACHE.move_to_end(key)
+        elif len(_SEARCH_CACHE) >= SEARCH_CACHE_MAX_ITEMS:
+            # Evict least recently used (first item) — O(1)
+            _SEARCH_CACHE.popitem(last=False)
+        _SEARCH_CACHE[key] = (time.monotonic(), result)
 
 
 def _search_web(query: str) -> str:
@@ -227,7 +236,7 @@ async def received_options(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             parse_mode="Markdown",
         )
         return ASK_OPTIONS
-    decision = context.user_data["decision"]
+    decision = context.user_data.get("decision", "your decision")
     verdict = random.choice(VERDICT_LINES)
     thinking = random.choice(THINKING_MESSAGES)
     weights = [random.randint(1, 100) for _ in options]

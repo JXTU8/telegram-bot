@@ -22,15 +22,21 @@ from constants import (
     EIGHT_BALL_ANSWERS, CURSE_LINES, BLESS_LINES, MVP_LINES, HOT_VERDICTS,
     TOSS_VERDICTS,
 )
-from countdown_manager import track_seen_user, get_seen_users, save_ship_pair, get_top_ship_pairs, get_shipboard_reset_time
+from stores.ship_store import save_ship_pair, get_top_ship_pairs, get_shipboard_reset_time
+from stores.user_store import track_seen_user, get_seen_users
 from handlers.ai import groq_client, _call_groq_fun
 from helpers import (
     _display_user, _arg_text, _normalize_target, _daily_rng,
     _mentioned_target, _target_from_mention_or_sender, _escape_md,
-    BOT_OWNER_ID, BOT_OWNER_USERNAMES,
+    BOT_OWNER_ID, BOT_OWNER_USERNAMES, _is_owner,
 )
 
 logger = logging.getLogger(__name__)
+
+# ── Telegram poll limits ──────────────────────────────────────────────────────
+_POLL_MAX_OPTIONS = 10
+_POLL_MAX_QUESTION_LEN = 300
+_POLL_MAX_OPTION_LEN = 100
 
 
 # ── Ship helpers ──────────────────────────────────────────────────────────────
@@ -179,10 +185,14 @@ async def ship_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     for t in targets:
         if t.get("user_id"):
             task = asyncio.create_task(asyncio.to_thread(track_seen_user, chat_id, t["user_id"], t["label"]))
-            task.add_done_callback(lambda t2: t2.exception())
+            task.add_done_callback(
+                lambda t2: t2.exception() and logger.warning("track_seen_user failed: %s", t2.exception())
+            )
     pair_key = f"{normalized[0]}:{normalized[1]}"
     task = asyncio.create_task(asyncio.to_thread(save_ship_pair, chat_id, pair_key, target_a, target_b, score))
-    task.add_done_callback(lambda t2: t2.exception())
+    task.add_done_callback(
+        lambda t2: t2.exception() and logger.warning("save_ship_pair failed: %s", t2.exception())
+    )
     filled = round(score / 10)
     bar = "█" * filled + "░" * (10 - filled)
     a_safe = _escape_md(target_a)
@@ -367,7 +377,9 @@ async def mvp_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 name = u.first_name or u.username or str(u.id)
                 candidate_pool[str(u.id)] = name
                 task = asyncio.create_task(asyncio.to_thread(track_seen_user, chat_id, u.id, name))
-                task.add_done_callback(lambda t: t.exception())
+                task.add_done_callback(
+                    lambda t: t.exception() and logger.warning("track_seen_user failed: %s", t.exception())
+                )
     except Exception as e:
         logger.warning("Could not fetch admins for mvp in chat %s: %s", chat_id, e)
     seen = await asyncio.to_thread(get_seen_users, chat_id)
@@ -446,14 +458,30 @@ async def poll_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if len(options) < 2:
         await update.message.reply_text("Give at least 2 options separated by commas.")
         return
-    if len(question) > 300:
-        await update.message.reply_text(
-            f"⚠️ Question was too long ({len(question)} chars) and will be trimmed to 300 characters."
+
+    # Warn user before silently dropping anything
+    warnings = []
+    if len(options) > _POLL_MAX_OPTIONS:
+        warnings.append(
+            f"⚠️ Only the first {_POLL_MAX_OPTIONS} options will be used "
+            f"(you gave {len(options)})."
         )
+    if len(question) > _POLL_MAX_QUESTION_LEN:
+        warnings.append(
+            f"⚠️ Question trimmed to {_POLL_MAX_QUESTION_LEN} characters."
+        )
+    truncated_opts = [o for o in options[:_POLL_MAX_OPTIONS] if len(o) > _POLL_MAX_OPTION_LEN]
+    if truncated_opts:
+        warnings.append(
+            f"⚠️ {len(truncated_opts)} option(s) trimmed to {_POLL_MAX_OPTION_LEN} characters."
+        )
+    if warnings:
+        await update.message.reply_text("\n".join(warnings))
+
     await context.bot.send_poll(
         chat_id=update.effective_chat.id,
-        question=question[:300],
-        options=[o[:100] for o in options[:10]],
+        question=question[:_POLL_MAX_QUESTION_LEN],
+        options=[o[:_POLL_MAX_OPTION_LEN] for o in options[:_POLL_MAX_OPTIONS]],
         is_anonymous=False,
     )
 

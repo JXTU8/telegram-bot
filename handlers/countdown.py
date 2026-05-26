@@ -12,18 +12,13 @@ from datetime import date, datetime
 from telegram import Update
 from telegram.ext import ContextTypes, ConversationHandler
 
-from config import TIMEZONE
-from countdown_manager import (
-    add_countdown,
-    get_countdown,
-    get_all_countdowns,
-    get_all_chats,
-    remove_countdown,
-    countdown_exists,
-    get_countdown_by_code,
-    get_countdown_creator,
-    get_seen_users,
+from config import TIMEZONE, DEFAULT_REMINDER_HOUR, DEFAULT_REMINDER_MINUTE
+from stores.countdown_store import (
+    add_countdown, get_countdown, get_all_countdowns, remove_countdown,
+    countdown_exists, get_countdown_by_code, get_countdown_creator, get_all_chats,
 )
+from stores.user_store import get_seen_users
+
 from helpers import (
     _today, _days_label, _job_name,
     _track, _delete_tracked, _is_chat_admin,
@@ -33,6 +28,9 @@ from helpers import (
 )
 
 logger = logging.getLogger(__name__)
+
+# ── Validation constants ──────────────────────────────────────────────────────
+_MAX_NAME_LENGTH = 50
 
 
 # ── Daily reminder job ────────────────────────────────────────────────────────
@@ -99,8 +97,8 @@ async def restore_jobs(app) -> None:
     count = 0
     for chat_id, countdowns in all_data.items():
         for name, entry in countdowns.items():
-            h = entry.get("reminder_hour", 12)
-            m = entry.get("reminder_minute", 0)
+            h = entry.get("reminder_hour", DEFAULT_REMINDER_HOUR)
+            m = entry.get("reminder_minute", DEFAULT_REMINDER_MINUTE)
             _schedule_reminder(app, chat_id, name, h, m)
             count += 1
     logger.info("Restored %s countdown reminder job(s) from Redis.", count)
@@ -112,7 +110,7 @@ async def add_countdown_start(update: Update, context: ContextTypes.DEFAULT_TYPE
     bot_msg = await update.message.reply_text(
         "➕ *New Countdown*\n\n"
         "Step 1/3 — What do you want to call this countdown?\n"
-        "_(e.g. Final Exam, Holiday, Birthday)_\n\n"
+        f"_(e.g. Final Exam, Holiday, Birthday)_  ·  max {_MAX_NAME_LENGTH} chars\n\n"
         f"⏰ You have *{CONV_TIMEOUT} seconds* to reply.\n"
         "Type /cancel to stop.",
         parse_mode="Markdown",
@@ -129,11 +127,12 @@ async def received_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
             parse_mode="Markdown",
         )
         return ASK_NAME
-    chat_id = update.effective_chat.id
-    if await asyncio.to_thread(countdown_exists, chat_id, name):
+    # ── Length guard ──────────────────────────────────────────────────────────
+    if len(name) > _MAX_NAME_LENGTH:
         await update.message.reply_text(
-            f"⚠️ A countdown named *{name}* already exists.\n"
-            f"Please use a different name.\n⏰ You have *{CONV_TIMEOUT} seconds* to reply.",
+            f"⚠️ Name is too long ({len(name)} chars). "
+            f"Please keep it under {_MAX_NAME_LENGTH} characters.\n"
+            f"⏰ You have *{CONV_TIMEOUT} seconds* to reply.",
             parse_mode="Markdown",
         )
         return ASK_NAME
@@ -171,7 +170,7 @@ async def received_date(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     bot_msg = await update.message.reply_text(
         f"✅ Date set to *{target_date}*\n\n"
         "Step 3/3 — What time should the group be reminded daily?\n"
-        "Format: `HH:MM` in 24hr MYT _(e.g. 08:30 or 20:00)_\n\n"
+        f"Format: `HH:MM` in 24hr MYT _(e.g. {DEFAULT_REMINDER_HOUR:02d}:{DEFAULT_REMINDER_MINUTE:02d})_\n\n"
         f"⏰ You have *{CONV_TIMEOUT} seconds* to reply.",
         parse_mode="Markdown",
     )
@@ -191,9 +190,19 @@ async def received_time(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
             parse_mode="Markdown",
         )
         return ASK_TIME
+
+    # ── Defensive .get() guards — should always be set but protect against edge cases
     chat_id = update.effective_chat.id
-    name = context.user_data["new_countdown_name"]
-    target_date = context.user_data["new_countdown_date"]
+    name = context.user_data.get("new_countdown_name")
+    target_date = context.user_data.get("new_countdown_date")
+    if not name or not target_date:
+        logger.error("received_time: missing user_data keys. name=%s date=%s", name, target_date)
+        await update.message.reply_text(
+            "⚠️ Something went wrong — please start again with /addcountdown."
+        )
+        context.user_data.clear()
+        return ConversationHandler.END
+
     created_by = update.effective_user.id
     code = await asyncio.to_thread(add_countdown, chat_id, name, target_date, hour, minute, created_by)
     _schedule_reminder(context.application, chat_id, name, hour, minute)
@@ -286,8 +295,15 @@ async def received_edit_field(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def received_edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     chat_id = update.effective_chat.id
-    name = context.user_data["edit_countdown_name"]
-    field = context.user_data["edit_field"]
+    name = context.user_data.get("edit_countdown_name")
+    field = context.user_data.get("edit_field")
+    if not name or not field:
+        await update.message.reply_text(
+            "⚠️ Something went wrong — please start again with /editcountdown."
+        )
+        context.user_data.clear()
+        return ConversationHandler.END
+
     value_str = update.message.text.strip()
     entry = await asyncio.to_thread(get_countdown, chat_id, name)
     if not entry:
@@ -382,8 +398,8 @@ async def list_countdown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         except (KeyError, ValueError):
             td = today
         days_left = (td - today).days
-        h = entry.get("reminder_hour", 12)
-        m = entry.get("reminder_minute", 0)
+        h = entry.get("reminder_hour", DEFAULT_REMINDER_HOUR)
+        m = entry.get("reminder_minute", DEFAULT_REMINDER_MINUTE)
         code = entry.get("code", "—")
         creator_id = str(entry.get("created_by", ""))
         creator_name = seen.get(creator_id, "Unknown")

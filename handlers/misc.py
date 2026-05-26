@@ -10,10 +10,10 @@ import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, ConversationHandler
 
-from countdown_manager import (
-    get_quote_count, get_seen_users, get_top_ship_pairs,
-    get_fate_board, get_shipboard_reset_time,
-)
+from stores.quote_store import get_quote_count
+from stores.user_store import get_seen_users
+from stores.ship_store import get_top_ship_pairs, get_shipboard_reset_time
+from stores.luck_store import get_fate_board
 from config import TIMEZONE
 from datetime import datetime
 from helpers import _escape_md, _delete_tracked

@@ -1,0 +1,54 @@
+"""
+stores/ship_store.py
+────────────────────
+Ship pair persistence — rolling 48-hour window.
+Redis key: ship_pairs:<chat_id>:<bucket>  →  JSON dict  (TTL auto)
+"""
+
+import json
+import logging
+import time as _time
+
+from db import redis
+from stores._utils import _decode_dict
+
+logger = logging.getLogger(__name__)
+
+_SHIP_PAIRS_WINDOW = 48 * 3600  # 48 hours in seconds
+
+
+def _ship_pairs_key(chat_id: int) -> str:
+    bucket = int(_time.time()) // _SHIP_PAIRS_WINDOW
+    return f"ship_pairs:{chat_id}:{bucket}"
+
+
+def get_shipboard_reset_time() -> int:
+    """Return seconds until the current 48-hour ship window resets."""
+    now = int(_time.time())
+    bucket = now // _SHIP_PAIRS_WINDOW
+    return (bucket + 1) * _SHIP_PAIRS_WINDOW - now
+
+
+def save_ship_pair(
+    chat_id: int, pair_key: str, label_a: str, label_b: str, score: float
+) -> None:
+    key = _ship_pairs_key(chat_id)
+    try:
+        pairs = _decode_dict(redis.get(key))
+        pairs[pair_key] = {"label_a": label_a, "label_b": label_b, "score": score}
+        ttl = get_shipboard_reset_time() + 3600
+        redis.set(key, json.dumps(pairs, separators=(",", ":")), ex=ttl)
+    except Exception as e:
+        logger.error("Redis ship pair save error for chat %s: %s", chat_id, e)
+
+
+def get_top_ship_pairs(chat_id: int, limit: int = 5) -> list:
+    key = _ship_pairs_key(chat_id)
+    try:
+        pairs = _decode_dict(redis.get(key))
+        if not pairs:
+            return []
+        return sorted(pairs.values(), key=lambda x: x["score"], reverse=True)[:limit]
+    except Exception as e:
+        logger.error("Redis ship pairs read error for chat %s: %s", chat_id, e)
+        return []

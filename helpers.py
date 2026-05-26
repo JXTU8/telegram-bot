@@ -9,6 +9,7 @@ import logging
 import os
 import random
 from datetime import date, datetime
+from functools import wraps
 
 from telegram import Update
 from telegram.ext import ContextTypes
@@ -30,6 +31,34 @@ BOT_OWNER_USERNAMES = {
     for username in os.getenv("BOT_OWNER_USERNAME", "").replace(",", " ").split()
     if username.strip()
 }
+
+
+# ── Owner helpers ─────────────────────────────────────────────────────────────
+
+def _is_owner(user) -> bool:
+    """Return True if the given Telegram user is the bot owner."""
+    return (BOT_OWNER_ID and user.id == BOT_OWNER_ID) or (
+        bool(user.username)
+        and user.username.casefold() in BOT_OWNER_USERNAMES
+    )
+
+
+def owner_only(func):
+    """
+    Decorator for command handlers that restricts access to the bot owner only.
+    Silently returns (no reply) for non-owners, and logs the attempt.
+    """
+    @wraps(func)
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user = update.effective_user
+        if not _is_owner(user):
+            logger.info(
+                "owner_only: rejected %s (id=%s) for %s",
+                user.username or "no-username", user.id, func.__name__,
+            )
+            return
+        return await func(update, context)
+    return wrapper
 
 
 # ── User display ──────────────────────────────────────────────────────────────
