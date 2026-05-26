@@ -6,6 +6,7 @@ handlers/birthdays.py
 
 import asyncio
 import calendar
+import json
 import logging
 import random
 import re
@@ -14,7 +15,9 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from constants import BIRTHDAY_MESSAGES, _MONTH_NAMES
+from db import redis
 from stores.birthday_store import save_birthday, get_all_birthdays, get_all_birthday_chats
+from stores._utils import _decode_dict
 from helpers import _display_user, _arg_text, _mentioned_target, _escape_md, _today
 
 logger = logging.getLogger(__name__)
@@ -37,12 +40,9 @@ def _days_until_birthday(day: int, month: int) -> int:
 
 def _remove_birthday(chat_id: int, user_id: int) -> bool:
     """Delete a user's birthday entry. Returns True if it existed."""
-    from countdown_manager import redis, _birthday_key, _decode_chat_data
-    import json
-    key = _birthday_key(chat_id)
+    key = f"birthdays:{chat_id}"
     try:
-        raw = redis.get(key)
-        data = _decode_chat_data(raw) if raw else {}
+        data = _decode_dict(redis.get(key))
         if str(user_id) not in data:
             return False
         del data[str(user_id)]
