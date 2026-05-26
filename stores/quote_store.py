@@ -52,6 +52,19 @@ def get_quote_count(chat_id: int) -> int:
         return 0
 
 
+def get_user_quote_counts(chat_id: int, display_name: str) -> tuple:
+    """Return (authored_count, saved_count) for a display name in this chat."""
+    try:
+        quotes = _decode_list(redis.get(_quotes_key(chat_id)))
+        name_norm = display_name.strip().casefold()
+        authored = sum(1 for q in quotes if q.get("author", "").strip().casefold() == name_norm)
+        saved = sum(1 for q in quotes if q.get("saved_by", "").strip().casefold() == name_norm)
+        return authored, saved
+    except Exception as e:
+        logger.error("Redis user quote count error for chat %s: %s", chat_id, e)
+        return 0, 0
+
+
 def get_all_quotes(chat_id: int) -> list:
     try:
         return _decode_list(redis.get(_quotes_key(chat_id)))

@@ -24,6 +24,7 @@ from constants import (
 )
 from stores.ship_store import save_ship_pair, get_top_ship_pairs, get_shipboard_reset_time
 from stores.user_store import track_seen_user, get_seen_users
+from stores.mvp_store import get_today_mvp, save_mvp_win, get_mvp_board
 from handlers.ai import groq_client, _call_groq_fun
 from helpers import (
     _display_user, _arg_text, _normalize_target, _daily_rng,
@@ -368,6 +369,15 @@ async def bless_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 async def mvp_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     today_str = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
+    saved_winner = await asyncio.to_thread(get_today_mvp, chat_id, today_str)
+    if saved_winner:
+        winner_name = _display_name_or_id(saved_winner.get("name", ""), saved_winner.get("user_id", "unknown"))
+        await update.message.reply_text(
+            f"🏆 *Today's MVP — {_escape_md(winner_name)}*\n{random.choice(MVP_LINES)}",
+            parse_mode="Markdown",
+        )
+        return
+
     rng = random.Random(f"mvp:{chat_id}:{today_str}")
     candidate_pool: dict = {}
     try:
@@ -393,10 +403,30 @@ async def mvp_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     winner_id = rng.choice(list(candidate_pool.keys()))
     winner_name = _display_name_or_id(candidate_pool[winner_id], winner_id)
+    await asyncio.to_thread(save_mvp_win, chat_id, today_str, winner_id, winner_name)
     await update.message.reply_text(
         f"🏆 *Today's MVP — {_escape_md(winner_name)}*\n{rng.choice(MVP_LINES)}",
         parse_mode="Markdown",
     )
+
+
+async def mvpboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    rows = await asyncio.to_thread(get_mvp_board, update.effective_chat.id, 10)
+    if not rows:
+        await update.message.reply_text("🏆 No MVP wins recorded yet. Use /mvp to crown today's winner.")
+        return
+    medals = ["🥇", "🥈", "🥉"]
+    lines = ["🏆 *MVP Board*\n"]
+    for i, row in enumerate(rows, 1):
+        rank = medals[i - 1] if i <= 3 else f"{i}."
+        name = _display_name_or_id(row.get("name", ""), row.get("user_id", "unknown"))
+        wins = int(row.get("wins", 0))
+        last_won = row.get("last_won", "unknown")
+        lines.append(
+            f"{rank} *{_escape_md(name)}* — `{wins}` win{'s' if wins != 1 else ''}\n"
+            f"   Last: {_escape_md(last_won)}"
+        )
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
 # ── /hot ──────────────────────────────────────────────────────────────────────

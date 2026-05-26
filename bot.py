@@ -21,7 +21,8 @@ from stores.luck_store import delete_old_fateboard_keys
 # ── Handlers ──────────────────────────────────────────────────────────────────
 from handlers.misc import (
     start_command, help_command, help_callback,
-    stats_command, conversation_timeout,
+    stats_command, profile_command, status_command,
+    seen_user_tracker, error_handler, conversation_timeout,
 )
 from handlers.countdown import (
     add_countdown_start, received_name, received_date, received_time,
@@ -44,7 +45,7 @@ from handlers.fun import (
     truth_command, dare_command, would_you_rather_command,
     coinflip_command, eightball_command,
     curse_command, bless_command,
-    mvp_command, hot_command,
+    mvp_command, mvpboard_command, hot_command,
     decide_command, poll_command, toss_command,
 )
 from handlers.reminders import (
@@ -190,9 +191,14 @@ def main() -> None:
     app.add_handler(CommandHandler("quotes",          quotes_command))
     app.add_handler(CommandHandler("deletequote",     deletequote_command))
     app.add_handler(CommandHandler("mvp",             mvp_command))
+    app.add_handler(CommandHandler("mvpboard",        mvpboard_command))
     app.add_handler(CommandHandler("hot",             hot_command))
     app.add_handler(CommandHandler("stats",           stats_command))
+    app.add_handler(CommandHandler("profile",         profile_command))
+    app.add_handler(CommandHandler("status",          status_command))
     app.add_handler(CommandHandler("lucktest",        lucktest_command))
+    app.add_handler(MessageHandler(filters.ALL, seen_user_tracker), group=1)
+    app.add_error_handler(error_handler)
 
     logger.info("Bot is running...")
     app.run_polling()

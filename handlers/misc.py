@@ -6,17 +6,25 @@ handlers/misc.py
 
 import asyncio
 import logging
+import os
 from datetime import datetime
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, ConversationHandler
 
 from config import TIMEZONE
-from stores.quote_store import get_quote_count
-from stores.user_store import get_seen_users
+from db import redis
+from stores.birthday_store import get_all_birthdays
+from stores.luck_store import get_fate_board, get_fate_streak
+from stores.mvp_store import get_user_mvp_stats
+from stores.quote_store import get_quote_count, get_user_quote_counts
+from stores.reminder_store import get_user_remind_jobs
 from stores.ship_store import get_top_ship_pairs, get_shipboard_reset_time
-from stores.luck_store import get_fate_board
-from helpers import _escape_md, _delete_tracked
+from stores.user_store import get_seen_users, track_seen_user
+from helpers import (
+    _display_user, _escape_md, _delete_tracked,
+    _display_name_or_id, owner_only,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +85,7 @@ HELP_PAGES = {
         "/compliment @user — personalised AI compliment\n"
         "/vibecheck — group mood score\n"
         "/mvp — today's most valuable group member\n"
+        "/mvpboard — all-time MVP leaderboard\n"
         "/truth — random truth question\n"
         "/dare — random dare\n"
         "/wouldyourather — random would you rather\n"
@@ -105,6 +114,8 @@ HELP_PAGES = {
     "other": (
         "⚙️ *Other*\n\n"
         "/stats — group activity summary\n"
+        "/profile — your bot profile in this chat\n"
+        "/status — owner-only health check\n"
         "/cancel — cancel the current flow\n"
         "/help — show this menu"
     ),
@@ -207,6 +218,130 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         f"Top pair: {ship_line}",
     ]
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+# ── /profile ─────────────────────────────────────────────────────────────────
+
+def _profile_target(update: Update):
+    message = update.message
+    for entity in message.entities or []:
+        if entity.type == "text_mention" and getattr(entity, "user", None):
+            return entity.user, None
+        if entity.type == "mention":
+            return None, message.parse_entity(entity)
+    return update.effective_user, None
+
+
+async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    target_user, username_only = _profile_target(update)
+    if username_only and target_user is None:
+        await update.message.reply_text(
+            "⚠️ I can only show profiles for direct mentions or yourself.\n"
+            "Try tapping the user from Telegram's mention picker, or use /profile for your own stats."
+        )
+        return
+
+    user_id = target_user.id
+    name = _display_user(target_user)
+    today = datetime.now(TIMEZONE).date()
+
+    bdays, reminders, streak, mvp_stats, quote_counts = await asyncio.gather(
+        asyncio.to_thread(get_all_birthdays, chat_id),
+        asyncio.to_thread(get_user_remind_jobs, chat_id, user_id),
+        asyncio.to_thread(get_fate_streak, user_id),
+        asyncio.to_thread(get_user_mvp_stats, chat_id, user_id),
+        asyncio.to_thread(get_user_quote_counts, chat_id, name),
+    )
+
+    bday = bdays.get(str(user_id))
+    if bday:
+        birthday_line = f"{bday.get('day', 0):02d}/{bday.get('month', 0):02d}"
+    else:
+        birthday_line = "Not set"
+
+    streak_count, streak_cat = streak
+    streak_line = f"{streak_count} day(s) {streak_cat}" if streak_count else "No active streak"
+    authored_quotes, saved_quotes = quote_counts
+    mvp_wins = int(mvp_stats.get("wins", 0)) if mvp_stats else 0
+    last_mvp = mvp_stats.get("last_won", "Never") if mvp_stats else "Never"
+    seen = await asyncio.to_thread(get_seen_users, chat_id)
+    seen_name = _display_name_or_id(seen.get(str(user_id), name), user_id)
+
+    await update.message.reply_text(
+        "\n".join([
+            f"👤 *Profile — {_escape_md(seen_name)}*",
+            f"🍀 Luck streak: *{_escape_md(streak_line)}*",
+            f"🏆 MVP wins: *{mvp_wins}*",
+            f"Last MVP: *{_escape_md(last_mvp)}*",
+            f"⏰ Pending reminders: *{len(reminders)}*",
+            f"🎂 Birthday: *{_escape_md(birthday_line)}*",
+            f"💬 Quotes authored/saved: *{authored_quotes}/{saved_quotes}*",
+            f"📆 Today: *{today.isoformat()} MYT*",
+        ]),
+        parse_mode="Markdown",
+    )
+
+
+# ── /status and background tracking ──────────────────────────────────────────
+
+def _env_status(name: str) -> str:
+    return "set" if os.getenv(name) else "missing"
+
+
+def _redis_health() -> tuple:
+    try:
+        if hasattr(redis, "ping"):
+            redis.ping()
+        else:
+            redis.get("__healthcheck__")
+        return True, "ok"
+    except Exception as e:
+        return False, str(e)
+
+
+@owner_only
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    redis_ok, redis_msg = await asyncio.to_thread(_redis_health)
+    try:
+        job_count = len(context.application.job_queue.jobs())
+    except Exception:
+        job_count = -1
+
+    from handlers.ai import groq_client, SERPER_API_KEY
+
+    lines = [
+        "🧪 *Bot Status*",
+        f"Redis: *{'ok' if redis_ok else 'error'}*",
+        f"Redis detail: `{_escape_md(redis_msg[:120])}`",
+        f"Job queue: *{'ok' if context.application.job_queue else 'missing'}*",
+        f"Scheduled jobs: *{job_count if job_count >= 0 else 'unknown'}*",
+        f"BOT_TOKEN: *{_env_status('BOT_TOKEN')}*",
+        f"Redis URL/token: *{_env_status('UPSTASH_REDIS_REST_URL')}/{_env_status('UPSTASH_REDIS_REST_TOKEN')}*",
+        f"Groq: *{'ready' if groq_client else 'missing key'}*",
+        f"Serper: *{'ready' if SERPER_API_KEY else 'missing key'}*",
+        f"Timezone: *{TIMEZONE.zone}*",
+    ]
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+async def seen_user_tracker(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    chat = update.effective_chat
+    if not user or not chat or user.is_bot:
+        return
+    await asyncio.to_thread(track_seen_user, chat.id, user.id, _display_user(user))
+
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.exception("Unhandled Telegram update error", exc_info=context.error)
+    message = getattr(update, "effective_message", None)
+    if not message:
+        return
+    try:
+        await message.reply_text("❌ Something broke while handling that. The error was logged.")
+    except Exception as e:
+        logger.warning("Failed to notify user about handler error: %s", e)
 
 
 # ── Shared conversation timeout ───────────────────────────────────────────────
