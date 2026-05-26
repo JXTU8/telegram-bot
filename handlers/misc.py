@@ -310,17 +310,20 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     from handlers.ai import groq_client, SERPER_API_KEY
 
+    # Sanitize redis_msg: strip backticks (already done) AND escape Markdown specials
+    redis_detail = _escape_md(redis_msg[:120].replace("`", "").replace("\n", " "))
+
     lines = [
         "🧪 *Bot Status*",
         f"Redis: *{'ok' if redis_ok else 'error'}*",
-        f"Redis detail: `{redis_msg[:120].replace('`', '')}`",
+        f"Redis detail: `{redis_detail}`",
         f"Job queue: *{'ok' if context.application.job_queue else 'missing'}*",
         f"Scheduled jobs: *{job_count if job_count >= 0 else 'unknown'}*",
-        f"BOT_TOKEN: *{_env_status('BOT_TOKEN')}*",
+        f"BOT\\_TOKEN: *{_env_status('BOT_TOKEN')}*",
         f"Redis URL/token: *{_env_status('UPSTASH_REDIS_REST_URL')}/{_env_status('UPSTASH_REDIS_REST_TOKEN')}*",
         f"Groq: *{'ready' if groq_client else 'missing key'}*",
         f"Serper: *{'ready' if SERPER_API_KEY else 'missing key'}*",
-        f"Timezone: *{TIMEZONE.zone}*",
+        f"Timezone: *{_escape_md(TIMEZONE.zone)}*",
     ]
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
