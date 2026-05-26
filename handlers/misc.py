@@ -313,7 +313,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     lines = [
         "🧪 *Bot Status*",
         f"Redis: *{'ok' if redis_ok else 'error'}*",
-        f"Redis detail: `{_escape_md(redis_msg[:120])}`",
+        f"Redis detail: `{redis_msg[:120].replace('`', '')}`",
         f"Job queue: *{'ok' if context.application.job_queue else 'missing'}*",
         f"Scheduled jobs: *{job_count if job_count >= 0 else 'unknown'}*",
         f"BOT_TOKEN: *{_env_status('BOT_TOKEN')}*",
