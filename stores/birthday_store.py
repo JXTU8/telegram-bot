@@ -39,6 +39,22 @@ def get_all_birthdays(chat_id: int) -> dict:
         return {}
 
 
+def delete_birthday(chat_id: int, user_id: int) -> bool:
+    """Delete a user's birthday entry. Returns True if it existed."""
+    key = _birthday_key(chat_id)
+    try:
+        data = _decode_dict(redis.get(key))
+        if str(user_id) not in data:
+            return False
+        del data[str(user_id)]
+        redis.set(key, json.dumps(data, separators=(",", ":")))
+        logger.info("Birthday deleted user=%s chat=%s", user_id, chat_id)
+        return True
+    except Exception as e:
+        logger.error("Redis birthday delete error for chat %s: %s", chat_id, e)
+        return False
+
+
 def get_all_birthday_chats() -> dict:
     """
     Return {chat_id: {user_id_str: {name, day, month}}} across all chats.

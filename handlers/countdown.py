@@ -55,7 +55,7 @@ async def daily_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
     if days_left < 0:
         await context.bot.send_message(
             chat_id,
-            f"✅ *{name}* countdown has passed! ({td})\nUse `/addcountdown` to add a new one.",
+            f"✅ *{_escape_md(name)}* countdown has passed! ({td})\nUse `/addcountdown` to add a new one.",
             parse_mode="Markdown",
         )
         await asyncio.to_thread(remove_countdown, chat_id, name)
@@ -63,7 +63,7 @@ async def daily_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     await context.bot.send_message(
         chat_id,
-        f"⏰ *{name}*\n📆 Target: *{td}*\n{_days_label(days_left)}",
+        f"⏰ *{_escape_md(name)}*\n📆 Target: *{td}*\n{_days_label(days_left)}",
         parse_mode="Markdown",
     )
     logger.info("Sent reminder for '%s' to chat %s — %s days left", name, chat_id, days_left)
@@ -396,6 +396,27 @@ async def list_countdown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             return 9999
 
     sorted_entries = sorted(countdowns.items(), key=_safe_sort_key)
+
+    # Fix 5: auto-remove countdowns that are overdue (negative days) so stale
+    # entries don't pile up between daily reminder fires.
+    stale_names = [
+        name for name, entry in sorted_entries
+        if (date.fromisoformat(entry.get("target_date", str(today))) - today).days < 0
+    ]
+    for stale_name in stale_names:
+        await asyncio.to_thread(remove_countdown, chat_id, stale_name)
+        jname = _job_name(chat_id, stale_name)
+        for job in context.job_queue.get_jobs_by_name(jname):
+            job.schedule_removal()
+        logger.info("list_countdown: auto-removed overdue '%s' from chat %s", stale_name, chat_id)
+    sorted_entries = [(n, e) for n, e in sorted_entries if n not in stale_names]
+
+    if not sorted_entries:
+        await update.message.reply_text(
+            "📭 No active countdowns.\nUse `/addcountdown` to add one!",
+            parse_mode="Markdown",
+        )
+        return
     lines = ["📋 *Active Countdowns (soonest first):*\n"]
     for name, entry in sorted_entries:
         try:

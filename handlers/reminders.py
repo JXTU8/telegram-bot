@@ -16,6 +16,7 @@ from stores.reminder_store import (
     increment_remind_count, decrement_remind_count,
     save_remind_job, delete_remind_job, try_claim_remind_job,
     get_user_remind_jobs, get_remind_job, get_all_remind_jobs,
+    save_remindall_job, delete_remindall_job, get_all_remindall_jobs,
 )
 from helpers import _display_user, _arg_text, _is_chat_admin, _is_owner, _escape_md
 
@@ -281,12 +282,17 @@ async def remindall_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     set_by = _escape_md(_display_user(user))
     reminder_text_safe = _escape_md(reminder_text)
 
+    fire_at = time.time() + seconds
+    job_id = await asyncio.to_thread(save_remindall_job, chat_id, set_by, reminder_text, fire_at)
+
     async def _fire_group(ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await ctx.bot.send_message(
             chat_id=chat_id,
             text=f"📢 *Group Reminder* (set by {set_by})\n\n{reminder_text_safe}",
             parse_mode="Markdown",
         )
+        if job_id:
+            await asyncio.to_thread(delete_remindall_job, chat_id, job_id)
 
     context.application.job_queue.run_once(_fire_group, when=seconds, chat_id=chat_id)
     await update.message.reply_text(
@@ -335,3 +341,34 @@ async def restore_remind_jobs(app) -> None:
             app.job_queue.run_once(_fire, when=delay, chat_id=chat_id)
             count += 1
     logger.info("Restored %s one-shot remind job(s) from Redis.", count)
+
+
+# ── Restore group remind jobs on startup ──────────────────────────────────────
+# Fix 6: /remindall jobs are now persisted and restored across restarts.
+
+async def restore_remindall_jobs(app) -> None:
+    all_jobs = await asyncio.to_thread(get_all_remindall_jobs)
+    count = 0
+    now = time.time()
+    for chat_id, jobs in all_jobs.items():
+        for job in jobs:
+            delay = max(5.0, job["fire_at"] - now)
+            job_id  = job["job_id"]
+            set_by  = job["set_by"]
+            text    = job["text"]
+            text_safe = _escape_md(text)
+
+            async def _fire(
+                ctx,
+                _cid=chat_id, _jid=job_id, _by=set_by, _text=text_safe,
+            ):
+                await ctx.bot.send_message(
+                    chat_id=_cid,
+                    text=f"📢 *Group Reminder* (set by {_by})\n\n{_text}",
+                    parse_mode="Markdown",
+                )
+                await asyncio.to_thread(delete_remindall_job, _cid, _jid)
+
+            app.job_queue.run_once(_fire, when=delay, chat_id=chat_id)
+            count += 1
+    logger.info("Restored %s group remindall job(s) from Redis.", count)

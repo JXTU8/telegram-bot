@@ -45,7 +45,6 @@ SEARCH_CACHE_TTL_SECONDS = max(0, env_int("SEARCH_CACHE_TTL_SECONDS", 900))
 SEARCH_CACHE_MAX_ITEMS = 128
 MAX_ASK_LENGTH = 500
 
-# OrderedDict gives O(1) LRU eviction (move_to_end + popitem(last=False))
 _SEARCH_CACHE: OrderedDict = OrderedDict()
 _search_cache_lock = threading.Lock()
 
@@ -61,10 +60,8 @@ def _get_cached_search(query: str):
             return None
         cached_at, result = _SEARCH_CACHE[key]
         if time.monotonic() - cached_at <= SEARCH_CACHE_TTL_SECONDS:
-            # Move to end (most recently used)
             _SEARCH_CACHE.move_to_end(key)
             return result
-        # Expired — evict
         del _SEARCH_CACHE[key]
         return None
 
@@ -75,7 +72,6 @@ def _set_cached_search(query: str, result: str) -> None:
         if key in _SEARCH_CACHE:
             _SEARCH_CACHE.move_to_end(key)
         elif len(_SEARCH_CACHE) >= SEARCH_CACHE_MAX_ITEMS:
-            # Evict least recently used (first item) — O(1)
             _SEARCH_CACHE.popitem(last=False)
         _SEARCH_CACHE[key] = (time.monotonic(), result)
 
@@ -115,6 +111,19 @@ def _search_web(query: str) -> str:
         return ""
 
 
+# ── Fix 13: shared Groq base function ────────────────────────────────────────
+
+def _groq_complete(messages: list, max_tokens: int = 1024, temperature: float = 0.7) -> str:
+    """Single low-level call to Groq. Shared by all public helpers."""
+    chat = groq_client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=messages,
+        max_tokens=max_tokens,
+        temperature=temperature,
+    )
+    return chat.choices[0].message.content.strip()
+
+
 def _call_groq(question: str, search_context: str, history: list | None = None) -> str:
     system_msg = (
         "You are a helpful assistant in an ongoing conversation. "
@@ -125,25 +134,53 @@ def _call_groq(question: str, search_context: str, history: list | None = None) 
     user_msg = question
     if search_context:
         user_msg = f"Web search results for context:\n{search_context}\n\nQuestion: {question}"
-
     messages = [{"role": "system", "content": system_msg}]
     if history:
         messages.extend(history)
     messages.append({"role": "user", "content": user_msg})
+    return _groq_complete(messages, max_tokens=1024, temperature=0.7)
 
-    chat = groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=messages,
-        max_tokens=1024,
+
+def _call_groq_fun(prompt: str) -> str:
+    """Short, playful AI response used by roast, compliment, 8ball, hot."""
+    return _groq_complete(
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You write short, playful Telegram group chat content. "
+                    "Plain text only. No markdown. Keep it friendly, funny, and safe. "
+                    "Give only the answer, no intro."
+                ),
+            },
+            {"role": "user", "content": prompt},
+        ],
+        max_tokens=120,
+        temperature=0.9,
     )
-    return chat.choices[0].message.content.strip()
+
+
+# ── Fix 9: per-user ask rate limiting ────────────────────────────────────────
+
+_ASK_COOLDOWNS: dict = {}          # user_id -> monotonic timestamp of last ask
+_ASK_COOLDOWN_SECONDS: float = 3.0 # minimum gap between AI calls per user
+
+
+def _ask_on_cooldown(user_id: int) -> float:
+    """Return remaining cooldown seconds (0.0 = clear)."""
+    remaining = _ASK_COOLDOWN_SECONDS - (time.monotonic() - _ASK_COOLDOWNS.get(user_id, 0))
+    return max(0.0, remaining)
+
+
+def _set_ask_cooldown(user_id: int) -> None:
+    _ASK_COOLDOWNS[user_id] = time.monotonic()
 
 
 # ── Ask conversation context (Redis-backed, TTL 6 h) ─────────────────────────
-# Key: ask_ctx:<chat_id>:<message_id>  →  JSON list of {role, content} dicts
 
 _ASK_CTX_TTL = 6 * 3600
-_ASK_PREFIX  = "🤖 Q: "
+_ASK_PREFIX         = "🤖 Q: "   # prefix on the first answer message
+_ASK_OVERFLOW_PREFIX = "🤖 ↪ "  # Fix 2: prefix on continuation/overflow messages
 
 
 def _ask_ctx_key(chat_id: int, message_id: int) -> str:
@@ -175,27 +212,6 @@ def _load_ask_context(chat_id: int, message_id: int) -> list | None:
     except Exception as e:
         logger.warning("ask_ctx load failed for msg %s: %s", message_id, e)
         return None
-
-
-def _call_groq_fun(prompt: str) -> str:
-    """Short, playful AI response used by roast, compliment, 8ball, hot."""
-    chat = groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "You write short, playful Telegram group chat content. "
-                    "Plain text only. No markdown. Keep it friendly, funny, and safe. "
-                    "Give only the answer, no intro."
-                ),
-            },
-            {"role": "user", "content": prompt},
-        ],
-        max_tokens=120,
-        temperature=0.9,
-    )
-    return chat.choices[0].message.content.strip()
 
 
 # ── Shared ask processing ─────────────────────────────────────────────────────
@@ -235,14 +251,25 @@ async def _process_ask(
         await thinking_msg.edit_text(header + first_chunk)
         await asyncio.to_thread(_save_ask_context, chat_id, thinking_msg.message_id, new_history)
 
+        # Fix 2: mark overflow chunks with _ASK_OVERFLOW_PREFIX so the followup
+        # handler can detect them and load their context.
         for i in range(0, len(remaining_answer), max_len):
-            overflow_msg = await thinking_msg.reply_text(remaining_answer[i:i + max_len])
+            overflow_msg = await thinking_msg.reply_text(
+                _ASK_OVERFLOW_PREFIX + remaining_answer[i:i + max_len]
+            )
             await asyncio.to_thread(
                 _save_ask_context, chat_id, overflow_msg.message_id, new_history
             )
     except Exception as e:
         logger.error("Ask error: %s", e)
         await thinking_msg.edit_text("❌ Something went wrong with the AI. Please try again later.")
+
+
+def _is_ask_bot_message(text: str | None) -> bool:
+    """True if the text looks like a /ask answer (initial or overflow)."""
+    if not text:
+        return False
+    return text.startswith(_ASK_PREFIX) or text.startswith(_ASK_OVERFLOW_PREFIX)
 
 
 # ── /ask command ──────────────────────────────────────────────────────────────
@@ -268,6 +295,16 @@ async def ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         return
 
+    # Fix 9: rate limit
+    user_id = update.effective_user.id
+    remaining = _ask_on_cooldown(user_id)
+    if remaining:
+        await update.message.reply_text(
+            f"⚠️ Please wait {remaining:.1f}s before asking again."
+        )
+        return
+    _set_ask_cooldown(user_id)
+
     chat_id = update.effective_chat.id
     replied = update.message.reply_to_message
     history = None
@@ -276,8 +313,7 @@ async def ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         replied
         and replied.from_user
         and replied.from_user.id == context.bot.id
-        and replied.text
-        and replied.text.startswith(_ASK_PREFIX)
+        and _is_ask_bot_message(replied.text)   # Fix 2: covers overflow too
     ):
         history = await asyncio.to_thread(_load_ask_context, chat_id, replied.message_id)
 
@@ -289,7 +325,7 @@ async def ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 async def ask_followup_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Fires when a user sends a plain-text reply (no /ask command) directly to a
-    bot /ask answer. Treats the reply text as the follow-up question automatically.
+    bot /ask answer (initial or overflow chunk).
     """
     if not groq_client:
         return
@@ -303,14 +339,21 @@ async def ask_followup_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         not replied
         or not replied.from_user
         or replied.from_user.id != context.bot.id
-        or not replied.text
-        or not replied.text.startswith(_ASK_PREFIX)
+        or not _is_ask_bot_message(replied.text)   # Fix 2: covers overflow
     ):
-        return   # not a reply to a /ask bot message — ignore silently
+        return
 
     question = message.text.strip()
     if not question or len(question) > MAX_ASK_LENGTH:
         return
+
+    # Fix 9: rate limit followups too
+    user_id = update.effective_user.id
+    remaining = _ask_on_cooldown(user_id)
+    if remaining:
+        await message.reply_text(f"⚠️ Please wait {remaining:.1f}s before asking again.")
+        return
+    _set_ask_cooldown(user_id)
 
     chat_id = update.effective_chat.id
     history = await asyncio.to_thread(_load_ask_context, chat_id, replied.message_id)
@@ -390,9 +433,6 @@ async def received_options(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     )
     _track(context, update.message)
     await _delete_tracked(context)
-    # Do NOT use update.message.reply_text here — that message was just deleted,
-    # and Telegram will reject the reply_to_message_id, silently killing the rest
-    # of this function. Send a fresh message instead.
     thinking_msg = await context.bot.send_message(
         chat_id=update.effective_chat.id, text=thinking
     )

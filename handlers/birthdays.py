@@ -6,7 +6,6 @@ handlers/birthdays.py
 
 import asyncio
 import calendar
-import json
 import logging
 import random
 import re
@@ -16,15 +15,13 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from constants import BIRTHDAY_MESSAGES, _MONTH_NAMES
-from db import redis
-from stores.birthday_store import save_birthday, get_all_birthdays, get_all_birthday_chats
-from stores._utils import _decode_dict
+from stores.birthday_store import save_birthday, get_all_birthdays, get_all_birthday_chats, delete_birthday
 from helpers import _display_user, _arg_text, _mentioned_target, _escape_md, _today
 
 logger = logging.getLogger(__name__)
 
 
-# ── Helper ────────────────────────────────────────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _days_until_birthday(day: int, month: int) -> int:
     today = _today()
@@ -58,19 +55,41 @@ def _is_birthday_today(day: int, month: int) -> bool:
     )
 
 
-def _remove_birthday(chat_id: int, user_id: int) -> bool:
-    """Delete a user's birthday entry. Returns True if it existed."""
-    key = f"birthdays:{chat_id}"
-    try:
-        data = _decode_dict(redis.get(key))
-        if str(user_id) not in data:
-            return False
-        del data[str(user_id)]
-        redis.set(key, json.dumps(data, separators=(",", ":")))
-        return True
-    except Exception as e:
-        logger.error("Redis birthday delete error for chat %s: %s", chat_id, e)
+async def _parse_and_save_birthday(
+    update: Update, chat_id: int, user, text: str
+) -> bool:
+    """
+    Parse a DD/MM string, validate it, save to store, and reply.
+    Returns True on success, False on validation failure (already replied).
+    """
+    match = re.fullmatch(r"(\d{1,2})[/\-.](\d{1,2})", text.strip())
+    if not match:
+        await update.message.reply_text(
+            "⚠️ Use the format `DD/MM`.\n_(e.g. `/birthday 25/12` for December 25)_",
+            parse_mode="Markdown",
+        )
         return False
+
+    day, month = int(match.group(1)), int(match.group(2))
+    if not (1 <= month <= 12):
+        await update.message.reply_text("⚠️ Invalid month. Must be between 1 and 12.")
+        return False
+    max_day = calendar.monthrange(2000, month)[1]
+    if not (1 <= day <= max_day):
+        await update.message.reply_text(f"⚠️ Invalid day for month {_MONTH_NAMES[month]}.")
+        return False
+
+    name = _display_user(user)
+    await asyncio.to_thread(save_birthday, chat_id, user.id, name, day, month)
+    days_left = _days_until_birthday(day, month)
+    tag = "🎉 That's today!" if days_left == 0 else f"in {days_left} days"
+    await update.message.reply_text(
+        f"🎂 *Birthday saved!*\n"
+        f"*{_escape_md(name)}* — {day:02d} {_MONTH_NAMES[month]}  _{tag}_\n\n"
+        f"Use `/birthday` to see everyone's upcoming birthdays.",
+        parse_mode="Markdown",
+    )
+    return True
 
 
 # ── /birthday ─────────────────────────────────────────────────────────────────
@@ -113,33 +132,7 @@ async def birthday_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
         return
 
-    match = re.fullmatch(r"(\d{1,2})[/\-.](\d{1,2})", text.strip())
-    if not match:
-        await update.message.reply_text(
-            "⚠️ Use the format `DD/MM`.\n_(e.g. `/birthday 25/12` for December 25)_",
-            parse_mode="Markdown",
-        )
-        return
-
-    day, month = int(match.group(1)), int(match.group(2))
-    if not (1 <= month <= 12):
-        await update.message.reply_text("⚠️ Invalid month. Must be between 1 and 12.")
-        return
-    max_day = calendar.monthrange(2000, month)[1]
-    if not (1 <= day <= max_day):
-        await update.message.reply_text(f"⚠️ Invalid day for month {_MONTH_NAMES[month]}.")
-        return
-
-    name = _display_user(user)
-    await asyncio.to_thread(save_birthday, chat_id, user.id, name, day, month)
-    days_left = _days_until_birthday(day, month)
-    tag = "🎉 That's today!" if days_left == 0 else f"in {days_left} days"
-    await update.message.reply_text(
-        f"🎂 *Birthday saved!*\n"
-        f"*{_escape_md(name)}* — {day:02d} {_MONTH_NAMES[month]}  _{tag}_\n\n"
-        f"Use `/birthday` to see everyone's upcoming birthdays.",
-        parse_mode="Markdown",
-    )
+    await _parse_and_save_birthday(update, chat_id, user, text)
 
 
 # ── /addbirthday ──────────────────────────────────────────────────────────────
@@ -158,33 +151,7 @@ async def addbirthday_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return
 
-    match = re.fullmatch(r"(\d{1,2})[/\-.](\d{1,2})", text.strip())
-    if not match:
-        await update.message.reply_text(
-            "⚠️ Use the format `DD/MM`.\n_(e.g. `/addbirthday 25/12` for December 25)_",
-            parse_mode="Markdown",
-        )
-        return
-
-    day, month = int(match.group(1)), int(match.group(2))
-    if not (1 <= month <= 12):
-        await update.message.reply_text("⚠️ Invalid month. Must be between 1 and 12.")
-        return
-    max_day = calendar.monthrange(2000, month)[1]
-    if not (1 <= day <= max_day):
-        await update.message.reply_text(f"⚠️ Invalid day for month {_MONTH_NAMES[month]}.")
-        return
-
-    name = _display_user(user)
-    await asyncio.to_thread(save_birthday, chat_id, user.id, name, day, month)
-    days_left = _days_until_birthday(day, month)
-    tag = "🎉 That's today!" if days_left == 0 else f"in {days_left} days"
-    await update.message.reply_text(
-        f"🎂 *Birthday saved!*\n"
-        f"*{_escape_md(name)}* — {day:02d} {_MONTH_NAMES[month]}  _{tag}_\n\n"
-        f"Use `/birthday` to see everyone's upcoming birthdays.",
-        parse_mode="Markdown",
-    )
+    await _parse_and_save_birthday(update, chat_id, user, text)
 
 
 # ── /deletebirthday ───────────────────────────────────────────────────────────
@@ -217,7 +184,7 @@ async def deletebirthday_command(update: Update, context: ContextTypes.DEFAULT_T
             )
             return
 
-        deleted = await asyncio.to_thread(_remove_birthday, chat_id, target_uid)
+        deleted = await asyncio.to_thread(delete_birthday, chat_id, target_uid)
         if deleted:
             await update.message.reply_text(
                 f"🗑️ Birthday for *{_escape_md(target_mention)}* has been removed.",
@@ -229,7 +196,7 @@ async def deletebirthday_command(update: Update, context: ContextTypes.DEFAULT_T
                 parse_mode="Markdown",
             )
     else:
-        deleted = await asyncio.to_thread(_remove_birthday, chat_id, user.id)
+        deleted = await asyncio.to_thread(delete_birthday, chat_id, user.id)
         if deleted:
             await update.message.reply_text(
                 "🗑️ Your birthday has been removed.\n"
@@ -248,7 +215,6 @@ async def deletebirthday_command(update: Update, context: ContextTypes.DEFAULT_T
 
 async def birthday_check_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Runs daily at 00:01 MYT. Sends birthday greetings to each chat."""
-    today = _today()
     all_chats = await asyncio.to_thread(get_all_birthday_chats)
     for chat_id, bdays in all_chats.items():
         for uid_str, info in bdays.items():

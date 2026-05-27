@@ -179,3 +179,62 @@ def get_all_remind_jobs() -> dict:
     except Exception as e:
         logger.error("Redis get_all_remind_jobs error: %s", e)
         return {}
+
+
+# ── Remindall (group reminder) job persistence ────────────────────────────────
+# Fix 6: /remindall jobs are now persisted so they survive bot restarts.
+
+def _remindall_jobs_key(chat_id: int) -> str:
+    return f"remindall_jobs:{chat_id}"
+
+
+def save_remindall_job(chat_id: int, set_by: str, text: str, fire_at: float) -> str:
+    """Persist a group remind job. Returns a unique job_id string."""
+    job_id = os.urandom(4).hex()
+    key = _remindall_jobs_key(chat_id)
+    try:
+        jobs = _decode_list(redis.get(key))
+        jobs.append({
+            "job_id": job_id,
+            "set_by": set_by,
+            "text": text,
+            "fire_at": fire_at,
+        })
+        redis.set(key, json.dumps(jobs, separators=(",", ":")))
+        return job_id
+    except Exception as e:
+        logger.error("Redis remindall save error for chat %s: %s", chat_id, e)
+        return ""
+
+
+def delete_remindall_job(chat_id: int, job_id: str) -> None:
+    key = _remindall_jobs_key(chat_id)
+    try:
+        jobs = _decode_list(redis.get(key))
+        jobs = [j for j in jobs if j.get("job_id") != job_id]
+        redis.set(key, json.dumps(jobs, separators=(",", ":")))
+    except Exception as e:
+        logger.error("Redis remindall delete error for chat %s: %s", chat_id, e)
+
+
+def get_all_remindall_jobs() -> dict:
+    """Return {chat_id: [job_dicts]} for pending group reminders. Drops >10 min overdue."""
+    from stores._utils import _key_to_chat_id
+    try:
+        keys = redis.keys("remindall_jobs:*")
+        if not keys:
+            return {}
+        values = redis.mget(*keys)
+        cutoff = _time.time() - 10 * 60
+        result = {}
+        for key, raw in zip(keys, values):
+            chat_id = _key_to_chat_id(key)
+            if chat_id is None:
+                continue
+            valid = [j for j in _decode_list(raw) if j.get("fire_at", 0) > cutoff]
+            if valid:
+                result[chat_id] = valid
+        return result
+    except Exception as e:
+        logger.error("Redis get_all_remindall_jobs error: %s", e)
+        return {}

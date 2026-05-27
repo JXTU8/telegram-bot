@@ -50,7 +50,7 @@ from handlers.fun import (
 )
 from handlers.reminders import (
     remind_command, cancelremind_command, cancelremind_callback,
-    remindall_command, restore_remind_jobs,
+    remindall_command, restore_remind_jobs, restore_remindall_jobs,
 )
 from handlers.birthdays import (
     birthday_command, addbirthday_command, deletebirthday_command,
@@ -83,6 +83,7 @@ async def on_startup(app) -> None:
     await asyncio.to_thread(delete_old_fateboard_keys)
     await restore_jobs(app)
     await restore_remind_jobs(app)
+    await restore_remindall_jobs(app)   # Fix 6: restore persisted /remindall jobs
 
     # Schedule daily birthday check at 00:01 MYT
     midnight = datetime.now(TIMEZONE).replace(

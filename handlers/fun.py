@@ -8,6 +8,7 @@ wouldyourather, coinflip, 8ball, curse, bless, mvp, hot, toss, decide, poll.
 import asyncio
 import logging
 import random
+import time as _time
 from datetime import datetime
 
 from telegram import Update
@@ -39,6 +40,10 @@ logger = logging.getLogger(__name__)
 _POLL_MAX_OPTIONS = 10
 _POLL_MAX_QUESTION_LEN = 300
 _POLL_MAX_OPTION_LEN = 100
+
+# Fix 7: per-user cooldown to prevent poll spam (unskippable native polls).
+_POLL_COOLDOWNS: dict = {}          # (chat_id, user_id) -> monotonic timestamp
+_POLL_COOLDOWN_SECONDS: float = 30.0
 
 
 # ── Ship helpers ──────────────────────────────────────────────────────────────
@@ -476,6 +481,19 @@ async def decide_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 # ── /poll ─────────────────────────────────────────────────────────────────────
 
 async def poll_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Fix 7: rate limit — native polls can't be deleted by the bot once sent.
+    user_id  = update.effective_user.id
+    chat_id  = update.effective_chat.id
+    ck = (chat_id, user_id)
+    now = _time.monotonic()
+    remaining = _POLL_COOLDOWN_SECONDS - (now - _POLL_COOLDOWNS.get(ck, 0))
+    if remaining > 0:
+        await update.message.reply_text(
+            f"⚠️ Please wait {remaining:.0f}s before sending another poll."
+        )
+        return
+    _POLL_COOLDOWNS[ck] = now
+
     text = _arg_text(context)
     if not text or ":" not in text:
         await update.message.reply_text(

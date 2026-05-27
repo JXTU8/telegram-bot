@@ -171,14 +171,19 @@ async def luck_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     today_str = today.strftime("%Y-%m-%d")
     seed = str(target_user_id) if target_user_id else _normalize_target(target_name)
 
-    # Birthday override (own luck only)
-    if not checking_other and target_user_id:
+    # Birthday override — applies whenever we have the actual user ID (own or other).
+    # Fix 4: was incorrectly restricted to self-luck only; text_mention gives us
+    # the real user ID for others too, so the override should fire for them as well.
+    if target_user_id:
         bdays = await asyncio.to_thread(get_all_birthdays, update.effective_chat.id)
         bday = bdays.get(str(target_user_id))
         if bday and bday.get("day") == today.day and bday.get("month") == today.month:
             score = 100
             tier = "🎂 BIRTHDAY LEGEND"
             luck_msg = (
+                "It's their birthday! The universe has no choice but to comply. "
+                "Maximum luck, no exceptions. They earned this one."
+                if checking_other else
                 "It's your birthday. The universe has no choice but to comply. "
                 "Maximum luck, no exceptions. You earned this one."
             )
