@@ -18,7 +18,7 @@ from db import redis
 from stores.birthday_store import get_all_birthdays
 from stores.countdown_store import get_all_countdowns
 from stores.luck_store import get_fate_board, get_fate_streak
-from stores.mvp_store import get_user_mvp_stats
+from stores.mvp_store import get_user_mvp_stats, get_today_mvp, get_mvp_board
 from stores.quote_store import get_quote_count, get_user_quote_counts
 from stores.reminder_store import get_user_remind_jobs
 from stores.ship_store import get_top_ship_pairs, get_shipboard_reset_time
@@ -41,15 +41,17 @@ _SEEN_CACHE_MAX = 10_000      # evict oldest 10 % when this is exceeded
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "👋 *Welcome to Countdown Bot!*\n\n"
-        "I track multiple countdowns for your group and remind everyone daily.\n"
-        "I can also make decisions, check luck, set reminders and more!\n\n"
+        "I track countdowns, run luck checks, set reminders, host ships and more "
+        "— all from one group chat.\n\n"
         "➕ /addcountdown — add a new countdown\n"
         "📋 /listcountdown — see all active countdowns\n"
         "🎲 /choose — let me decide for you\n"
         "🍀 /luck — check your daily luck\n"
         "⏰ /remind — set a personal reminder\n"
         "🎂 /addbirthday — set your birthday\n"
-        "🎉 /help — see all commands",
+        "🏆 /leaderboard — combined group leaderboard\n"
+        "📋 /recap — today's group summary\n\n"
+        "💡 Use /help to browse *all 40+ commands* by category.",
         parse_mode="Markdown",
     )
 
@@ -103,7 +105,8 @@ HELP_PAGES = {
     ),
     "quotes": (
         "💬 *Quotes*\n\n"
-        "/quote — reply to any message to save it\n"
+        "/quote — show a random saved quote\n"
+        "/quote (reply) — save the replied message to the archive\n"
         "/quotes — browse saved quotes with prev/next\n"
         "/deletequote <number> — delete a quote (admins only)"
     ),
@@ -117,16 +120,21 @@ HELP_PAGES = {
         "/deletebirthday — delete your birthday\n"
         "/deletebirthday @user — delete someone's birthday (admins only)\n"
     ),
+    "summary": (
+        "📊 *Summary*\n\n"
+        "/leaderboard — combined luck, ship and MVP leaderboard\n"
+        "/recap — today's full group activity summary\n"
+        "/stats — group activity overview\n"
+        "/profile — your bot profile in this chat"
+    ),
     "other": (
         "⚙️ *Other*\n\n"
-        "/stats — group activity summary\n"
-        "/profile — your bot profile in this chat\n"
         "/cancel — cancel an active setup flow\n"
         "/help — show this menu"
     ),
 }
 
-_HELP_PAGE_ORDER = ["countdown", "decisions", "ai", "luck", "fun", "quotes", "reminders", "other"]
+_HELP_PAGE_ORDER = ["countdown", "decisions", "ai", "luck", "fun", "quotes", "reminders", "summary", "other"]
 _HELP_PAGE_LABELS = {
     "countdown": "⏱ Countdown",
     "decisions": "🎲 Decisions",
@@ -135,6 +143,7 @@ _HELP_PAGE_LABELS = {
     "fun": "🎉 Fun",
     "quotes": "💬 Quotes",
     "reminders": "⏰ Reminders",
+    "summary": "📊 Summary",
     "other": "⚙️ Other",
 }
 
@@ -178,6 +187,139 @@ async def help_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
     except Exception as e:
         logger.debug("help_callback edit skipped (message unchanged): %s", e)
+
+
+# ── /leaderboard ──────────────────────────────────────────────────────────────
+
+async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Combined snapshot: today's luck top 3, top ships, today's MVP + all-time top 3."""
+    chat_id = update.effective_chat.id
+    today_str = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
+
+    luck_board, pairs, today_mvp, mvp_board = await asyncio.gather(
+        asyncio.to_thread(get_fate_board, chat_id, today_str),
+        asyncio.to_thread(get_top_ship_pairs, chat_id, 3),
+        asyncio.to_thread(get_today_mvp, chat_id, today_str),
+        asyncio.to_thread(get_mvp_board, chat_id, 3),
+        return_exceptions=True,
+    )
+    for val in (luck_board, pairs, today_mvp, mvp_board):
+        if isinstance(val, Exception):
+            logger.error("leaderboard_command gather error: %s", val)
+
+    medals = ["🥇", "🥈", "🥉"]
+    lines = [f"🏆 *Group Leaderboard* — {today_str}\n"]
+
+    # ── Luck ─────────────────────────────────────────────────────────────────
+    lines.append("🍀 *Today's Luck*")
+    board = luck_board if isinstance(luck_board, dict) else {}
+    if board:
+        sorted_board = sorted(board.items(), key=lambda kv: kv[1]["score"], reverse=True)
+        for i, (_, item) in enumerate(sorted_board[:3], 1):
+            medal = medals[i - 1] if i <= 3 else f"{i}."
+            lines.append(
+                f"{medal} *{_escape_md(item['name'])}* — {item['tier']} `{item['score']}`"
+            )
+    else:
+        lines.append("_No checks yet today. Use /luck!_")
+
+    # ── Ships ─────────────────────────────────────────────────────────────────
+    lines.append("\n💞 *Top Ships \\(48 h\\)*")
+    ship_list = pairs if isinstance(pairs, list) else []
+    if ship_list:
+        for i, pair in enumerate(ship_list, 1):
+            medal = medals[i - 1] if i <= 3 else f"{i}."
+            a = _escape_md(pair["label_a"])
+            b = _escape_md(pair["label_b"])
+            lines.append(f"{medal} *{a}* × *{b}* `{pair['score']:.1f}%`")
+    else:
+        lines.append("_No ships yet. Use /ship!_")
+
+    # ── MVP ───────────────────────────────────────────────────────────────────
+    lines.append("\n🏆 *MVP*")
+    mvp = today_mvp if isinstance(today_mvp, dict) else {}
+    if mvp:
+        lines.append(f"Today: *{_escape_md(mvp.get('name', '?'))}*")
+    else:
+        lines.append("_No MVP yet today. Use /mvp!_")
+
+    board_rows = mvp_board if isinstance(mvp_board, list) else []
+    if board_rows:
+        lines.append("_All-time:_")
+        for i, row in enumerate(board_rows, 1):
+            medal = medals[i - 1] if i <= 3 else f"{i}."
+            name = _display_name_or_id(row.get("name", ""), row.get("user_id", "?"))
+            wins = int(row.get("wins", 0))
+            lines.append(f"{medal} *{_escape_md(name)}* — `{wins}` win{'s' if wins != 1 else ''}")
+
+    lines.append(
+        "\n_Use /luckboard · /shipboard · /mvpboard for full lists_"
+    )
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+# ── /recap ─────────────────────────────────────────────────────────────────────
+
+async def recap_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Today's group activity summary — MVP, luck extremes, top ship, quote count, active members."""
+    chat_id = update.effective_chat.id
+    today_str = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
+
+    luck_board, pairs, today_mvp, quote_count, seen = await asyncio.gather(
+        asyncio.to_thread(get_fate_board, chat_id, today_str),
+        asyncio.to_thread(get_top_ship_pairs, chat_id, 1),
+        asyncio.to_thread(get_today_mvp, chat_id, today_str),
+        asyncio.to_thread(get_quote_count, chat_id),
+        asyncio.to_thread(get_seen_users, chat_id),
+        return_exceptions=True,
+    )
+
+    board = luck_board if isinstance(luck_board, dict) else {}
+    ship_list = pairs if isinstance(pairs, list) else []
+    mvp = today_mvp if isinstance(today_mvp, dict) else {}
+    total_quotes = quote_count if isinstance(quote_count, int) else 0
+    seen_users = seen if isinstance(seen, dict) else {}
+
+    lines = [f"📋 *Daily Recap — {today_str}*\n"]
+
+    # MVP
+    if mvp:
+        lines.append(f"🏆 *MVP:* {_escape_md(mvp.get('name', '?'))}")
+    else:
+        lines.append("🏆 *MVP:* _Not crowned yet — use /mvp_")
+
+    # Luck extremes
+    if board:
+        sorted_board = sorted(board.items(), key=lambda kv: kv[1]["score"], reverse=True)
+        luckiest = sorted_board[0][1]
+        unluckiest = sorted_board[-1][1]
+        active = len(board)
+        lines.append(
+            f"🍀 *Luckiest:* {_escape_md(luckiest['name'])} — {luckiest['tier']} `{luckiest['score']}`"
+        )
+        if active > 1:
+            lines.append(
+                f"💀 *Unluckiest:* {_escape_md(unluckiest['name'])} — {unluckiest['tier']} `{unluckiest['score']}`"
+            )
+        lines.append(f"👥 *Luck checks today:* {active}")
+    else:
+        lines.append("🍀 *Luck:* _Nobody checked yet — use /luck_")
+
+    # Top ship
+    if ship_list:
+        p = ship_list[0]
+        a = _escape_md(p["label_a"])
+        b = _escape_md(p["label_b"])
+        lines.append(f"💞 *Top Ship:* {a} × {b} `{p['score']:.1f}%`")
+    else:
+        lines.append("💞 *Ships:* _None yet — use /ship_")
+
+    # Quotes + members
+    lines.append(f"💬 *Quotes saved:* {total_quotes} total")
+    lines.append(f"👤 *Members tracked:* {len(seen_users)}")
+
+    lines.append("\n_Run /leaderboard for the full rankings_")
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
 # ── /stats ────────────────────────────────────────────────────────────────────
@@ -388,7 +530,23 @@ async def seen_user_tracker(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    logger.exception("Unhandled Telegram update error", exc_info=context.error)
+    from telegram.error import Conflict, NetworkError, TimedOut
+
+    err = context.error
+
+    # Conflict fires during rolling deploys when the new instance starts before
+    # the old one has fully shut down. It resolves on its own — not a real error.
+    if isinstance(err, Conflict):
+        logger.warning("Conflict: duplicate bot instance detected (usually resolves after deploy): %s", err)
+        return
+
+    # Transient network hiccups — log at WARNING, not ERROR, so they don't
+    # look like bugs in dashboards/alerts.
+    if isinstance(err, (NetworkError, TimedOut)):
+        logger.warning("Transient network error (will retry): %s", err)
+        return
+
+    logger.exception("Unhandled Telegram update error", exc_info=err)
     message = getattr(update, "effective_message", None)
     if not message:
         return

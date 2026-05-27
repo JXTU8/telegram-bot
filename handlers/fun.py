@@ -180,6 +180,8 @@ async def ship_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             await update.message.reply_text(random.choice(SHIP_OWNER_BLOCK_LINES))
             return
     target_a, target_b = targets[0]["label"], targets[1]["label"]
+    # Sort the two names so /ship A B and /ship B A always produce the same
+    # deterministic daily score. This is intentional — pairs are canonical.
     normalized = sorted([_normalize_target(target_a), _normalize_target(target_b)])
     if normalized[0] == normalized[1]:
         await update.message.reply_text(
@@ -317,15 +319,18 @@ async def rank_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 # ── /truth, /dare, /wouldyourather ───────────────────────────────────────────
 
 async def truth_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(f"🧃 Truth\n{random.choice(TRUTH_QUESTIONS)}")
+    q = random.choice(TRUTH_QUESTIONS)
+    await update.message.reply_text(f"🧃 *Truth*\n\n{q}", parse_mode="Markdown")
 
 
 async def dare_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(f"🎬 Dare\n{random.choice(DARE_PROMPTS)}")
+    d = random.choice(DARE_PROMPTS)
+    await update.message.reply_text(f"🎬 *Dare*\n\n{d}", parse_mode="Markdown")
 
 
 async def would_you_rather_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(f"⚖️ Would You Rather\n{random.choice(WOULD_YOU_RATHER_PROMPTS)}")
+    q = random.choice(WOULD_YOU_RATHER_PROMPTS)
+    await update.message.reply_text(f"⚖️ *Would You Rather*\n\n{q}", parse_mode="Markdown")
 
 
 # ── /coinflip ─────────────────────────────────────────────────────────────────
@@ -335,7 +340,7 @@ async def coinflip_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await asyncio.sleep(1)
     result = random.choice(["Heads", "Tails"])
     icon = "🌕" if result == "Heads" else "🌑"
-    await msg.edit_text(f"🪙 Coinflip: {icon} {result}")
+    await msg.edit_text(f"🪙 *Coinflip*\n\n{icon} *{result}*", parse_mode="Markdown")
 
 
 # ── /8ball ────────────────────────────────────────────────────────────────────

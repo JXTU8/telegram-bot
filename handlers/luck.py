@@ -143,7 +143,11 @@ def _luck_result_text(target_name, tier, score, luck_msg,
     if day_note:
         parts.append(f"\n{day_note}")
     if checking_other:
-        parts.append("\n\n_They need to use /luck themselves to appear on /luckboard._")
+        # Always remind the invoker that the target must run /luck themselves
+        # for their score to appear on /luckboard.
+        parts.append("\n\n_⚠️ Their score won't appear on /luckboard until they run /luck themselves._")
+    else:
+        parts.append("\n\n_Scores reset daily at midnight MYT · /streak to track your run_")
     return "".join(parts)
 
 

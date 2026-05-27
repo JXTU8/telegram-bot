@@ -45,18 +45,26 @@ async def quote_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     replied = message.reply_to_message
     saved_by = _display_user(update.effective_user)
 
-    if replied and replied.from_user and replied.text:
-        author = _display_user(replied.from_user)
-        text = replied.text
-    elif replied and replied.from_user and not replied.text:
+    # No reply — show a random quote from the archive instead of a help message
+    if not replied:
+        quotes = await asyncio.to_thread(get_all_quotes, update.effective_chat.id)
+        if not quotes:
+            await message.reply_text(
+                "💬 No quotes saved yet!\n"
+                "Reply to any message with /quote to start the archive.",
+            )
+            return
+        index = random.randrange(len(quotes))
+        text, keyboard = _build_quote_page(update.effective_chat.id, quotes, index)
+        await message.reply_text(text, parse_mode="Markdown", reply_markup=keyboard)
+        return
+
+    if not replied.from_user or not replied.text:
         await message.reply_text("⚠️ Only text messages can be quoted. Reply to a text message with /quote.")
         return
-    else:
-        await message.reply_text(
-            "💬 *How to save a quote:*\nReply to any message with /quote to save it to the archive.",
-            parse_mode="Markdown",
-        )
-        return
+
+    author = _display_user(replied.from_user)
+    text = replied.text
 
     if not text:
         await message.reply_text("The quote can't be empty!")

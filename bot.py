@@ -23,7 +23,7 @@ from handlers.misc import (
     start_command, help_command, help_callback,
     stats_command, profile_command, status_command,
     seen_user_tracker, error_handler, conversation_timeout,
-    cancel_command,
+    cancel_command, leaderboard_command, recap_command,
 )
 from handlers.countdown import (
     add_countdown_start, received_name, received_date, received_time,
@@ -207,6 +207,8 @@ def main() -> None:
     app.add_handler(CommandHandler("mvpboard",        mvpboard_command))
     app.add_handler(CommandHandler("hot",             hot_command))
     app.add_handler(CommandHandler("stats",           stats_command))
+    app.add_handler(CommandHandler("leaderboard",     leaderboard_command))
+    app.add_handler(CommandHandler("recap",           recap_command))
     app.add_handler(CommandHandler("profile",         profile_command))
     app.add_handler(CommandHandler("status",          status_command))
     app.add_handler(CommandHandler("lucktest",        lucktest_command))
