@@ -44,7 +44,7 @@ def _get_fate_by_seed(seed: str):
     """Compute daily luck for any string seed (user_id str or normalised username)."""
     today_str = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
     rng = random.Random(f"{seed}:{today_str}")
-    extreme_roll = rng.randint(1, 30)
+    extreme_roll = rng.randint(1, 100)  # ~1% chance of extreme result (was 1/30 ≈ 3.3%)
     if extreme_roll == 1:
         if rng.random() < 0.5:
             return 999, "🌈 COSMICALLY CHOSEN", rng.choice(FATE_EXTREME_LUCKY_MESSAGES)
