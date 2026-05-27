@@ -224,7 +224,7 @@ async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         lines.append("_No checks yet today. Use /luck!_")
 
     # ── Ships ─────────────────────────────────────────────────────────────────
-    lines.append("\n💞 *Top Ships \\(48 h\\)*")
+    lines.append("\n💞 *Top Ships*")
     ship_list = pairs if isinstance(pairs, list) else []
     if ship_list:
         for i, pair in enumerate(ship_list, 1):
