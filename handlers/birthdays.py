@@ -96,43 +96,50 @@ async def _parse_and_save_birthday(
 
 async def birthday_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    /birthday DD/MM   — set your birthday (e.g. /birthday 25/12)
-    /birthday list    — show upcoming birthdays in this chat
+    /birthday            — show upcoming birthdays in this chat
+    /birthday list       — same as above
+    Use /addbirthday DD/MM to set your own birthday.
     """
     chat_id = update.effective_chat.id
-    user = update.effective_user
     text = _arg_text(context)
 
-    if not text or text.strip().lower() == "list":
-        bdays = await asyncio.to_thread(get_all_birthdays, chat_id)
-        if not bdays:
-            await update.message.reply_text(
-                "🎂 No birthdays saved yet!\n"
-                "Use `/birthday DD/MM` to register yours.\n"
-                "_(e.g. `/birthday 25/12` for December 25)_",
-                parse_mode="Markdown",
-            )
-            return
-        entries = []
-        for uid_str, info in bdays.items():
-            d, m = info.get("day", 1), info.get("month", 1)
-            name = info.get("name", uid_str)
-            days_left = _days_until_birthday(d, m)
-            entries.append((days_left, d, m, name))
-        entries.sort()
-        lines = ["🎂 *Upcoming Birthdays*\n"]
-        for days_left, d, m, name in entries:
-            if days_left == 0:
-                tag = "🎉 Today!"
-            elif days_left == 1:
-                tag = "Tomorrow!"
-            else:
-                tag = f"in {days_left} days"
-            lines.append(f"• *{_escape_md(name)}* — {d:02d} {_MONTH_NAMES[m]}  _{tag}_")
-        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    # If the user passed any argument that isn't "list", they probably meant
+    # /addbirthday. Redirect them so the two commands stay distinct.
+    if text and text.strip().lower() != "list":
+        await update.message.reply_text(
+            "💡 To *set* your birthday use `/addbirthday DD/MM`\n"
+            "_(e.g. `/addbirthday 25/12` for December 25)_\n\n"
+            "Use `/birthday` with no arguments to see upcoming birthdays.",
+            parse_mode="Markdown",
+        )
         return
 
-    await _parse_and_save_birthday(update, chat_id, user, text)
+    bdays = await asyncio.to_thread(get_all_birthdays, chat_id)
+    if not bdays:
+        await update.message.reply_text(
+            "🎂 No birthdays saved yet!\n"
+            "Use `/addbirthday DD/MM` to register yours.\n"
+            "_(e.g. `/addbirthday 25/12` for December 25)_",
+            parse_mode="Markdown",
+        )
+        return
+    entries = []
+    for uid_str, info in bdays.items():
+        d, m = info.get("day", 1), info.get("month", 1)
+        name = info.get("name", uid_str)
+        days_left = _days_until_birthday(d, m)
+        entries.append((days_left, d, m, name))
+    entries.sort()
+    lines = ["🎂 *Upcoming Birthdays*\n"]
+    for days_left, d, m, name in entries:
+        if days_left == 0:
+            tag = "🎉 Today!"
+        elif days_left == 1:
+            tag = "Tomorrow!"
+        else:
+            tag = f"in {days_left} days"
+        lines.append(f"• *{_escape_md(name)}* — {d:02d} {_MONTH_NAMES[m]}  _{tag}_")
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
 # ── /addbirthday ──────────────────────────────────────────────────────────────

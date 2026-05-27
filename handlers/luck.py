@@ -214,8 +214,15 @@ async def luck_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             lambda t: t.exception() and logger.warning("track_seen_user failed: %s", t.exception())
         )
 
+        old_streak, old_cat = await asyncio.to_thread(get_fate_streak, target_user_id)
         streak = await asyncio.to_thread(_update_streak_sync, target_user_id, today_str, tier_category)
-        if streak >= 2:
+
+        if old_streak >= 2 and streak == 1 and old_cat != "neutral":
+            broken_icon = "🔥" if old_cat == "lucky" else "💀"
+            streak_line = (
+                f"\n{broken_icon} *Your {old_streak}-day {old_cat} streak has ended.*"
+            )
+        elif streak >= 2:
             if tier_category == "lucky":
                 streak_line = f"\n🔥 *Lucky streak: {streak} days in a row!*"
             elif tier_category == "unlucky":
@@ -257,7 +264,8 @@ async def luckboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     )
     streak_map = {str(uid): result for uid, result in zip(user_ids, streak_results)}
     medals = ["🥇", "🥈", "🥉"]
-    lines = ["🍀 *Today's Luckboard*\n"]
+    total = len(board)
+    lines = [f"🍀 *Today's Luckboard* _({total} checked)_\n"]
     for i, (uid, item) in enumerate(sorted_items[:10], 1):
         rank_icon = medals[i - 1] if i <= 3 else f"{i}."
         s = item["score"]

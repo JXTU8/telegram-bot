@@ -7,6 +7,7 @@ handlers/misc.py
 import asyncio
 import logging
 import os
+import time as _time
 from datetime import datetime
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -15,6 +16,7 @@ from telegram.ext import ContextTypes, ConversationHandler
 from config import TIMEZONE
 from db import redis
 from stores.birthday_store import get_all_birthdays
+from stores.countdown_store import get_all_countdowns
 from stores.luck_store import get_fate_board, get_fate_streak
 from stores.mvp_store import get_user_mvp_stats
 from stores.quote_store import get_quote_count, get_user_quote_counts
@@ -25,6 +27,13 @@ from helpers import (
     _display_user, _escape_md, _delete_tracked,
     _display_name_or_id, owner_only,
 )
+
+logger = logging.getLogger(__name__)
+
+# ── Seen-user in-memory cache (Issue 25) ──────────────────────────────────────
+# Avoids a Redis read+write on every single message from a known user.
+_SEEN_CACHE: dict = {}        # (chat_id, user_id) -> monotonic timestamp
+_SEEN_CACHE_TTL = 3600        # 1 hour — only write to Redis if not seen within this window
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +122,7 @@ HELP_PAGES = {
         "⚙️ *Other*\n\n"
         "/stats — group activity summary\n"
         "/profile — your bot profile in this chat\n"
-        "/cancel — cancel the current flow\n"
+        "/cancel — cancel an active setup flow\n"
         "/help — show this menu"
     ),
 }
@@ -178,15 +187,17 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     chat_id = update.effective_chat.id
     today_str = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
 
-    quote_count, seen_users, top_pairs, board = await asyncio.gather(
+    quote_count, seen_users, top_pairs, board, countdowns = await asyncio.gather(
         asyncio.to_thread(get_quote_count, chat_id),
         asyncio.to_thread(get_seen_users, chat_id),
         asyncio.to_thread(get_top_ship_pairs, chat_id, 1),
         asyncio.to_thread(get_fate_board, chat_id, today_str),
+        asyncio.to_thread(get_all_countdowns, chat_id),
     )
     reset_secs = await asyncio.to_thread(get_shipboard_reset_time)
 
     member_count = len(seen_users)
+    countdown_count = len(countdowns)
     reset_h = reset_secs // 3600
     reset_m = (reset_secs % 3600) // 60
 
@@ -208,6 +219,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "📊 *Group Stats*\n",
         f"👥 Members tracked: *{member_count}*",
         f"💬 Quotes saved: *{quote_count}*",
+        f"⏱ Active countdowns: *{countdown_count}*",
         f"\n🍀 *Today's Luck*",
         f"Checks: *{luck_count}*",
         f"Luckiest: {lucky_line}",
@@ -265,10 +277,21 @@ async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     seen = await asyncio.to_thread(get_seen_users, chat_id)
     seen_name = _display_name_or_id(seen.get(str(user_id), name), user_id)
 
+    # Lazy import to avoid circular-import at startup
+    from handlers.luck import _get_fate
+    luck_score, luck_tier, _ = _get_fate(user_id)
+    if luck_score == 999:
+        luck_display = "999 ⚡ MAXIMUM"
+    elif luck_score == -999:
+        luck_display = "-999 💀 MINIMUM"
+    else:
+        luck_display = f"{luck_score}/100"
+
     await update.message.reply_text(
         "\n".join([
             f"👤 *Profile — {_escape_md(seen_name)}*",
-            f"🍀 Luck streak: *{_escape_md(streak_line)}*",
+            f"🍀 Today's luck: *{_escape_md(luck_tier)}* (`{luck_display}`)",
+            f"📈 Luck streak: *{_escape_md(streak_line)}*",
             f"🏆 MVP wins: *{mvp_wins}*",
             f"Last MVP: *{_escape_md(last_mvp)}*",
             f"⏰ Pending reminders: *{len(reminders)}*",
@@ -325,11 +348,27 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
+# ── /cancel (standalone — only fires when not inside a conversation) ──────────
+
+async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Friendly reply when /cancel is typed outside of any active conversation."""
+    await update.message.reply_text(
+        "ℹ️ No active flow to cancel.\n"
+        "Use /help to see all available commands."
+    )
+
+
 async def seen_user_tracker(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     chat = update.effective_chat
     if not user or not chat or user.is_bot:
         return
+    # Only write to Redis when the user hasn't been seen within the last hour.
+    cache_key = (chat.id, user.id)
+    now = _time.monotonic()
+    if now - _SEEN_CACHE.get(cache_key, 0) < _SEEN_CACHE_TTL:
+        return
+    _SEEN_CACHE[cache_key] = now
     await asyncio.to_thread(track_seen_user, chat.id, user.id, _display_user(user))
 
 

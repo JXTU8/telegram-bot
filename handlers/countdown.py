@@ -200,7 +200,7 @@ async def received_time(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     if not name or not target_date:
         logger.error("received_time: missing user_data keys. name=%s date=%s", name, target_date)
         await update.message.reply_text(
-            "⚠️ Something went wrong — please start again with /addcountdown."
+            "❌ Something went wrong — please start again with /addcountdown."
         )
         context.user_data.clear()
         return ConversationHandler.END
@@ -303,7 +303,7 @@ async def received_edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE
     field = context.user_data.get("edit_field")
     if not name or not field:
         await update.message.reply_text(
-            "⚠️ Something went wrong — please start again with /editcountdown."
+            "❌ Something went wrong — please start again with /editcountdown."
         )
         context.user_data.clear()
         return ConversationHandler.END
@@ -388,6 +388,26 @@ async def list_countdown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     today = _today()
     seen = await asyncio.to_thread(get_seen_users, chat_id)
+
+    # Issue 23: backfill codes for legacy countdowns that pre-date the code system
+    needs_backfill = [n for n, e in countdowns.items() if not e.get("code")]
+    for bname in needs_backfill:
+        e = countdowns[bname]
+        try:
+            td = date.fromisoformat(e["target_date"])
+            new_code = await asyncio.to_thread(
+                add_countdown, chat_id, bname, td,
+                e.get("reminder_hour", DEFAULT_REMINDER_HOUR),
+                e.get("reminder_minute", DEFAULT_REMINDER_MINUTE),
+                e.get("created_by", 0),
+            )
+            countdowns[bname]["code"] = new_code
+            logger.info(
+                "list_countdown: backfilled code '%s' for '%s' in chat %s",
+                new_code, bname, chat_id,
+            )
+        except Exception as ex:
+            logger.warning("list_countdown: backfill failed for '%s': %s", bname, ex)
 
     def _safe_sort_key(kv):
         try:

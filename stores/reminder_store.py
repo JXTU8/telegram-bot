@@ -158,11 +158,17 @@ def get_remind_job(chat_id: int, user_id: int, job_id: str) -> dict:
 def get_all_remind_jobs() -> dict:
     """
     Return {chat_id: [job_dicts]} for all chats with pending remind jobs.
-    Drops jobs more than 10 minutes overdue. Uses mget for one round-trip.
+    Drops jobs more than 10 minutes overdue. Uses SCAN + mget.
     """
     from stores._utils import _key_to_chat_id
     try:
-        keys = redis.keys("remind_jobs:*")
+        keys = []
+        cursor = 0
+        while True:
+            cursor, batch = redis.scan(cursor, match="remind_jobs:*", count=100)
+            keys.extend(batch)
+            if cursor == 0:
+                break
         if not keys:
             return {}
         values = redis.mget(*keys)
@@ -221,7 +227,13 @@ def get_all_remindall_jobs() -> dict:
     """Return {chat_id: [job_dicts]} for pending group reminders. Drops >10 min overdue."""
     from stores._utils import _key_to_chat_id
     try:
-        keys = redis.keys("remindall_jobs:*")
+        keys = []
+        cursor = 0
+        while True:
+            cursor, batch = redis.scan(cursor, match="remindall_jobs:*", count=100)
+            keys.extend(batch)
+            if cursor == 0:
+                break
         if not keys:
             return {}
         values = redis.mget(*keys)

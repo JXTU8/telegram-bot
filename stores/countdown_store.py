@@ -108,7 +108,13 @@ def get_countdown_creator(chat_id: int, name: str) -> Optional[int]:
 def get_all_chats() -> dict:
     """Return all countdowns across all chats (used to restore reminder jobs on startup)."""
     try:
-        keys = redis.keys("countdowns:*")
+        keys = []
+        cursor = 0
+        while True:
+            cursor, batch = redis.scan(cursor, match="countdowns:*", count=100)
+            keys.extend(batch)
+            if cursor == 0:
+                break
         if not keys:
             return {}
         values = redis.mget(*keys)

@@ -23,6 +23,7 @@ from handlers.misc import (
     start_command, help_command, help_callback,
     stats_command, profile_command, status_command,
     seen_user_tracker, error_handler, conversation_timeout,
+    cancel_command,
 )
 from handlers.countdown import (
     add_countdown_start, received_name, received_date, received_time,
@@ -158,6 +159,7 @@ def main() -> None:
     # ── Commands ──────────────────────────────────────────────────────────────
     app.add_handler(CommandHandler("start",           start_command))
     app.add_handler(CommandHandler("help",            help_command))
+    app.add_handler(CommandHandler("cancel",          cancel_command))   # standalone; conv fallbacks take priority
     app.add_handler(CommandHandler("ask",             ask_command))
     app.add_handler(CommandHandler("listcountdown",   list_countdown))
     app.add_handler(CommandHandler("removecountdown", remove_countdown_cmd))

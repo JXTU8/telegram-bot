@@ -58,10 +58,16 @@ def delete_birthday(chat_id: int, user_id: int) -> bool:
 def get_all_birthday_chats() -> dict:
     """
     Return {chat_id: {user_id_str: {name, day, month}}} across all chats.
-    Uses mget for a single Redis round-trip.
+    Uses SCAN (non-blocking) + mget for efficiency.
     """
     try:
-        keys = redis.keys("birthdays:*")
+        keys = []
+        cursor = 0
+        while True:
+            cursor, batch = redis.scan(cursor, match="birthdays:*", count=100)
+            keys.extend(batch)
+            if cursor == 0:
+                break
         if not keys:
             return {}
         values = redis.mget(*keys)

@@ -28,7 +28,13 @@ def _lb_key(chat_id: int, date_str: str) -> str:
 def delete_old_fateboard_keys() -> int:
     """Delete all legacy fateboard:* keys. Called once on startup."""
     try:
-        keys = redis.keys("fateboard:*")
+        keys = []
+        cursor = 0
+        while True:
+            cursor, batch = redis.scan(cursor, match="fateboard:*", count=100)
+            keys.extend(batch)
+            if cursor == 0:
+                break
         if not keys:
             return 0
         redis.delete(*keys)
