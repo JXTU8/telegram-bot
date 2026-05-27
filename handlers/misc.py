@@ -529,19 +529,25 @@ async def seen_user_tracker(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     await asyncio.to_thread(track_seen_user, chat.id, user.id, _display_user(user))
 
 
+_last_conflict_log: float = 0.0
+_CONFLICT_LOG_COOLDOWN = 60.0  # log at most once per minute
+
+
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    global _last_conflict_log
     from telegram.error import Conflict, NetworkError, TimedOut
 
     err = context.error
 
-    # Conflict fires during rolling deploys when the new instance starts before
-    # the old one has fully shut down. It resolves on its own — not a real error.
     if isinstance(err, Conflict):
-        logger.warning("Conflict: duplicate bot instance detected (usually resolves after deploy): %s", err)
+        now = _time.monotonic()
+        if now - _last_conflict_log >= _CONFLICT_LOG_COOLDOWN:
+            logger.warning(
+                "Conflict: duplicate bot instance detected (resolves after deploy finishes)"
+            )
+            _last_conflict_log = now
         return
 
-    # Transient network hiccups — log at WARNING, not ERROR, so they don't
-    # look like bugs in dashboards/alerts.
     if isinstance(err, (NetworkError, TimedOut)):
         logger.warning("Transient network error (will retry): %s", err)
         return
