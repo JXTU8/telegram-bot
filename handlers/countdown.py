@@ -419,10 +419,14 @@ async def list_countdown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     # Fix 5: auto-remove countdowns that are overdue (negative days) so stale
     # entries don't pile up between daily reminder fires.
-    stale_names = [
-        name for name, entry in sorted_entries
-        if (date.fromisoformat(entry.get("target_date", str(today))) - today).days < 0
-    ]
+    # Use a safe helper — fromisoformat() raises ValueError on malformed strings.
+    def _days_left_safe(entry):
+        try:
+            return (date.fromisoformat(entry.get("target_date", "")) - today).days
+        except ValueError:
+            return 0  # treat malformed date as not overdue
+
+    stale_names = [name for name, entry in sorted_entries if _days_left_safe(entry) < 0]
     for stale_name in stale_names:
         await asyncio.to_thread(remove_countdown, chat_id, stale_name)
         jname = _job_name(chat_id, stale_name)

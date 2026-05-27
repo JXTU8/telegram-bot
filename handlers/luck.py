@@ -84,15 +84,28 @@ def _score_display(score: int) -> str:
         return "999 ⚡ MAXIMUM"
     if score == -999:
         return "-999 💀 MINIMUM"
+    if score == _BIRTHDAY_SCORE:
+        return "🎂 MAX"
     filled = round(max(0, min(score, 100)) / 10)
     bar = "█" * filled + "░" * (10 - filled)
     return f"{score}/100  [{bar}]"
 
 
+_BIRTHDAY_SCORE = 101  # sentinel — outside 0-100 range, never in _SPECIAL_SCORE_CASES
+
+
 def _apply_special_luck(score, tier, luck_msg, target_name, today, seed=""):
-    """Apply brainrot special cases on top of the base luck result."""
+    """Apply brainrot special cases on top of the base luck result.
+
+    Birthday overrides (score == _BIRTHDAY_SCORE) are always preserved —
+    day specials like New Year cannot clobber a birthday.
+    """
     day_note = ""
     is_april_fools = False
+
+    # Birthday takes total priority — skip all day/score overrides
+    if score == _BIRTHDAY_SCORE:
+        return score, tier, luck_msg, day_note, is_april_fools
 
     # New Year (Jan 1) — always max luck
     if today.month == 1 and today.day == 1:
@@ -107,7 +120,7 @@ def _apply_special_luck(score, tier, luck_msg, target_name, today, seed=""):
     if today.month == 4 and today.day == 1:
         is_april_fools = True
 
-    # Score-based specials
+    # Score-based specials (only for normal 0-100 scores)
     if score in _SPECIAL_SCORE_CASES and score not in (999, -999):
         tier, luck_msg = _SPECIAL_SCORE_CASES[score]
 
@@ -178,7 +191,7 @@ async def luck_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         bdays = await asyncio.to_thread(get_all_birthdays, update.effective_chat.id)
         bday = bdays.get(str(target_user_id))
         if bday and bday.get("day") == today.day and bday.get("month") == today.month:
-            score = 100
+            score = _BIRTHDAY_SCORE
             tier = "🎂 BIRTHDAY LEGEND"
             luck_msg = (
                 "It's their birthday! The universe has no choice but to comply. "
@@ -194,7 +207,7 @@ async def luck_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     streak_line = ""
     if not checking_other:
-        if score >= 65 or score == 999:
+        if score >= 65 or score in (999, _BIRTHDAY_SCORE):
             tier_category = "lucky"
         elif score <= 35 or score == -999:
             tier_category = "unlucky"

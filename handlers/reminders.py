@@ -102,7 +102,7 @@ async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
 
-    reminder_text = re.sub(r"^to\b\s*", "", text[match.end():].strip())
+    reminder_text = re.sub(r"^to\b\s*", "", text[match.end():].strip(), flags=re.IGNORECASE)
     if not reminder_text:
         reminder_text = "You asked me to remind you of something!"
 
@@ -274,21 +274,22 @@ async def remindall_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await update.message.reply_text("⚠️ Maximum reminder time is 1 year.")
         return
 
-    reminder_text = re.sub(r"^to\b\s*", "", text[match.end():].strip())
+    reminder_text = re.sub(r"^to\b\s*", "", text[match.end():].strip(), flags=re.IGNORECASE)
     if not reminder_text:
         reminder_text = "Group reminder!"
 
     chat_id = update.effective_chat.id
-    set_by = _escape_md(_display_user(user))
+    set_by_raw = _display_user(user)                  # store raw — escape at display time
+    set_by_safe = _escape_md(set_by_raw)
     reminder_text_safe = _escape_md(reminder_text)
 
     fire_at = time.time() + seconds
-    job_id = await asyncio.to_thread(save_remindall_job, chat_id, set_by, reminder_text, fire_at)
+    job_id = await asyncio.to_thread(save_remindall_job, chat_id, set_by_raw, reminder_text, fire_at)
 
     async def _fire_group(ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await ctx.bot.send_message(
             chat_id=chat_id,
-            text=f"📢 *Group Reminder* (set by {set_by})\n\n{reminder_text_safe}",
+            text=f"📢 *Group Reminder* (set by {set_by_safe})\n\n{reminder_text_safe}",
             parse_mode="Markdown",
         )
         if job_id:
@@ -354,7 +355,7 @@ async def restore_remindall_jobs(app) -> None:
         for job in jobs:
             delay = max(5.0, job["fire_at"] - now)
             job_id  = job["job_id"]
-            set_by  = job["set_by"]
+            set_by  = _escape_md(job["set_by"])   # raw in Redis, escape here for Markdown
             text    = job["text"]
             text_safe = _escape_md(text)
 

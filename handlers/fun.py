@@ -44,6 +44,7 @@ _POLL_MAX_OPTION_LEN = 100
 # Fix 7: per-user cooldown to prevent poll spam (unskippable native polls).
 _POLL_COOLDOWNS: dict = {}          # (chat_id, user_id) -> monotonic timestamp
 _POLL_COOLDOWN_SECONDS: float = 30.0
+_POLL_COOLDOWNS_MAX = 5_000         # evict oldest entries beyond this size
 
 
 # ── Ship helpers ──────────────────────────────────────────────────────────────
@@ -492,6 +493,10 @@ async def poll_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             f"⚠️ Please wait {remaining:.0f}s before sending another poll."
         )
         return
+    if len(_POLL_COOLDOWNS) >= _POLL_COOLDOWNS_MAX:
+        evict = _POLL_COOLDOWNS_MAX // 10
+        for old_key in list(_POLL_COOLDOWNS)[:evict]:
+            del _POLL_COOLDOWNS[old_key]
     _POLL_COOLDOWNS[ck] = now
 
     text = _arg_text(context)

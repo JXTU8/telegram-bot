@@ -4,6 +4,7 @@ handlers/ai.py
 Groq AI client, Serper web search, /ask command, and /choose flow.
 Other handlers that need AI (roast, 8ball, hot…) import _call_groq_fun from here.
 """
+from __future__ import annotations
 
 import asyncio
 import logging
@@ -28,6 +29,7 @@ logger = logging.getLogger(__name__)
 # ── Groq client ───────────────────────────────────────────────────────────────
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+GROQ_MODEL   = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 if GROQ_API_KEY:
     groq_client = Groq(api_key=GROQ_API_KEY)
     logger.info("Groq AI ready.")
@@ -116,7 +118,7 @@ def _search_web(query: str) -> str:
 def _groq_complete(messages: list, max_tokens: int = 1024, temperature: float = 0.7) -> str:
     """Single low-level call to Groq. Shared by all public helpers."""
     chat = groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model=GROQ_MODEL,
         messages=messages,
         max_tokens=max_tokens,
         temperature=temperature,
@@ -162,8 +164,9 @@ def _call_groq_fun(prompt: str) -> str:
 
 # ── Fix 9: per-user ask rate limiting ────────────────────────────────────────
 
-_ASK_COOLDOWNS: dict = {}          # user_id -> monotonic timestamp of last ask
-_ASK_COOLDOWN_SECONDS: float = 3.0 # minimum gap between AI calls per user
+_ASK_COOLDOWNS: dict = {}           # user_id -> monotonic timestamp of last ask
+_ASK_COOLDOWN_SECONDS: float = 3.0  # minimum gap between AI calls per user
+_ASK_COOLDOWNS_MAX = 5_000          # evict oldest entries beyond this size
 
 
 def _ask_on_cooldown(user_id: int) -> float:
@@ -173,6 +176,11 @@ def _ask_on_cooldown(user_id: int) -> float:
 
 
 def _set_ask_cooldown(user_id: int) -> None:
+    if len(_ASK_COOLDOWNS) >= _ASK_COOLDOWNS_MAX:
+        # Evict the oldest 10 % (dict preserves insertion order in Py 3.7+)
+        evict = _ASK_COOLDOWNS_MAX // 10
+        for k in list(_ASK_COOLDOWNS)[:evict]:
+            del _ASK_COOLDOWNS[k]
     _ASK_COOLDOWNS[user_id] = time.monotonic()
 
 

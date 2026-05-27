@@ -81,10 +81,20 @@ logger = logging.getLogger(__name__)
 
 async def on_startup(app) -> None:
     """Runs once after the bot connects. Restores all persistent jobs from Redis."""
-    await asyncio.to_thread(delete_old_fateboard_keys)
-    await restore_jobs(app)
-    await restore_remind_jobs(app)
-    await restore_remindall_jobs(app)   # Fix 6: restore persisted /remindall jobs
+    try:
+        await asyncio.to_thread(delete_old_fateboard_keys)
+    except Exception as e:
+        logger.error("on_startup: delete_old_fateboard_keys failed: %s", e)
+
+    for restore_fn, label in [
+        (lambda: restore_jobs(app),          "countdown jobs"),
+        (lambda: restore_remind_jobs(app),   "remind jobs"),
+        (lambda: restore_remindall_jobs(app), "remindall jobs"),
+    ]:
+        try:
+            await restore_fn()
+        except Exception as e:
+            logger.error("on_startup: restoring %s failed: %s", label, e)
 
     # Schedule daily birthday check at 00:01 MYT
     midnight = datetime.now(TIMEZONE).replace(

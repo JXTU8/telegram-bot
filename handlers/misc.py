@@ -34,8 +34,7 @@ logger = logging.getLogger(__name__)
 # Avoids a Redis read+write on every single message from a known user.
 _SEEN_CACHE: dict = {}        # (chat_id, user_id) -> monotonic timestamp
 _SEEN_CACHE_TTL = 3600        # 1 hour — only write to Redis if not seen within this window
-
-logger = logging.getLogger(__name__)
+_SEEN_CACHE_MAX = 10_000      # evict oldest 10 % when this is exceeded
 
 # ── /start ────────────────────────────────────────────────────────────────────
 
@@ -187,13 +186,23 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     chat_id = update.effective_chat.id
     today_str = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
 
-    quote_count, seen_users, top_pairs, board, countdowns = await asyncio.gather(
+    results = await asyncio.gather(
         asyncio.to_thread(get_quote_count, chat_id),
         asyncio.to_thread(get_seen_users, chat_id),
         asyncio.to_thread(get_top_ship_pairs, chat_id, 1),
         asyncio.to_thread(get_fate_board, chat_id, today_str),
         asyncio.to_thread(get_all_countdowns, chat_id),
+        return_exceptions=True,
     )
+    quote_count  = results[0] if not isinstance(results[0], Exception) else 0
+    seen_users   = results[1] if not isinstance(results[1], Exception) else {}
+    top_pairs    = results[2] if not isinstance(results[2], Exception) else []
+    board        = results[3] if not isinstance(results[3], Exception) else {}
+    countdowns   = results[4] if not isinstance(results[4], Exception) else {}
+    for i, r in enumerate(results):
+        if isinstance(r, Exception):
+            logger.error("stats_command gather[%s] failed: %s", i, r)
+
     reset_secs = await asyncio.to_thread(get_shipboard_reset_time)
 
     member_count = len(seen_users)
@@ -368,6 +377,12 @@ async def seen_user_tracker(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     now = _time.monotonic()
     if now - _SEEN_CACHE.get(cache_key, 0) < _SEEN_CACHE_TTL:
         return
+    # Evict oldest 10 % of entries when the cache grows too large.
+    if len(_SEEN_CACHE) >= _SEEN_CACHE_MAX:
+        evict_count = _SEEN_CACHE_MAX // 10
+        for old_key in list(_SEEN_CACHE)[:evict_count]:
+            del _SEEN_CACHE[old_key]
+        logger.debug("_SEEN_CACHE evicted %s entries (was at cap)", evict_count)
     _SEEN_CACHE[cache_key] = now
     await asyncio.to_thread(track_seen_user, chat.id, user.id, _display_user(user))
 

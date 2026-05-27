@@ -29,6 +29,11 @@ def _gen_code(existing_codes: set) -> str:
         code = "".join(_random.choices(_CODE_CHARS, k=3))
         if code not in existing_codes:
             return code
+    # 3-char space exhausted (36^3 = 46 656 combos) — fall back to 4 chars
+    logger.warning(
+        "_gen_code: exhausted 200 attempts on 3-char codes (%d existing), falling back to 4-char",
+        len(existing_codes),
+    )
     return "".join(_random.choices(_CODE_CHARS, k=4))
 
 
