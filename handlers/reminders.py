@@ -2,20 +2,30 @@
 handlers/reminders.py
 ─────────────────────
 /remind, /cancelremind, /remindall, and restore_remind_jobs on startup.
+
+Fix 7:  Natural language time parsing via Groq AI when the fast regex fails.
+        /remind 1h  → regex path, zero AI cost
+        /remind tmr 3pm → AI path, parses to seconds + readable label
+Fix 14: restore_remind_jobs now fires overdue jobs with an apology rather
+        than silently dropping them when the bot was offline.
 """
 
 import asyncio
+import json as _json
 import logging
 import re
 import time
 
+from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
+from config import TIMEZONE
 from stores.reminder_store import (
     increment_remind_count, decrement_remind_count,
     save_remind_job, delete_remind_job, try_claim_remind_job,
     get_user_remind_jobs, get_remind_job, get_all_remind_jobs,
+    get_all_remind_jobs_for_restore,
     save_remindall_job, delete_remindall_job, get_all_remindall_jobs,
 )
 from helpers import _display_user, _arg_text, _is_chat_admin, _is_owner, _escape_md
@@ -47,6 +57,63 @@ def _parse_remind_seconds(unit_str: str) -> int:
     return 60
 
 
+# ── Fix 7: AI natural-language time parser ────────────────────────────────────
+
+async def _parse_time_with_ai(text: str) -> tuple:
+    """
+    Use Groq to parse a natural language reminder string.
+    Called only when the fast _REMIND_RE regex fails to match.
+
+    Returns (seconds: int, readable: str, reminder_text: str)
+         or (None, None, None) if the AI cannot resolve a valid future time.
+
+    The system prompt injects the current MYT date/time so words like
+    "tmr", "tonight", "next friday", "3pm" resolve correctly.
+    """
+    try:
+        from handlers.ai import groq_client, _groq_complete
+    except ImportError:
+        return None, None, None
+    if not groq_client:
+        return None, None, None
+
+    now = datetime.now(TIMEZONE)
+    system = (
+        "You are a reminder time parser for a Telegram bot. "
+        f"Current date and time: {now.strftime('%A %d %B %Y, %H:%M')} MYT (UTC+8). "
+        "Given a reminder request, extract three things:\n"
+        "  1. How many seconds from NOW until the reminder should fire (integer).\n"
+        "  2. A short human-readable time string (e.g. 'tomorrow at 3:00 PM').\n"
+        "  3. The reminder message with the time expression removed.\n\n"
+        "Return ONLY a JSON object — no markdown fences, no extra text:\n"
+        '{"seconds": <int>, "readable": "<string>", "reminder_text": "<string>"}\n\n'
+        'If the time expression is ambiguous or cannot be resolved to a positive '
+        'future value, return exactly: {"seconds": null}'
+    )
+    try:
+        raw = await asyncio.to_thread(
+            _groq_complete,
+            [
+                {"role": "system", "content": system},
+                {"role": "user",   "content": text},
+            ],
+            150,  # max_tokens — short structured response
+            0.1,  # low temperature for deterministic parsing
+        )
+        # Strip accidental markdown fences if the model ignores the instruction
+        cleaned = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+        data = _json.loads(cleaned)
+        seconds = data.get("seconds")
+        if seconds is None or not isinstance(seconds, (int, float)) or seconds <= 0:
+            return None, None, None
+        readable      = str(data.get("readable") or "")
+        reminder_text = str(data.get("reminder_text") or text)
+        return int(seconds), readable, reminder_text
+    except Exception as e:
+        logger.warning("AI time parse failed for %r: %s", text, e)
+        return None, None, None
+
+
 # ── /remind ───────────────────────────────────────────────────────────────────
 
 async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -57,32 +124,56 @@ async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             "`/remind 10m take a break`\n"
             "`/remind 30s check on something`\n"
             "`/remind 2h submit the report`\n\n"
-            "Supported units: `s` `sec` `seconds` · `m` `min` `minutes` · `h` `hr` `hours`",
+            "✨ *Natural language also works:*\n"
+            "`/remind tmr 3pm call mum`\n"
+            "`/remind tonight 9pm movie`\n"
+            "`/remind next monday submit report`\n\n"
+            "Fast units: `s` `sec` · `m` `min` · `h` `hr` `hours`",
             parse_mode="Markdown",
         )
         return
 
+    # ── Fast path: standard time format — no AI call ──────────────────────────
     match = _REMIND_RE.search(text)
-    if not match:
-        await update.message.reply_text(
-            "⚠️ Couldn't parse the time. Try:\n"
-            "`/remind 10m take a break`\n`/remind 2h check dinner`\n`/remind 30sec drink water`",
-            parse_mode="Markdown",
-        )
-        return
+    if match:
+        amount   = int(match.group(1))
+        unit_str = match.group(2)
+        per_unit = _parse_remind_seconds(unit_str)
+        seconds  = amount * per_unit
+        if per_unit == 1:
+            label = f"{amount} second{'s' if amount != 1 else ''}"
+        elif per_unit == 60:
+            label = f"{amount} minute{'s' if amount != 1 else ''}"
+        else:
+            label = f"{amount} hour{'s' if amount != 1 else ''}"
+        reminder_text = re.sub(r"^to\b\s*", "", text[match.end():].strip(), flags=re.IGNORECASE)
+        if not reminder_text:
+            reminder_text = "You asked me to remind you of something!"
 
-    amount = int(match.group(1))
-    unit_str = match.group(2)
-    per_unit = _parse_remind_seconds(unit_str)
-    seconds = amount * per_unit
-
-    if per_unit == 1:
-        label = f"{amount} second{'s' if amount != 1 else ''}"
-    elif per_unit == 60:
-        label = f"{amount} minute{'s' if amount != 1 else ''}"
     else:
-        label = f"{amount} hour{'s' if amount != 1 else ''}"
+        # ── AI path: natural language time expression ─────────────────────────
+        thinking_msg = await update.message.reply_text("🤖 Figuring out your reminder time...")
+        ai_seconds, ai_readable, ai_reminder = await _parse_time_with_ai(text)
+        try:
+            await thinking_msg.delete()
+        except Exception:
+            pass
 
+        if ai_seconds is None:
+            await update.message.reply_text(
+                "⚠️ Couldn't parse the time from that. Try:\n"
+                "`/remind 10m take a break`\n"
+                "`/remind 2h check dinner`\n\n"
+                "Or natural language: `/remind tmr 3pm call mum`",
+                parse_mode="Markdown",
+            )
+            return
+
+        seconds       = ai_seconds
+        label         = ai_readable or f"{seconds} seconds"
+        reminder_text = ai_reminder or text
+
+    # ── Shared validation ─────────────────────────────────────────────────────
     if seconds < 5:
         await update.message.reply_text("⚠️ Minimum reminder time is 5 seconds.")
         return
@@ -102,16 +193,12 @@ async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
 
-    reminder_text = re.sub(r"^to\b\s*", "", text[match.end():].strip(), flags=re.IGNORECASE)
-    if not reminder_text:
-        reminder_text = "You asked me to remind you of something!"
-
-    user = update.effective_user
-    chat_id = update.effective_chat.id
+    user         = update.effective_user
+    chat_id      = update.effective_chat.id
     user_mention = user.mention_html() if user else "Hey"
 
     fire_at = time.time() + seconds
-    job_id = await asyncio.to_thread(
+    job_id  = await asyncio.to_thread(
         save_remind_job, chat_id, user_id, user_mention, reminder_text, fire_at
     )
     if not job_id:
@@ -124,13 +211,10 @@ async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         _cid=chat_id, _jid=job_id, _uid=user_id,
         _mention=user_mention, _text=reminder_text,
     ) -> None:
-        # Atomically claim this job — prevents double-fire on rapid restarts
         claimed = await asyncio.to_thread(try_claim_remind_job, _jid)
         if not claimed:
             logger.info("Remind job %s already claimed by another scheduler, skipping.", _jid)
             return
-        # Verify the job is still in Redis (user may have cancelled it).
-        # At fire time, fire_at is usually <= now, so pending-only lookups skip it.
         existing = await asyncio.to_thread(get_remind_job, _cid, _uid, _jid)
         if not existing:
             logger.info("Remind job %s was cancelled, skipping fire.", _jid)
@@ -145,7 +229,7 @@ async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     context.application.job_queue.run_once(_fire, when=seconds, chat_id=chat_id)
     await update.message.reply_text(
-        f"⏰ Got it! I'll remind you in *{label}*.\nUse /cancelremind to cancel it.",
+        f"⏰ Got it! I'll remind you *{label}*.\nUse /cancelremind to cancel it.",
         parse_mode="Markdown",
     )
 
@@ -256,9 +340,9 @@ async def remindall_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
         return
 
-    amount = int(match.group(1))
+    amount   = int(match.group(1))
     per_unit = _parse_remind_seconds(match.group(2))
-    seconds = amount * per_unit
+    seconds  = amount * per_unit
 
     if per_unit == 1:
         label = f"{amount} second{'s' if amount != 1 else ''}"
@@ -278,13 +362,13 @@ async def remindall_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if not reminder_text:
         reminder_text = "Group reminder!"
 
-    chat_id = update.effective_chat.id
-    set_by_raw = _display_user(user)                  # store raw — escape at display time
-    set_by_safe = _escape_md(set_by_raw)
+    chat_id          = update.effective_chat.id
+    set_by_raw       = _display_user(user)
+    set_by_safe      = _escape_md(set_by_raw)
     reminder_text_safe = _escape_md(reminder_text)
 
     fire_at = time.time() + seconds
-    job_id = await asyncio.to_thread(save_remindall_job, chat_id, set_by_raw, reminder_text, fire_at)
+    job_id  = await asyncio.to_thread(save_remindall_job, chat_id, set_by_raw, reminder_text, fire_at)
 
     async def _fire_group(ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await ctx.bot.send_message(
@@ -302,27 +386,35 @@ async def remindall_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     )
 
 
-# ── Restore one-shot remind jobs on startup ───────────────────────────────────
+# ── Restore one-shot remind jobs on startup (Fix 14) ─────────────────────────
 
 async def restore_remind_jobs(app) -> None:
-    all_jobs = await asyncio.to_thread(get_all_remind_jobs)
+    """
+    Restore all pending remind jobs from Redis on startup.
+
+    Fix 14: Uses get_all_remind_jobs_for_restore (no overdue cutoff) so jobs
+    that were missed during a bot outage still fire — with a polite apology
+    note rather than being silently dropped.
+    """
+    all_jobs = await asyncio.to_thread(get_all_remind_jobs_for_restore)
     count = 0
     now = time.time()
     for chat_id, jobs in all_jobs.items():
         for job in jobs:
-            delay = max(5.0, job["fire_at"] - now)
-            job_id = job["job_id"]
+            fire_at    = job.get("fire_at", now)
+            is_overdue = fire_at < now
+            # Overdue jobs fire 5 s after startup; future jobs wait their delay.
+            delay   = 5.0 if is_overdue else max(5.0, fire_at - now)
+            job_id  = job["job_id"]
             user_id = job["user_id"]
             mention = job["user_mention_html"]
-            text = job["text"]
+            text    = job["text"]
 
             async def _fire(
                 ctx,
                 _cid=chat_id, _jid=job_id, _uid=user_id,
-                _mention=mention, _text=text,
+                _mention=mention, _text=text, _overdue=is_overdue,
             ):
-                # Claim the job atomically — if another scheduler already claimed
-                # it (e.g. previous restart's closure still running), skip.
                 claimed = await asyncio.to_thread(try_claim_remind_job, _jid)
                 if not claimed:
                     logger.info("Restored remind job %s already claimed, skipping.", _jid)
@@ -331,21 +423,20 @@ async def restore_remind_jobs(app) -> None:
                 if not existing:
                     logger.info("Restored remind job %s was cancelled, skipping.", _jid)
                     return
-                await ctx.bot.send_message(
-                    chat_id=_cid,
-                    text=f"⏰ Reminder for {_mention}!\n{_text}",
-                    parse_mode="HTML",
-                )
+                msg = f"⏰ Reminder for {_mention}!\n{_text}"
+                if _overdue:
+                    msg += "\n\n⚠️ Note: This reminder fired late due to a bot restart. Sorry!"
+                await ctx.bot.send_message(chat_id=_cid, text=msg, parse_mode="HTML")
                 await asyncio.to_thread(delete_remind_job, _cid, _jid)
                 await asyncio.to_thread(decrement_remind_count, _uid)
 
             app.job_queue.run_once(_fire, when=delay, chat_id=chat_id)
             count += 1
+
     logger.info("Restored %s one-shot remind job(s) from Redis.", count)
 
 
 # ── Restore group remind jobs on startup ──────────────────────────────────────
-# Fix 6: /remindall jobs are now persisted and restored across restarts.
 
 async def restore_remindall_jobs(app) -> None:
     all_jobs = await asyncio.to_thread(get_all_remindall_jobs)
@@ -353,10 +444,10 @@ async def restore_remindall_jobs(app) -> None:
     now = time.time()
     for chat_id, jobs in all_jobs.items():
         for job in jobs:
-            delay = max(5.0, job["fire_at"] - now)
-            job_id  = job["job_id"]
-            set_by  = _escape_md(job["set_by"])   # raw in Redis, escape here for Markdown
-            text    = job["text"]
+            delay     = max(5.0, job["fire_at"] - now)
+            job_id    = job["job_id"]
+            set_by    = _escape_md(job["set_by"])
+            text      = job["text"]
             text_safe = _escape_md(text)
 
             async def _fire(

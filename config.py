@@ -14,6 +14,11 @@ def env_int(name: str, default: int) -> int:
 
 
 # ─────────────────────────────────────────────
+# Bot version — shown in /status
+# ─────────────────────────────────────────────
+VERSION = "1.0.0"
+
+# ─────────────────────────────────────────────
 # Bot token — set via environment variable
 # ─────────────────────────────────────────────
 TOKEN: str = os.getenv("BOT_TOKEN", "")

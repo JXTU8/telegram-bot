@@ -48,6 +48,7 @@ from handlers.fun import (
     curse_command, bless_command,
     mvp_command, mvpboard_command, hot_command,
     decide_command, poll_command, toss_command,
+    game_command, game_guess_handler,
 )
 from handlers.reminders import (
     remind_command, cancelremind_command, cancelremind_callback,
@@ -87,8 +88,8 @@ async def on_startup(app) -> None:
         logger.error("on_startup: delete_old_fateboard_keys failed: %s", e)
 
     for restore_fn, label in [
-        (lambda: restore_jobs(app),          "countdown jobs"),
-        (lambda: restore_remind_jobs(app),   "remind jobs"),
+        (lambda: restore_jobs(app),           "countdown jobs"),
+        (lambda: restore_remind_jobs(app),    "remind jobs"),
         (lambda: restore_remindall_jobs(app), "remindall jobs"),
     ]:
         try:
@@ -96,7 +97,6 @@ async def on_startup(app) -> None:
         except Exception as e:
             logger.error("on_startup: restoring %s failed: %s", label, e)
 
-    # Schedule daily birthday check at 00:01 MYT
     midnight = datetime.now(TIMEZONE).replace(
         hour=0, minute=1, second=0, microsecond=0
     ).timetz()
@@ -169,7 +169,11 @@ def main() -> None:
     # ── Commands ──────────────────────────────────────────────────────────────
     app.add_handler(CommandHandler("start",           start_command))
     app.add_handler(CommandHandler("help",            help_command))
-    app.add_handler(CommandHandler("cancel",          cancel_command))   # standalone; conv fallbacks take priority
+    # Fix 15: The standalone cancel_command below only fires when /cancel is sent
+    # OUTSIDE any active conversation. ConversationHandler fallbacks registered
+    # above take priority over regular CommandHandlers within their own group (0),
+    # so the two uses of /cancel never conflict.
+    app.add_handler(CommandHandler("cancel",          cancel_command))
     app.add_handler(CommandHandler("ask",             ask_command))
     app.add_handler(CommandHandler("listcountdown",   list_countdown))
     app.add_handler(CommandHandler("removecountdown", remove_countdown_cmd))
@@ -194,6 +198,7 @@ def main() -> None:
     app.add_handler(CommandHandler("decide",          decide_command))
     app.add_handler(CommandHandler("poll",            poll_command))
     app.add_handler(CommandHandler("toss",            toss_command))
+    app.add_handler(CommandHandler("game",            game_command))
     app.add_handler(CommandHandler("birthday",        birthday_command))
     app.add_handler(CommandHandler("addbirthday",     addbirthday_command))
     app.add_handler(CommandHandler("deletebirthday",  deletebirthday_command))
@@ -212,8 +217,21 @@ def main() -> None:
     app.add_handler(CommandHandler("profile",         profile_command))
     app.add_handler(CommandHandler("status",          status_command))
     app.add_handler(CommandHandler("lucktest",        lucktest_command))
+
+    # ── Message handlers (group 0) ────────────────────────────────────────────
+    # ask_followup only fires for replies to bot /ask answers (filters.REPLY).
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.REPLY, ask_followup_handler))
+
+    # ── Message handlers (group 1) ────────────────────────────────────────────
+    # seen_user_tracker runs on every message for user tracking.
     app.add_handler(MessageHandler(filters.ALL, seen_user_tracker), group=1)
+
+    # ── Message handlers (group 2) ────────────────────────────────────────────
+    # game_guess_handler runs in group 2 so it fires independently of group-0
+    # handlers (ask_followup, conversation states). Non-number text is ignored
+    # silently inside the handler itself.
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, game_guess_handler), group=2)
+
     app.add_error_handler(error_handler)
 
     logger.info("Bot is running...")

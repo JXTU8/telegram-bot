@@ -79,6 +79,12 @@ def _update_streak_sync(user_id: int, today_str: str, tier_category: str) -> int
     return update_fate_streak(user_id, today_str, tier_category)
 
 
+# Fix 13: _BIRTHDAY_SCORE must be defined BEFORE _score_display uses it.
+# Previously it was declared after the function — fragile even though Python
+# resolves names at call-time, not definition-time.
+_BIRTHDAY_SCORE = 101  # sentinel — outside 0-100 range, never in _SPECIAL_SCORE_CASES
+
+
 def _score_display(score: int) -> str:
     if score == 999:
         return "999 ⚡ MAXIMUM"
@@ -89,9 +95,6 @@ def _score_display(score: int) -> str:
     filled = round(max(0, min(score, 100)) / 10)
     bar = "█" * filled + "░" * (10 - filled)
     return f"{score}/100  [{bar}]"
-
-
-_BIRTHDAY_SCORE = 101  # sentinel — outside 0-100 range, never in _SPECIAL_SCORE_CASES
 
 
 def _apply_special_luck(score, tier, luck_msg, target_name, today, seed=""):
@@ -128,7 +131,8 @@ def _apply_special_luck(score, tier, luck_msg, target_name, today, seed=""):
 
 
 def _luck_result_text(target_name, tier, score, luck_msg,
-                      streak_line="", day_note="", checking_other=False) -> str:
+                      streak_line="", day_note="", checking_other=False,
+                      username_mention=False) -> str:
     target_safe = _escape_md(target_name)
     parts = [
         f"🍀 *Daily Luck — {target_safe}*\n"
@@ -143,9 +147,13 @@ def _luck_result_text(target_name, tier, score, luck_msg,
     if day_note:
         parts.append(f"\n{day_note}")
     if checking_other:
-        # Always remind the invoker that the target must run /luck themselves
-        # for their score to appear on /luckboard.
         parts.append("\n\n_⚠️ Their score won't appear on /luckboard until they run /luck themselves._")
+        # Fix 11: username-only mentions can't trigger the birthday override because
+        # the bot has no user_id to look up — surface this clearly.
+        if username_mention:
+            parts.append(
+                "\n_🎂 Birthday check skipped — have them use /luck directly for birthday luck._"
+            )
     else:
         parts.append("\n\n_Scores reset daily at midnight MYT · /streak to track your run_")
     return "".join(parts)
@@ -160,6 +168,8 @@ async def luck_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     target_user_id = None
     target_name = None
     checking_other = False
+    # Fix 11: track whether we resolved via @username (no user_id available)
+    is_username_mention = False
 
     for entity in (message.entities or []):
         if entity.type == "text_mention" and getattr(entity, "user", None):
@@ -174,6 +184,7 @@ async def luck_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             target_name = mentioned
             target_user_id = None
             checking_other = True
+            is_username_mention = True   # Fix 11: @username path — no user_id
         else:
             target_user_id = user.id
             target_name = user.first_name or user.username or "You"
@@ -191,6 +202,8 @@ async def luck_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     # Birthday override — applies whenever we have the actual user ID (own or other).
     # Fix 4: was incorrectly restricted to self-luck only; text_mention gives us
     # the real user ID for others too, so the override should fire for them as well.
+    # Fix 11: @username mentions (is_username_mention=True) skip this block because
+    # target_user_id is None — the note in _luck_result_text tells the user why.
     if target_user_id:
         bdays = await asyncio.to_thread(get_all_birthdays, update.effective_chat.id)
         bday = bdays.get(str(target_user_id))
@@ -249,6 +262,7 @@ async def luck_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         target_name, tier, score, luck_msg,
         streak_line=streak_line, day_note=day_note,
         checking_other=checking_other,
+        username_mention=is_username_mention,  # Fix 11
     )
 
     if is_april_fools:

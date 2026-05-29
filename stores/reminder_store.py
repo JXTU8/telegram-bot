@@ -187,6 +187,39 @@ def get_all_remind_jobs() -> dict:
         return {}
 
 
+def get_all_remind_jobs_for_restore() -> dict:
+    """
+    Like get_all_remind_jobs but returns ALL jobs including overdue ones.
+    Used exclusively by restore_remind_jobs on startup so no reminder is
+    silently dropped when the bot restarts after a prolonged outage.
+    """
+    from stores._utils import _key_to_chat_id
+    try:
+        keys = []
+        cursor = 0
+        while True:
+            cursor, batch = redis.scan(cursor, match="remind_jobs:*", count=100)
+            keys.extend(batch)
+            if cursor == 0:
+                break
+        if not keys:
+            return {}
+        values = redis.mget(*keys)
+        result = {}
+        for key, raw in zip(keys, values):
+            chat_id = _key_to_chat_id(key)
+            if chat_id is None:
+                continue
+            # Keep every job that has a fire_at; drop only obviously corrupt entries
+            valid = [j for j in _decode_list(raw) if j.get("fire_at") is not None]
+            if valid:
+                result[chat_id] = valid
+        return result
+    except Exception as e:
+        logger.error("Redis get_all_remind_jobs_for_restore error: %s", e)
+        return {}
+
+
 # ── Remindall (group reminder) job persistence ────────────────────────────────
 # Fix 6: /remindall jobs are now persisted so they survive bot restarts.
 

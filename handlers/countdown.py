@@ -30,7 +30,6 @@ from helpers import (
 
 logger = logging.getLogger(__name__)
 
-# ── Validation constants ──────────────────────────────────────────────────────
 _MAX_NAME_LENGTH = 50
 
 
@@ -128,7 +127,6 @@ async def received_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
             parse_mode="Markdown",
         )
         return ASK_NAME
-    # ── Length guard ──────────────────────────────────────────────────────────
     if len(name) > _MAX_NAME_LENGTH:
         await update.message.reply_text(
             f"⚠️ Name is too long ({len(name)} chars). "
@@ -193,9 +191,8 @@ async def received_time(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         )
         return ASK_TIME
 
-    # ── Defensive .get() guards — should always be set but protect against edge cases
-    chat_id = update.effective_chat.id
-    name = context.user_data.get("new_countdown_name")
+    chat_id     = update.effective_chat.id
+    name        = context.user_data.get("new_countdown_name")
     target_date = context.user_data.get("new_countdown_date")
     if not name or not target_date:
         logger.error("received_time: missing user_data keys. name=%s date=%s", name, target_date)
@@ -208,7 +205,7 @@ async def received_time(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     created_by = update.effective_user.id
     code = await asyncio.to_thread(add_countdown, chat_id, name, target_date, hour, minute, created_by)
     _schedule_reminder(context.application, chat_id, name, hour, minute)
-    today = _today()
+    today     = _today()
     days_left = (target_date - today).days
     _track(context, update.message)
     await _delete_tracked(context)
@@ -255,7 +252,7 @@ async def editcountdown_start(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return ConversationHandler.END
     creator_id = await asyncio.to_thread(get_countdown_creator, chat_id, name)
-    is_admin = await _is_chat_admin(update, context)
+    is_admin   = await _is_chat_admin(update, context)
     if not is_admin and (creator_id is None or user_id != creator_id):
         await update.message.reply_text(
             "⚠️ Only the person who created this countdown or a group admin can edit it."
@@ -299,8 +296,8 @@ async def received_edit_field(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def received_edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     chat_id = update.effective_chat.id
-    name = context.user_data.get("edit_countdown_name")
-    field = context.user_data.get("edit_field")
+    name    = context.user_data.get("edit_countdown_name")
+    field   = context.user_data.get("edit_field")
     if not name or not field:
         await update.message.reply_text(
             "❌ Something went wrong — please start again with /editcountdown."
@@ -332,7 +329,7 @@ async def received_edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
             return ASK_EDIT_VALUE
         target_date = new_date
-        hour = entry["reminder_hour"]
+        hour   = entry["reminder_hour"]
         minute = entry["reminder_minute"]
     else:
         try:
@@ -378,7 +375,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 # ── /listcountdown ────────────────────────────────────────────────────────────
 
 async def list_countdown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = update.effective_chat.id
+    chat_id    = update.effective_chat.id
     countdowns = await asyncio.to_thread(get_all_countdowns, chat_id)
     if not countdowns:
         await update.message.reply_text(
@@ -387,9 +384,11 @@ async def list_countdown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
     today = _today()
-    seen = await asyncio.to_thread(get_seen_users, chat_id)
+    seen  = await asyncio.to_thread(get_seen_users, chat_id)
 
-    # Issue 23: backfill codes for legacy countdowns that pre-date the code system
+    # Fix 12: backfill codes for legacy countdowns that pre-date the code system.
+    # We mutate `countdowns[bname]["code"]` in-place so the update is visible
+    # when sorted_entries is built from countdowns.items() below — no re-read needed.
     needs_backfill = [n for n, e in countdowns.items() if not e.get("code")]
     for bname in needs_backfill:
         e = countdowns[bname]
@@ -401,6 +400,8 @@ async def list_countdown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 e.get("reminder_minute", DEFAULT_REMINDER_MINUTE),
                 e.get("created_by", 0),
             )
+            # Update the local dict so the display loop sees the new code
+            # without needing a second Redis round-trip.
             countdowns[bname]["code"] = new_code
             logger.info(
                 "list_countdown: backfilled code '%s' for '%s' in chat %s",
@@ -415,16 +416,14 @@ async def list_countdown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         except (KeyError, ValueError):
             return 9999
 
+    # sorted_entries is built AFTER the backfill loop so it reflects updated codes
     sorted_entries = sorted(countdowns.items(), key=_safe_sort_key)
 
-    # Fix 5: auto-remove countdowns that are overdue (negative days) so stale
-    # entries don't pile up between daily reminder fires.
-    # Use a safe helper — fromisoformat() raises ValueError on malformed strings.
     def _days_left_safe(entry):
         try:
             return (date.fromisoformat(entry.get("target_date", "")) - today).days
         except ValueError:
-            return 0  # treat malformed date as not overdue
+            return 0
 
     stale_names = [name for name, entry in sorted_entries if _days_left_safe(entry) < 0]
     for stale_name in stale_names:
@@ -447,13 +446,13 @@ async def list_countdown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             td = date.fromisoformat(entry["target_date"])
         except (KeyError, ValueError):
             td = today
-        days_left = (td - today).days
-        h = entry.get("reminder_hour", DEFAULT_REMINDER_HOUR)
-        m = entry.get("reminder_minute", DEFAULT_REMINDER_MINUTE)
-        code = entry.get("code", "—")
-        creator_id = str(entry.get("created_by", ""))
+        days_left    = (td - today).days
+        h            = entry.get("reminder_hour", DEFAULT_REMINDER_HOUR)
+        m            = entry.get("reminder_minute", DEFAULT_REMINDER_MINUTE)
+        code         = entry.get("code", "—")
+        creator_id   = str(entry.get("created_by", ""))
         creator_name = _escape_md(seen.get(creator_id, "Unknown"))
-        name_safe = _escape_md(name)
+        name_safe    = _escape_md(name)
         lines.append(
             f"• *{name_safe}* `[{code}]`\n"
             f"  📆 {td}  |  {_days_label(days_left)}\n"
@@ -476,14 +475,14 @@ async def remove_countdown_cmd(update: Update, context: ContextTypes.DEFAULT_TYP
             parse_mode="Markdown",
         )
         return
-    arg = " ".join(context.args).strip()
+    arg  = " ".join(context.args).strip()
     name = None
     if len(arg) <= 4 and arg.isalnum():
         name = await asyncio.to_thread(get_countdown_by_code, chat_id, arg.lower())
     if name is None:
         name = arg
     creator_id = await asyncio.to_thread(get_countdown_creator, chat_id, name)
-    is_admin = await _is_chat_admin(update, context)
+    is_admin   = await _is_chat_admin(update, context)
     if not is_admin and (creator_id is None or user_id != creator_id):
         await update.message.reply_text(
             "⚠️ Only the person who created this countdown or a group admin can remove it."

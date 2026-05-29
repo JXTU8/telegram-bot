@@ -1,20 +1,22 @@
 """
 handlers/misc.py
 ────────────────
-/start, /help (paginated), /stats, and the shared conversation_timeout handler.
+/start, /help (paginated), /stats, /recap, /leaderboard, /profile,
+/status, /cancel, and background tracking helpers.
 """
 
 import asyncio
 import logging
 import os
 import time as _time
-from datetime import datetime
+from datetime import datetime, date
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, ConversationHandler
 
-from config import TIMEZONE
+from config import TIMEZONE, VERSION
 from db import redis
+from constants import _MONTH_NAMES
 from stores.birthday_store import get_all_birthdays
 from stores.countdown_store import get_all_countdowns
 from stores.luck_store import get_fate_board, get_fate_streak
@@ -25,16 +27,19 @@ from stores.ship_store import get_top_ship_pairs, get_shipboard_reset_time
 from stores.user_store import get_seen_users, track_seen_user
 from helpers import (
     _display_user, _escape_md, _delete_tracked,
-    _display_name_or_id, owner_only,
+    _display_name_or_id, owner_only, _days_label,
 )
+
+# Fix 16: moved from a lazy import inside profile_command to the top level.
+# There is no circular dependency — luck.py does not import from misc.py.
+from handlers.luck import _get_fate
 
 logger = logging.getLogger(__name__)
 
-# ── Seen-user in-memory cache (Issue 25) ──────────────────────────────────────
-# Avoids a Redis read+write on every single message from a known user.
-_SEEN_CACHE: dict = {}        # (chat_id, user_id) -> monotonic timestamp
-_SEEN_CACHE_TTL = 3600        # 1 hour — only write to Redis if not seen within this window
-_SEEN_CACHE_MAX = 10_000      # evict oldest 10 % when this is exceeded
+# ── Seen-user in-memory cache ─────────────────────────────────────────────────
+_SEEN_CACHE: dict = {}
+_SEEN_CACHE_TTL = 3600
+_SEEN_CACHE_MAX = 10_000
 
 # ── /start ────────────────────────────────────────────────────────────────────
 
@@ -89,6 +94,7 @@ HELP_PAGES = {
     ),
     "fun": (
         "🎉 *Fun*\n\n"
+        "/game — number guessing game (1–100)\n"
         "/ship @user1 @user2 — compatibility percentage\n"
         "/shipboard — top ship pairs in this group\n"
         "/roast @user — personalised roast\n"
@@ -113,6 +119,7 @@ HELP_PAGES = {
     "reminders": (
         "⏰ *Reminders*\n\n"
         "/remind 10m take a break — set a personal reminder\n"
+        "/remind tmr 3pm meeting — natural language reminder (AI)\n"
         "/cancelremind — view and cancel your pending reminders\n"
         "/remindall 1h group meeting — group-wide reminder (admins only)\n"
         "/birthday — see upcoming birthdays in this chat\n"
@@ -134,17 +141,17 @@ HELP_PAGES = {
     ),
 }
 
-_HELP_PAGE_ORDER = ["countdown", "decisions", "ai", "luck", "fun", "quotes", "reminders", "summary", "other"]
+_HELP_PAGE_ORDER  = ["countdown", "decisions", "ai", "luck", "fun", "quotes", "reminders", "summary", "other"]
 _HELP_PAGE_LABELS = {
     "countdown": "⏱ Countdown",
     "decisions": "🎲 Decisions",
-    "ai": "🤖 AI",
-    "luck": "🍀 Luck",
-    "fun": "🎉 Fun",
-    "quotes": "💬 Quotes",
+    "ai":        "🤖 AI",
+    "luck":      "🍀 Luck",
+    "fun":       "🎉 Fun",
+    "quotes":    "💬 Quotes",
     "reminders": "⏰ Reminders",
-    "summary": "📊 Summary",
-    "other": "⚙️ Other",
+    "summary":   "📊 Summary",
+    "other":     "⚙️ Other",
 }
 
 
@@ -192,8 +199,7 @@ async def help_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 # ── /leaderboard ──────────────────────────────────────────────────────────────
 
 async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Combined snapshot: today's luck top 3, top ships, today's MVP + all-time top 3."""
-    chat_id = update.effective_chat.id
+    chat_id   = update.effective_chat.id
     today_str = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
 
     luck_board, pairs, today_mvp, mvp_board = await asyncio.gather(
@@ -208,22 +214,18 @@ async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE
             logger.error("leaderboard_command gather error: %s", val)
 
     medals = ["🥇", "🥈", "🥉"]
-    lines = [f"🏆 *Group Leaderboard* — {today_str}\n"]
+    lines  = [f"🏆 *Group Leaderboard* — {today_str}\n"]
 
-    # ── Luck ─────────────────────────────────────────────────────────────────
     lines.append("🍀 *Today's Luck*")
     board = luck_board if isinstance(luck_board, dict) else {}
     if board:
         sorted_board = sorted(board.items(), key=lambda kv: kv[1]["score"], reverse=True)
         for i, (_, item) in enumerate(sorted_board[:3], 1):
             medal = medals[i - 1] if i <= 3 else f"{i}."
-            lines.append(
-                f"{medal} *{_escape_md(item['name'])}* — {item['tier']} `{item['score']}`"
-            )
+            lines.append(f"{medal} *{_escape_md(item['name'])}* — {item['tier']} `{item['score']}`")
     else:
         lines.append("_No checks yet today. Use /luck!_")
 
-    # ── Ships ─────────────────────────────────────────────────────────────────
     lines.append("\n💞 *Top Ships*")
     ship_list = pairs if isinstance(pairs, list) else []
     if ship_list:
@@ -235,7 +237,6 @@ async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     else:
         lines.append("_No ships yet. Use /ship!_")
 
-    # ── MVP ───────────────────────────────────────────────────────────────────
     lines.append("\n🏆 *MVP*")
     mvp = today_mvp if isinstance(today_mvp, dict) else {}
     if mvp:
@@ -248,52 +249,60 @@ async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         lines.append("_All-time:_")
         for i, row in enumerate(board_rows, 1):
             medal = medals[i - 1] if i <= 3 else f"{i}."
-            name = _display_name_or_id(row.get("name", ""), row.get("user_id", "?"))
-            wins = int(row.get("wins", 0))
+            name  = _display_name_or_id(row.get("name", ""), row.get("user_id", "?"))
+            wins  = int(row.get("wins", 0))
             lines.append(f"{medal} *{_escape_md(name)}* — `{wins}` win{'s' if wins != 1 else ''}")
 
-    lines.append(
-        "\n_Use /luckboard · /shipboard · /mvpboard for full lists_"
-    )
+    lines.append("\n_Use /luckboard · /shipboard · /mvpboard for full lists_")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
 # ── /recap ─────────────────────────────────────────────────────────────────────
 
 async def recap_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Today's group activity summary — MVP, luck extremes, top ship, quote count, active members."""
-    chat_id = update.effective_chat.id
+    """
+    Today's group activity summary.
+    Fix 9: now includes next upcoming countdown and birthdays this week.
+    """
+    chat_id   = update.effective_chat.id
     today_str = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
 
-    luck_board, pairs, today_mvp, quote_count, seen = await asyncio.gather(
+    (
+        luck_board, pairs, today_mvp, quote_count, seen,
+        countdowns, all_bdays,
+    ) = await asyncio.gather(
         asyncio.to_thread(get_fate_board, chat_id, today_str),
         asyncio.to_thread(get_top_ship_pairs, chat_id, 1),
         asyncio.to_thread(get_today_mvp, chat_id, today_str),
         asyncio.to_thread(get_quote_count, chat_id),
         asyncio.to_thread(get_seen_users, chat_id),
+        asyncio.to_thread(get_all_countdowns, chat_id),   # Fix 9
+        asyncio.to_thread(get_all_birthdays, chat_id),    # Fix 9
         return_exceptions=True,
     )
 
-    board = luck_board if isinstance(luck_board, dict) else {}
-    ship_list = pairs if isinstance(pairs, list) else []
-    mvp = today_mvp if isinstance(today_mvp, dict) else {}
-    total_quotes = quote_count if isinstance(quote_count, int) else 0
-    seen_users = seen if isinstance(seen, dict) else {}
+    board        = luck_board  if isinstance(luck_board,  dict) else {}
+    ship_list    = pairs       if isinstance(pairs,        list) else []
+    mvp          = today_mvp   if isinstance(today_mvp,    dict) else {}
+    total_quotes = quote_count if isinstance(quote_count,  int)  else 0
+    seen_users   = seen        if isinstance(seen,          dict) else {}
+    cd_dict      = countdowns  if isinstance(countdowns,   dict) else {}
+    bday_dict    = all_bdays   if isinstance(all_bdays,    dict) else {}
 
     lines = [f"📋 *Daily Recap — {today_str}*\n"]
 
-    # MVP
+    # ── MVP ───────────────────────────────────────────────────────────────────
     if mvp:
         lines.append(f"🏆 *MVP:* {_escape_md(mvp.get('name', '?'))}")
     else:
         lines.append("🏆 *MVP:* _Not crowned yet — use /mvp_")
 
-    # Luck extremes
+    # ── Luck extremes ─────────────────────────────────────────────────────────
     if board:
         sorted_board = sorted(board.items(), key=lambda kv: kv[1]["score"], reverse=True)
-        luckiest = sorted_board[0][1]
-        unluckiest = sorted_board[-1][1]
-        active = len(board)
+        luckiest    = sorted_board[0][1]
+        unluckiest  = sorted_board[-1][1]
+        active      = len(board)
         lines.append(
             f"🍀 *Luckiest:* {_escape_md(luckiest['name'])} — {luckiest['tier']} `{luckiest['score']}`"
         )
@@ -305,7 +314,7 @@ async def recap_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     else:
         lines.append("🍀 *Luck:* _Nobody checked yet — use /luck_")
 
-    # Top ship
+    # ── Top ship ──────────────────────────────────────────────────────────────
     if ship_list:
         p = ship_list[0]
         a = _escape_md(p["label_a"])
@@ -314,10 +323,55 @@ async def recap_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     else:
         lines.append("💞 *Ships:* _None yet — use /ship_")
 
-    # Quotes + members
+    # ── Fix 9: Next upcoming countdown ───────────────────────────────────────
+    today_date      = datetime.now(TIMEZONE).date()
+    next_countdown  = None
+    min_days        = float("inf")
+    for cd_name, entry in cd_dict.items():
+        try:
+            td        = date.fromisoformat(entry["target_date"])
+            days_left = (td - today_date).days
+            if 0 <= days_left < min_days:
+                min_days       = days_left
+                next_countdown = (cd_name, days_left)
+        except (ValueError, KeyError):
+            pass
+
+    if next_countdown:
+        cd_name, days_left = next_countdown
+        lines.append(f"⏱ *Next Countdown:* {_escape_md(cd_name)} — _{_days_label(days_left)}_")
+    else:
+        lines.append("⏱ *Countdowns:* _None active — use /addcountdown_")
+
+    # ── Fix 9: Birthdays this week ────────────────────────────────────────────
+    upcoming_bdays = []
+    for uid_str, bday in bday_dict.items():
+        try:
+            d, m = int(bday.get("day", 0)), int(bday.get("month", 0))
+            if not d or not m:
+                continue
+            bday_this_year = date(today_date.year, m, d)
+            if bday_this_year < today_date:
+                bday_this_year = date(today_date.year + 1, m, d)
+            days_until = (bday_this_year - today_date).days
+            if 0 <= days_until <= 7:
+                upcoming_bdays.append((days_until, bday.get("name", uid_str)))
+        except ValueError:
+            pass
+    upcoming_bdays.sort()
+
+    if upcoming_bdays:
+        parts = []
+        for days_until, bname in upcoming_bdays[:3]:
+            tag = "Today! 🎂" if days_until == 0 else f"in {days_until}d"
+            parts.append(f"{_escape_md(bname)} ({tag})")
+        lines.append(f"🎂 *Birthdays this week:* {', '.join(parts)}")
+    else:
+        lines.append("🎂 *Birthdays:* _None this week_")
+
+    # ── Misc counts ───────────────────────────────────────────────────────────
     lines.append(f"💬 *Quotes saved:* {total_quotes} total")
     lines.append(f"👤 *Members tracked:* {len(seen_users)}")
-
     lines.append("\n_Run /leaderboard for the full rankings_")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
@@ -325,7 +379,7 @@ async def recap_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 # ── /stats ────────────────────────────────────────────────────────────────────
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = update.effective_chat.id
+    chat_id   = update.effective_chat.id
     today_str = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
 
     results = await asyncio.gather(
@@ -347,21 +401,21 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     reset_secs = await asyncio.to_thread(get_shipboard_reset_time)
 
-    member_count = len(seen_users)
+    member_count    = len(seen_users)
     countdown_count = len(countdowns)
     reset_h = reset_secs // 3600
     reset_m = (reset_secs % 3600) // 60
 
     if top_pairs:
-        p = top_pairs[0]
+        p         = top_pairs[0]
         ship_line = f"{_escape_md(p['label_a'])} × {_escape_md(p['label_b'])} `{p['score']:.1f}%`"
     else:
         ship_line = "No ships yet this cycle"
 
     luck_count = len(board)
     if board:
-        top_uid = max(board, key=lambda k: board[k]["score"])
-        t = board[top_uid]
+        top_uid    = max(board, key=lambda k: board[k]["score"])
+        t          = board[top_uid]
         lucky_line = f"{_escape_md(t['name'])} — {t['tier']} (`{t['score']}`)"
     else:
         lucky_line = "Nobody checked today"
@@ -403,8 +457,8 @@ async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     user_id = target_user.id
-    name = _display_user(target_user)
-    today = datetime.now(TIMEZONE).date()
+    name    = _display_user(target_user)
+    today   = datetime.now(TIMEZONE).date()
 
     bdays, reminders, streak, mvp_stats, quote_counts = await asyncio.gather(
         asyncio.to_thread(get_all_birthdays, chat_id),
@@ -421,15 +475,14 @@ async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         birthday_line = "Not set"
 
     streak_count, streak_cat = streak
-    streak_line = f"{streak_count} day(s) {streak_cat}" if streak_count else "No active streak"
+    streak_line  = f"{streak_count} day(s) {streak_cat}" if streak_count else "No active streak"
     authored_quotes, saved_quotes = quote_counts
-    mvp_wins = int(mvp_stats.get("wins", 0)) if mvp_stats else 0
-    last_mvp = mvp_stats.get("last_won", "Never") if mvp_stats else "Never"
-    seen = await asyncio.to_thread(get_seen_users, chat_id)
+    mvp_wins  = int(mvp_stats.get("wins", 0)) if mvp_stats else 0
+    last_mvp  = mvp_stats.get("last_won", "Never") if mvp_stats else "Never"
+    seen      = await asyncio.to_thread(get_seen_users, chat_id)
     seen_name = _display_name_or_id(seen.get(str(user_id), name), user_id)
 
-    # Lazy import to avoid circular-import at startup
-    from handlers.luck import _get_fate
+    # Fix 16: _get_fate is now imported at the top of this module (no lazy import)
     luck_score, luck_tier, _ = _get_fate(user_id)
     if luck_score == 999:
         luck_display = "999 ⚡ MAXIMUM"
@@ -454,7 +507,7 @@ async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     )
 
 
-# ── /status and background tracking ──────────────────────────────────────────
+# ── /status ───────────────────────────────────────────────────────────────────
 
 def _env_status(name: str) -> str:
     return "set" if os.getenv(name) else "missing"
@@ -481,11 +534,11 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     from handlers.ai import groq_client, SERPER_API_KEY
 
-    # Sanitize redis_msg: strip backticks (already done) AND escape Markdown specials
     redis_detail = _escape_md(redis_msg[:120].replace("`", "").replace("\n", " "))
 
     lines = [
         "🧪 *Bot Status*",
+        f"Version: *{VERSION}*",                              # Fix 19
         f"Redis: *{'ok' if redis_ok else 'error'}*",
         f"Redis detail: `{redis_detail}`",
         f"Job queue: *{'ok' if context.application.job_queue else 'missing'}*",
@@ -499,27 +552,26 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
-# ── /cancel (standalone — only fires when not inside a conversation) ──────────
+# ── /cancel (standalone) ──────────────────────────────────────────────────────
 
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Friendly reply when /cancel is typed outside of any active conversation."""
     await update.message.reply_text(
         "ℹ️ No active flow to cancel.\n"
         "Use /help to see all available commands."
     )
 
 
+# ── Background: seen-user tracking ───────────────────────────────────────────
+
 async def seen_user_tracker(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     chat = update.effective_chat
     if not user or not chat or user.is_bot:
         return
-    # Only write to Redis when the user hasn't been seen within the last hour.
     cache_key = (chat.id, user.id)
     now = _time.monotonic()
     if now - _SEEN_CACHE.get(cache_key, 0) < _SEEN_CACHE_TTL:
         return
-    # Evict oldest 10 % of entries when the cache grows too large.
     if len(_SEEN_CACHE) >= _SEEN_CACHE_MAX:
         evict_count = _SEEN_CACHE_MAX // 10
         for old_key in list(_SEEN_CACHE)[:evict_count]:
@@ -530,7 +582,7 @@ async def seen_user_tracker(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 
 _last_conflict_log: float = 0.0
-_CONFLICT_LOG_COOLDOWN = 60.0  # log at most once per minute
+_CONFLICT_LOG_COOLDOWN = 60.0
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:

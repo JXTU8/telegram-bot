@@ -2,7 +2,8 @@
 handlers/fun.py
 ───────────────
 Fun commands: ship, roast, compliment, vibecheck, rank, truth, dare,
-wouldyourather, coinflip, 8ball, curse, bless, mvp, hot, toss, decide, poll.
+wouldyourather, coinflip, 8ball, curse, bless, mvp, hot, toss, decide,
+poll, game.
 """
 
 import asyncio
@@ -41,10 +42,12 @@ _POLL_MAX_OPTIONS = 10
 _POLL_MAX_QUESTION_LEN = 300
 _POLL_MAX_OPTION_LEN = 100
 
-# Fix 7: per-user cooldown to prevent poll spam (unskippable native polls).
+# Fix 17: _POLL_COOLDOWNS is intentionally in-memory only (not Redis-backed).
+# Polls cannot be deleted by the bot once sent, so the cooldown just needs to
+# throttle rapid fire within a single session. Resetting on restart is fine.
 _POLL_COOLDOWNS: dict = {}          # (chat_id, user_id) -> monotonic timestamp
 _POLL_COOLDOWN_SECONDS: float = 30.0
-_POLL_COOLDOWNS_MAX = 5_000         # evict oldest entries beyond this size
+_POLL_COOLDOWNS_MAX = 5_000
 
 
 # ── Ship helpers ──────────────────────────────────────────────────────────────
@@ -180,8 +183,6 @@ async def ship_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             await update.message.reply_text(random.choice(SHIP_OWNER_BLOCK_LINES))
             return
     target_a, target_b = targets[0]["label"], targets[1]["label"]
-    # Sort the two names so /ship A B and /ship B A always produce the same
-    # deterministic daily score. This is intentional — pairs are canonical.
     normalized = sorted([_normalize_target(target_a), _normalize_target(target_b)])
     if normalized[0] == normalized[1]:
         await update.message.reply_text(
@@ -487,7 +488,6 @@ async def decide_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 # ── /poll ─────────────────────────────────────────────────────────────────────
 
 async def poll_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # Fix 7: rate limit — native polls can't be deleted by the bot once sent.
     user_id  = update.effective_user.id
     chat_id  = update.effective_chat.id
     ck = (chat_id, user_id)
@@ -521,7 +521,6 @@ async def poll_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text("Give at least 2 options separated by commas.")
         return
 
-    # Warn user before silently dropping anything
     warnings = []
     if len(options) > _POLL_MAX_OPTIONS:
         warnings.append(
@@ -529,9 +528,7 @@ async def poll_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             f"(you gave {len(options)})."
         )
     if len(question) > _POLL_MAX_QUESTION_LEN:
-        warnings.append(
-            f"⚠️ Question trimmed to {_POLL_MAX_QUESTION_LEN} characters."
-        )
+        warnings.append(f"⚠️ Question trimmed to {_POLL_MAX_QUESTION_LEN} characters.")
     truncated_opts = [o for o in options[:_POLL_MAX_OPTIONS] if len(o) > _POLL_MAX_OPTION_LEN]
     if truncated_opts:
         warnings.append(
@@ -575,4 +572,125 @@ async def toss_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_text(
         f"🎰 *The Pick*\n\n➡️ *{_escape_md(chosen)}*\n\n_{random.choice(TOSS_VERDICTS)}_",
         parse_mode="Markdown",
+    )
+
+
+# ── /game — Number guessing ────────────────────────────────────────────────────
+
+# In-memory game state per chat. Intentionally ephemeral — games reset on
+# bot restart, which is fine (games are short-lived anyway).
+_ACTIVE_GAMES: dict = {}   # chat_id → {"number": int, "job_name": str}
+_GAME_RANGE = (1, 100)
+_GAME_TIMEOUT_SECONDS = 60
+
+
+async def game_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Start a number guessing game in the group."""
+    chat_id = update.effective_chat.id
+    if chat_id in _ACTIVE_GAMES:
+        lo, hi = _GAME_RANGE
+        await update.message.reply_text(
+            f"🎮 A game is already running!\nJust type a number between *{lo}* and *{hi}* to guess.",
+            parse_mode="Markdown",
+        )
+        return
+
+    lo, hi = _GAME_RANGE
+    number   = random.randint(lo, hi)
+    job_name = f"game_reveal:{chat_id}"
+    _ACTIVE_GAMES[chat_id] = {"number": number, "job_name": job_name}
+
+    async def _reveal(ctx: ContextTypes.DEFAULT_TYPE, _cid=chat_id, _n=number) -> None:
+        if _ACTIVE_GAMES.pop(_cid, None) is not None:
+            await ctx.bot.send_message(
+                chat_id=_cid,
+                text=(
+                    f"⏰ *Time's up!* Nobody guessed it.\n"
+                    f"The number was *{_n}*. Better luck next time!\n\n"
+                    f"_Start a new game with /game_"
+                ),
+                parse_mode="Markdown",
+            )
+
+    context.application.job_queue.run_once(
+        _reveal, when=_GAME_TIMEOUT_SECONDS, name=job_name, chat_id=chat_id
+    )
+    await update.message.reply_text(
+        f"🎮 *Number Guessing Game!*\n\n"
+        f"I'm thinking of a number between *{lo}* and *{hi}*.\n"
+        f"Type a number to guess — I'll say 📈 Higher or 📉 Lower!\n\n"
+        f"_No guesses for {_GAME_TIMEOUT_SECONDS}s and I'll reveal the answer._",
+        parse_mode="Markdown",
+    )
+
+
+async def game_guess_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Process number guesses for an active game. Registered in handler group 2
+    so it runs alongside group-0 handlers (ask_followup, conversations) without
+    blocking or being blocked by them.
+
+    Behaviour the user can expect:
+      - Correct number  → congratulations + game ends
+      - Wrong number    → 📈 Higher / 📉 Lower reply (bot replied = guess was detected)
+      - Non-number text → silently ignored (no reply = not treated as a guess)
+    The inactivity timer resets to 60 s after every valid (in-range) guess.
+    """
+    chat_id = update.effective_chat.id
+    if chat_id not in _ACTIVE_GAMES:
+        return
+
+    text = (update.message.text or "").strip()
+
+    # Silently ignore non-numeric text (letters, punctuation, emoji, etc.)
+    if not text.lstrip("-").isdigit():
+        return
+
+    try:
+        guess = int(text)
+    except ValueError:
+        return
+
+    lo, hi = _GAME_RANGE
+    if not (lo <= guess <= hi):
+        # Still a number but out of range — reply so user knows the bot saw it
+        await update.message.reply_text(f"⚠️ Guess must be between {lo} and {hi}!")
+        return
+
+    game     = _ACTIVE_GAMES[chat_id]
+    number   = game["number"]
+    job_name = game["job_name"]
+    user_name = _display_user(update.effective_user)
+
+    # Cancel the current inactivity timer before deciding what to do
+    for job in context.application.job_queue.get_jobs_by_name(job_name):
+        job.schedule_removal()
+
+    if guess == number:
+        _ACTIVE_GAMES.pop(chat_id, None)
+        await update.message.reply_text(
+            f"🎉 *{_escape_md(user_name)} got it!* The number was *{number}*! 🏆\n\n"
+            f"_Start another round with /game_",
+            parse_mode="Markdown",
+        )
+        return
+
+    # Wrong guess — give a directional hint and reschedule the inactivity reveal
+    hint = "📈 Higher!" if guess < number else "📉 Lower!"
+    await update.message.reply_text(hint)
+
+    async def _reveal(ctx: ContextTypes.DEFAULT_TYPE, _cid=chat_id, _n=number) -> None:
+        if _ACTIVE_GAMES.pop(_cid, None) is not None:
+            await ctx.bot.send_message(
+                chat_id=_cid,
+                text=(
+                    f"⏰ *Time's up!* Nobody guessed it.\n"
+                    f"The number was *{_n}*. Better luck next time!\n\n"
+                    f"_Start a new game with /game_"
+                ),
+                parse_mode="Markdown",
+            )
+
+    context.application.job_queue.run_once(
+        _reveal, when=_GAME_TIMEOUT_SECONDS, name=job_name, chat_id=chat_id
     )
