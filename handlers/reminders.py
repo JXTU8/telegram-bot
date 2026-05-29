@@ -100,8 +100,11 @@ async def _parse_time_with_ai(text: str) -> tuple:
             150,  # max_tokens — short structured response
             0.1,  # low temperature for deterministic parsing
         )
-        # Strip accidental markdown fences if the model ignores the instruction
-        cleaned = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+        # Strip accidental markdown fences if the model ignores the instruction.
+        cleaned = raw.strip()
+        if cleaned.startswith("```"):
+            cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
+            cleaned = re.sub(r"\s*```$", "", cleaned).strip()
         data = _json.loads(cleaned)
         seconds = data.get("seconds")
         if seconds is None or not isinstance(seconds, (int, float)) or seconds <= 0:
@@ -333,23 +336,40 @@ async def remindall_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
 
     match = _REMIND_RE.search(text)
-    if not match:
-        await update.message.reply_text(
-            "⚠️ Couldn't parse the time. Example: `/remindall 1h meeting`",
-            parse_mode="Markdown",
-        )
-        return
+    if match:
+        amount   = int(match.group(1))
+        per_unit = _parse_remind_seconds(match.group(2))
+        seconds  = amount * per_unit
 
-    amount   = int(match.group(1))
-    per_unit = _parse_remind_seconds(match.group(2))
-    seconds  = amount * per_unit
+        if per_unit == 1:
+            label = f"{amount} second{'s' if amount != 1 else ''}"
+        elif per_unit == 60:
+            label = f"{amount} minute{'s' if amount != 1 else ''}"
+        else:
+            label = f"{amount} hour{'s' if amount != 1 else ''}"
 
-    if per_unit == 1:
-        label = f"{amount} second{'s' if amount != 1 else ''}"
-    elif per_unit == 60:
-        label = f"{amount} minute{'s' if amount != 1 else ''}"
+        reminder_text = re.sub(r"^to\b\s*", "", text[match.end():].strip(), flags=re.IGNORECASE)
+        if not reminder_text:
+            reminder_text = "Group reminder!"
     else:
-        label = f"{amount} hour{'s' if amount != 1 else ''}"
+        thinking_msg = await update.message.reply_text("🤖 Figuring out the group reminder time...")
+        ai_seconds, ai_readable, ai_reminder = await _parse_time_with_ai(text)
+        try:
+            await thinking_msg.delete()
+        except Exception:
+            pass
+
+        if ai_seconds is None:
+            await update.message.reply_text(
+                "⚠️ Couldn't parse the time. Example: `/remindall 1h meeting`\n"
+                "Natural language also works: `/remindall tmr 9pm team meeting`",
+                parse_mode="Markdown",
+            )
+            return
+
+        seconds       = ai_seconds
+        label         = ai_readable or f"{seconds} seconds"
+        reminder_text = ai_reminder or "Group reminder!"
 
     if seconds < 5:
         await update.message.reply_text("⚠️ Minimum reminder time is 5 seconds.")
@@ -357,10 +377,6 @@ async def remindall_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if seconds > _MAX_REMIND_SECONDS:
         await update.message.reply_text("⚠️ Maximum reminder time is 1 year.")
         return
-
-    reminder_text = re.sub(r"^to\b\s*", "", text[match.end():].strip(), flags=re.IGNORECASE)
-    if not reminder_text:
-        reminder_text = "Group reminder!"
 
     chat_id          = update.effective_chat.id
     set_by_raw       = _display_user(user)

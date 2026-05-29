@@ -34,6 +34,17 @@ from config import env_int
 
 logger = logging.getLogger(__name__)
 
+
+def _log_background_failure(label: str):
+    def _callback(task: asyncio.Task) -> None:
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc:
+            logger.warning("%s failed: %s", label, exc)
+    return _callback
+
+
 FATE_LUCKY_ID = env_int("FATE_LUCKY_ID", 0)
 FATE_UNLUCKY_ID = env_int("FATE_UNLUCKY_ID", 0)
 
@@ -234,15 +245,11 @@ async def luck_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         t1 = asyncio.create_task(
             asyncio.to_thread(_remember_fate, update.effective_chat.id, target_user_id, target_name, score, tier)
         )
-        t1.add_done_callback(
-            lambda t: t.exception() and logger.warning("_remember_fate failed: %s", t.exception())
-        )
+        t1.add_done_callback(_log_background_failure("_remember_fate"))
         t2 = asyncio.create_task(
             asyncio.to_thread(track_seen_user, update.effective_chat.id, target_user_id, target_name)
         )
-        t2.add_done_callback(
-            lambda t: t.exception() and logger.warning("track_seen_user failed: %s", t.exception())
-        )
+        t2.add_done_callback(_log_background_failure("track_seen_user"))
 
         old_streak, old_cat = await asyncio.to_thread(get_fate_streak, target_user_id)
         streak = await asyncio.to_thread(_update_streak_sync, target_user_id, today_str, tier_category)

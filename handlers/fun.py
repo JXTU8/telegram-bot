@@ -13,6 +13,7 @@ import time as _time
 from datetime import datetime
 
 from telegram import Update
+from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
 from config import TIMEZONE
@@ -51,6 +52,25 @@ _POLL_COOLDOWNS_MAX = 5_000
 
 
 # ── Ship helpers ──────────────────────────────────────────────────────────────
+
+def _purge_poll_cooldowns(now: float) -> None:
+    expired = [
+        key for key, last_used in _POLL_COOLDOWNS.items()
+        if now - last_used >= _POLL_COOLDOWN_SECONDS
+    ]
+    for key in expired:
+        del _POLL_COOLDOWNS[key]
+
+
+def _log_background_failure(label: str):
+    def _callback(task: asyncio.Task) -> None:
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc:
+            logger.warning("%s failed: %s", label, exc)
+    return _callback
+
 
 def _ship_target(label, user_id=None, username="", explicit_username=False):
     return {"label": label, "user_id": user_id,
@@ -196,14 +216,10 @@ async def ship_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     for t in targets:
         if t.get("user_id"):
             task = asyncio.create_task(asyncio.to_thread(track_seen_user, chat_id, t["user_id"], t["label"]))
-            task.add_done_callback(
-                lambda t2: t2.exception() and logger.warning("track_seen_user failed: %s", t2.exception())
-            )
+            task.add_done_callback(_log_background_failure("track_seen_user"))
     pair_key = f"{normalized[0]}:{normalized[1]}"
     task = asyncio.create_task(asyncio.to_thread(save_ship_pair, chat_id, pair_key, target_a, target_b, score))
-    task.add_done_callback(
-        lambda t2: t2.exception() and logger.warning("save_ship_pair failed: %s", t2.exception())
-    )
+    task.add_done_callback(_log_background_failure("save_ship_pair"))
     filled = round(score / 10)
     bar = "█" * filled + "░" * (10 - filled)
     a_safe = _escape_md(target_a)
@@ -400,9 +416,7 @@ async def mvp_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 name = _display_user(u)
                 candidate_pool[str(u.id)] = name
                 task = asyncio.create_task(asyncio.to_thread(track_seen_user, chat_id, u.id, name))
-                task.add_done_callback(
-                    lambda t: t.exception() and logger.warning("track_seen_user failed: %s", t.exception())
-                )
+                task.add_done_callback(_log_background_failure("track_seen_user"))
     except Exception as e:
         logger.warning("Could not fetch admins for mvp in chat %s: %s", chat_id, e)
     seen = await asyncio.to_thread(get_seen_users, chat_id)
@@ -492,6 +506,7 @@ async def poll_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     chat_id  = update.effective_chat.id
     ck = (chat_id, user_id)
     now = _time.monotonic()
+    _purge_poll_cooldowns(now)
     remaining = _POLL_COOLDOWN_SECONDS - (now - _POLL_COOLDOWNS.get(ck, 0))
     if remaining > 0:
         await update.message.reply_text(
@@ -537,12 +552,18 @@ async def poll_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if warnings:
         await update.message.reply_text("\n".join(warnings))
 
-    await context.bot.send_poll(
-        chat_id=update.effective_chat.id,
-        question=question[:_POLL_MAX_QUESTION_LEN],
-        options=[o[:_POLL_MAX_OPTION_LEN] for o in options[:_POLL_MAX_OPTIONS]],
-        is_anonymous=False,
-    )
+    try:
+        await context.bot.send_poll(
+            chat_id=update.effective_chat.id,
+            question=question[:_POLL_MAX_QUESTION_LEN],
+            options=[o[:_POLL_MAX_OPTION_LEN] for o in options[:_POLL_MAX_OPTIONS]],
+            is_anonymous=False,
+        )
+    except TelegramError as e:
+        logger.warning("send_poll failed in chat %s: %s", chat_id, e)
+        await update.message.reply_text(
+            "⚠️ I couldn't create that poll here. Check my poll permission and try again."
+        )
 
 
 # ── /toss ─────────────────────────────────────────────────────────────────────
@@ -579,7 +600,7 @@ async def toss_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 # In-memory game state per chat. Intentionally ephemeral — games reset on
 # bot restart, which is fine (games are short-lived anyway).
-_ACTIVE_GAMES: dict = {}   # chat_id → {"number": int, "job_name": str}
+_ACTIVE_GAMES: dict = {}   # chat_id -> {"number": int, "job_name": str, "timer_version": int}
 _GAME_RANGE = (1, 100)
 _GAME_TIMEOUT_SECONDS = 60
 
@@ -598,10 +619,12 @@ async def game_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     lo, hi = _GAME_RANGE
     number   = random.randint(lo, hi)
     job_name = f"game_reveal:{chat_id}"
-    _ACTIVE_GAMES[chat_id] = {"number": number, "job_name": job_name}
+    _ACTIVE_GAMES[chat_id] = {"number": number, "job_name": job_name, "timer_version": 1}
 
-    async def _reveal(ctx: ContextTypes.DEFAULT_TYPE, _cid=chat_id, _n=number) -> None:
-        if _ACTIVE_GAMES.pop(_cid, None) is not None:
+    async def _reveal(ctx: ContextTypes.DEFAULT_TYPE, _cid=chat_id, _n=number, _version=1) -> None:
+        game = _ACTIVE_GAMES.get(_cid)
+        if game and game.get("timer_version") == _version:
+            _ACTIVE_GAMES.pop(_cid, None)
             await ctx.bot.send_message(
                 chat_id=_cid,
                 text=(
@@ -660,6 +683,8 @@ async def game_guess_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     game     = _ACTIVE_GAMES[chat_id]
     number   = game["number"]
     job_name = game["job_name"]
+    game["timer_version"] = int(game.get("timer_version", 0)) + 1
+    timer_version = game["timer_version"]
     user_name = _display_user(update.effective_user)
 
     # Cancel the current inactivity timer before deciding what to do
@@ -679,8 +704,10 @@ async def game_guess_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     hint = "📈 Higher!" if guess < number else "📉 Lower!"
     await update.message.reply_text(hint)
 
-    async def _reveal(ctx: ContextTypes.DEFAULT_TYPE, _cid=chat_id, _n=number) -> None:
-        if _ACTIVE_GAMES.pop(_cid, None) is not None:
+    async def _reveal(ctx: ContextTypes.DEFAULT_TYPE, _cid=chat_id, _n=number, _version=timer_version) -> None:
+        game = _ACTIVE_GAMES.get(_cid)
+        if game and game.get("timer_version") == _version:
+            _ACTIVE_GAMES.pop(_cid, None)
             await ctx.bot.send_message(
                 chat_id=_cid,
                 text=(

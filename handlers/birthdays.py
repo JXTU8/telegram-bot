@@ -16,7 +16,7 @@ from telegram.ext import ContextTypes
 
 from constants import BIRTHDAY_MESSAGES, _MONTH_NAMES
 from stores.birthday_store import save_birthday, get_all_birthdays, get_all_birthday_chats, delete_birthday
-from helpers import _display_user, _arg_text, _mentioned_target, _escape_md, _today
+from helpers import _display_user, _arg_text, _mentioned_target, _escape_md, _today, _is_chat_admin
 
 logger = logging.getLogger(__name__)
 
@@ -127,8 +127,18 @@ async def birthday_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     for uid_str, info in bdays.items():
         d, m = info.get("day", 1), info.get("month", 1)
         name = info.get("name", uid_str)
-        days_left = _days_until_birthday(d, m)
+        try:
+            days_left = _days_until_birthday(d, m)
+        except ValueError as e:
+            logger.warning("Skipping corrupt birthday in chat %s user %s: %s", chat_id, uid_str, e)
+            continue
         entries.append((days_left, d, m, name))
+    if not entries:
+        await update.message.reply_text(
+            "⚠️ No valid birthdays found. Please re-add birthdays with `/addbirthday DD/MM`.",
+            parse_mode="Markdown",
+        )
+        return
     entries.sort()
     lines = ["🎂 *Upcoming Birthdays*\n"]
     for days_left, d, m, name in entries:
@@ -169,11 +179,7 @@ async def deletebirthday_command(update: Update, context: ContextTypes.DEFAULT_T
     target_mention = _mentioned_target(update, context)
 
     if target_mention:
-        try:
-            member = await context.bot.get_chat_member(chat_id, user.id)
-            is_admin = member.status in ("administrator", "creator")
-        except Exception:
-            is_admin = False
+        is_admin = await _is_chat_admin(update, context)
 
         if not is_admin:
             await update.message.reply_text("⚠️ Only admins can delete someone else's birthday.")
@@ -223,14 +229,30 @@ async def deletebirthday_command(update: Update, context: ContextTypes.DEFAULT_T
 async def birthday_check_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Runs daily at 00:01 MYT. Sends birthday greetings to each chat."""
     all_chats = await asyncio.to_thread(get_all_birthday_chats)
+    send_sem = asyncio.Semaphore(8)
+    tasks = []
+
+    async def _send_birthday(_chat_id: int, _uid_str: str, _name: str, _msg: str) -> None:
+        async with send_sem:
+            try:
+                await context.bot.send_message(chat_id=_chat_id, text=_msg)
+                logger.info("Sent birthday message to chat %s for %s", _chat_id, _name)
+            except Exception as e:
+                logger.warning("Birthday message failed for chat %s user %s: %s", _chat_id, _uid_str, e)
+
     for chat_id, bdays in all_chats.items():
-        for uid_str, info in bdays.items():
-            d, m = info.get("day", 0), info.get("month", 0)
-            if _is_birthday_today(d, m):
-                name = info.get("name", "Someone")
-                msg = random.choice(BIRTHDAY_MESSAGES).format(name=name)
-                try:
-                    await context.bot.send_message(chat_id=chat_id, text=msg)
-                    logger.info("Sent birthday message to chat %s for %s", chat_id, name)
-                except Exception as e:
-                    logger.warning("Birthday message failed for chat %s: %s", chat_id, e)
+        try:
+            for uid_str, info in bdays.items():
+                d, m = info.get("day", 0), info.get("month", 0)
+                if _is_birthday_today(d, m):
+                    name = info.get("name", "Someone")
+                    try:
+                        msg = random.choice(BIRTHDAY_MESSAGES).format(name=name)
+                    except Exception as e:
+                        logger.warning("Birthday template failed for chat %s user %s: %s", chat_id, uid_str, e)
+                        msg = f"🎉 Happy birthday, {name}!"
+                    tasks.append(asyncio.create_task(_send_birthday(chat_id, uid_str, name, msg)))
+        except Exception as e:
+            logger.warning("Birthday check failed for chat %s; continuing: %s", chat_id, e)
+    if tasks:
+        await asyncio.gather(*tasks)

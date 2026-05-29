@@ -7,6 +7,7 @@ Daily reminder job + job restore on startup.
 
 import asyncio
 import logging
+import threading
 from datetime import date, datetime
 
 from telegram import Update
@@ -31,6 +32,8 @@ from helpers import (
 logger = logging.getLogger(__name__)
 
 _MAX_NAME_LENGTH = 50
+_reminder_generation_lock = threading.Lock()
+_reminder_generations: dict[str, int] = {}
 
 
 # ── Daily reminder job ────────────────────────────────────────────────────────
@@ -39,6 +42,12 @@ async def daily_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
     job = context.job
     chat_id = job.chat_id
     name = job.data["countdown_name"]
+    generation = job.data.get("generation")
+    jname = _job_name(chat_id, name)
+    with _reminder_generation_lock:
+        if generation != _reminder_generations.get(jname):
+            job.schedule_removal()
+            return
     countdowns = await asyncio.to_thread(get_all_countdowns, chat_id)
     entry = countdowns.get(name)
     if not entry:
@@ -72,6 +81,9 @@ async def daily_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 def _schedule_reminder(app, chat_id: int, name: str, hour: int, minute: int) -> None:
     jname = _job_name(chat_id, name)
+    with _reminder_generation_lock:
+        generation = _reminder_generations.get(jname, 0) + 1
+        _reminder_generations[jname] = generation
     for job in app.job_queue.get_jobs_by_name(jname):
         job.schedule_removal()
     reminder_time = datetime.now(TIMEZONE).replace(
@@ -82,7 +94,7 @@ def _schedule_reminder(app, chat_id: int, name: str, hour: int, minute: int) -> 
         time=reminder_time,
         chat_id=chat_id,
         name=jname,
-        data={"countdown_name": name},
+        data={"countdown_name": name, "generation": generation},
     )
     logger.info(
         "Scheduled reminder for chat %s countdown '%s' at %02d:%02d MYT",

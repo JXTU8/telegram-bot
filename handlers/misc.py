@@ -9,6 +9,7 @@ import asyncio
 import logging
 import os
 import time as _time
+from collections import OrderedDict
 from datetime import datetime, date
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -37,7 +38,7 @@ from handlers.luck import _get_fate
 logger = logging.getLogger(__name__)
 
 # ── Seen-user in-memory cache ─────────────────────────────────────────────────
-_SEEN_CACHE: dict = {}
+_SEEN_CACHE: OrderedDict = OrderedDict()
 _SEEN_CACHE_TTL = 3600
 _SEEN_CACHE_MAX = 10_000
 
@@ -571,11 +572,18 @@ async def seen_user_tracker(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     cache_key = (chat.id, user.id)
     now = _time.monotonic()
     if now - _SEEN_CACHE.get(cache_key, 0) < _SEEN_CACHE_TTL:
+        _SEEN_CACHE.move_to_end(cache_key)
         return
+    expired = [
+        key for key, seen_at in _SEEN_CACHE.items()
+        if now - seen_at >= _SEEN_CACHE_TTL
+    ]
+    for key in expired:
+        del _SEEN_CACHE[key]
     if len(_SEEN_CACHE) >= _SEEN_CACHE_MAX:
         evict_count = _SEEN_CACHE_MAX // 10
-        for old_key in list(_SEEN_CACHE)[:evict_count]:
-            del _SEEN_CACHE[old_key]
+        for _ in range(evict_count):
+            _SEEN_CACHE.popitem(last=False)
         logger.debug("_SEEN_CACHE evicted %s entries (was at cap)", evict_count)
     _SEEN_CACHE[cache_key] = now
     await asyncio.to_thread(track_seen_user, chat.id, user.id, _display_user(user))
@@ -627,8 +635,12 @@ async def conversation_timeout(update: Update, context: ContextTypes.DEFAULT_TYP
         hint = "Start again with the relevant command."
     await _delete_tracked(context)
     context.user_data.clear()
+    chat = getattr(update, "effective_chat", None)
+    if not chat:
+        logger.warning("Conversation timeout fired without an effective chat.")
+        return ConversationHandler.END
     await context.bot.send_message(
-        chat_id=update.effective_chat.id,
+        chat_id=chat.id,
         text=f"⏰ *Timed out!* You took too long to respond.\n{hint}",
         parse_mode="Markdown",
     )

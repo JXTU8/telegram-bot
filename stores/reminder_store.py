@@ -18,7 +18,7 @@ from stores._utils import _decode_list
 
 logger = logging.getLogger(__name__)
 
-_REMIND_COUNT_TTL = 60 * 60 * 25   # 25 hours
+_REMIND_COUNT_TTL = 60 * 60 * 24 * 366   # keep cap state for max 1-year reminders
 
 
 # ── Per-user reminder count ───────────────────────────────────────────────────
@@ -28,12 +28,11 @@ def _remind_count_key(user_id: int) -> str:
 
 
 def increment_remind_count(user_id: int) -> int:
-    """Atomically increment and return the new count. Sets TTL on first increment."""
+    """Atomically increment and return the new count. Keeps TTL aligned with max reminder age."""
     key = _remind_count_key(user_id)
     try:
         new_val = redis.incr(key)
-        if new_val == 1:
-            redis.expire(key, _REMIND_COUNT_TTL)
+        redis.expire(key, _REMIND_COUNT_TTL)
         return new_val
     except Exception as e:
         logger.error("Redis remind count error for user %s: %s", user_id, e)
@@ -85,15 +84,27 @@ def save_remind_job(
     job_id = os.urandom(4).hex()
     key = _remind_jobs_key(chat_id)
     try:
-        jobs = _decode_list(redis.get(key))
-        jobs.append({
+        job = {
             "job_id": job_id,
             "user_id": user_id,
             "user_mention_html": user_mention_html,
             "text": text,
             "fire_at": fire_at,
-        })
-        redis.set(key, json.dumps(jobs, separators=(",", ":")))
+        }
+        if hasattr(redis, "eval"):
+            lua = """
+            local jobs = {}
+            local raw = redis.call('GET', KEYS[1])
+            if raw then jobs = cjson.decode(raw) end
+            table.insert(jobs, cjson.decode(ARGV[1]))
+            redis.call('SET', KEYS[1], cjson.encode(jobs))
+            return 1
+            """
+            redis.eval(lua, 1, key, json.dumps(job, separators=(",", ":")))
+        else:
+            jobs = _decode_list(redis.get(key))
+            jobs.append(job)
+            redis.set(key, json.dumps(jobs, separators=(",", ":")))
         return job_id
     except Exception as e:
         logger.error("Redis remind job save error for chat %s: %s", chat_id, e)
@@ -103,9 +114,25 @@ def save_remind_job(
 def delete_remind_job(chat_id: int, job_id: str) -> None:
     key = _remind_jobs_key(chat_id)
     try:
-        jobs = _decode_list(redis.get(key))
-        jobs = [j for j in jobs if j.get("job_id") != job_id]
-        redis.set(key, json.dumps(jobs, separators=(",", ":")))
+        if hasattr(redis, "eval"):
+            lua = """
+            local jobs = {}
+            local raw = redis.call('GET', KEYS[1])
+            if raw then jobs = cjson.decode(raw) end
+            local kept = {}
+            for _, job in ipairs(jobs) do
+                if job['job_id'] ~= ARGV[1] then
+                    table.insert(kept, job)
+                end
+            end
+            redis.call('SET', KEYS[1], cjson.encode(kept))
+            return 1
+            """
+            redis.eval(lua, 1, key, job_id)
+        else:
+            jobs = _decode_list(redis.get(key))
+            jobs = [j for j in jobs if j.get("job_id") != job_id]
+            redis.set(key, json.dumps(jobs, separators=(",", ":")))
     except Exception as e:
         logger.error("Redis remind job delete error for chat %s: %s", chat_id, e)
 

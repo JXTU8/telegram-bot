@@ -19,14 +19,28 @@ logger = logging.getLogger(__name__)
 
 # ── Shared page builder ───────────────────────────────────────────────────────
 
+_QUOTE_TEXT_DISPLAY_MAX = 3000
+
+
+def _quote_display_text(text: str) -> str:
+    text = text or ""
+    if len(text) <= _QUOTE_TEXT_DISPLAY_MAX:
+        return text
+    return text[:_QUOTE_TEXT_DISPLAY_MAX].rstrip() + "..."
+
+
 def _build_quote_page(chat_id: int, quotes: list, index: int):
     """Return (text, keyboard) for a quote page."""
     total = len(quotes)
+    if total == 0:
+        return "⚠️ No quotes found.", None
+    index = max(0, min(index, total - 1))
     q = quotes[index]
+    quote_text = _quote_display_text(q.get("text", ""))
     text = (
-        f'💬 *"{_escape_md(q["text"])}"*\n'
-        f'— {_escape_md(q["author"])}\n'
-        f'_(saved by {_escape_md(q["saved_by"])}) · #{index + 1}/{total}_'
+        f'💬 *"{_escape_md(quote_text)}"*\n'
+        f'— {_escape_md(q.get("author", "Unknown"))}\n'
+        f'_(saved by {_escape_md(q.get("saved_by", "Unknown"))}) · #{index + 1}/{total}_'
     )
     prev_idx = (index - 1) % total
     next_idx = (index + 1) % total
@@ -75,7 +89,7 @@ async def quote_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await message.reply_text("⚠️ That quote is already in the archive!")
         return
     await message.reply_text(
-        f'💬 Saved!\n*"{_escape_md(text)}"* — {_escape_md(author)}\n_#{count} in this chat_',
+        f'💬 Saved!\n*"{_escape_md(_quote_display_text(text))}"* — {_escape_md(author)}\n_#{count} in this chat_',
         parse_mode="Markdown",
     )
 
@@ -113,7 +127,10 @@ async def quotes_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not quotes:
         await query.edit_message_text("⚠️ No quotes found.")
         return
-    index = index % len(quotes)
+    if index >= len(quotes):
+        index = len(quotes) - 1
+    elif index < 0:
+        index = 0
     text, keyboard = _build_quote_page(chat_id, quotes, index)
     try:
         await query.edit_message_text(text, parse_mode="Markdown", reply_markup=keyboard)

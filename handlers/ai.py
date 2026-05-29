@@ -13,6 +13,7 @@ import random
 import threading
 import time
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 
 import requests
 from groq import Groq
@@ -41,7 +42,11 @@ else:
 
 SERPER_API_KEY = os.getenv("SERPER_API_KEY", "")
 SERPER_URL = "https://google.serper.dev/search"
-SERPER_SESSION = requests.Session()
+_serper_local = threading.local()
+_AI_EXECUTOR = ThreadPoolExecutor(
+    max_workers=max(2, env_int("AI_THREAD_WORKERS", 3)),
+    thread_name_prefix="ai-io",
+)
 
 SEARCH_CACHE_TTL_SECONDS = max(0, env_int("SEARCH_CACHE_TTL_SECONDS", 900))
 SEARCH_CACHE_MAX_ITEMS = 128
@@ -49,6 +54,19 @@ MAX_ASK_LENGTH = 500
 
 _SEARCH_CACHE: OrderedDict = OrderedDict()
 _search_cache_lock = threading.Lock()
+
+
+async def _run_ai_io(func, *args):
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_AI_EXECUTOR, lambda: func(*args))
+
+
+def _serper_session() -> requests.Session:
+    session = getattr(_serper_local, "session", None)
+    if session is None:
+        session = requests.Session()
+        _serper_local.session = session
+    return session
 
 
 def _cache_key(query: str) -> str:
@@ -85,7 +103,7 @@ def _search_web(query: str) -> str:
     if cached is not None:
         return cached
     try:
-        resp = SERPER_SESSION.post(
+        resp = _serper_session().post(
             SERPER_URL,
             headers={"X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json"},
             json={"q": query, "num": 5},
@@ -167,21 +185,31 @@ def _call_groq_fun(prompt: str) -> str:
 _ASK_COOLDOWNS: dict = {}           # user_id -> monotonic timestamp of last ask
 _ASK_COOLDOWN_SECONDS: float = 3.0  # minimum gap between AI calls per user
 _ASK_COOLDOWNS_MAX = 5_000          # evict oldest entries beyond this size
+_ask_cooldowns_lock = threading.Lock()
 
 
 def _ask_on_cooldown(user_id: int) -> float:
     """Return remaining cooldown seconds (0.0 = clear)."""
-    remaining = _ASK_COOLDOWN_SECONDS - (time.monotonic() - _ASK_COOLDOWNS.get(user_id, 0))
-    return max(0.0, remaining)
+    with _ask_cooldowns_lock:
+        remaining = _ASK_COOLDOWN_SECONDS - (time.monotonic() - _ASK_COOLDOWNS.get(user_id, 0))
+        return max(0.0, remaining)
 
 
 def _set_ask_cooldown(user_id: int) -> None:
-    if len(_ASK_COOLDOWNS) >= _ASK_COOLDOWNS_MAX:
-        # Evict the oldest 10 % (dict preserves insertion order in Py 3.7+)
-        evict = _ASK_COOLDOWNS_MAX // 10
-        for k in list(_ASK_COOLDOWNS)[:evict]:
-            del _ASK_COOLDOWNS[k]
-    _ASK_COOLDOWNS[user_id] = time.monotonic()
+    with _ask_cooldowns_lock:
+        now = time.monotonic()
+        expired = [
+            uid for uid, last_used in _ASK_COOLDOWNS.items()
+            if now - last_used > _ASK_COOLDOWN_SECONDS
+        ]
+        for uid in expired:
+            del _ASK_COOLDOWNS[uid]
+        if len(_ASK_COOLDOWNS) >= _ASK_COOLDOWNS_MAX:
+            # Evict the oldest 10 % (dict preserves insertion order in Py 3.7+)
+            evict = _ASK_COOLDOWNS_MAX // 10
+            for k in list(_ASK_COOLDOWNS)[:evict]:
+                del _ASK_COOLDOWNS[k]
+        _ASK_COOLDOWNS[user_id] = now
 
 
 # ── Ask conversation context (Redis-backed, TTL 6 h) ─────────────────────────
@@ -233,9 +261,10 @@ async def _process_ask(
 ) -> None:
     """Core logic shared by /ask and the plain-text follow-up handler."""
     thinking_msg = await reply_target.reply_text("🤖 Searching and thinking...")
+    answer_displayed = False
     try:
-        search_context = await asyncio.to_thread(_search_web, question)
-        answer = await asyncio.to_thread(_call_groq, question, search_context, history)
+        search_context = await _run_ai_io(_search_web, question)
+        answer = await _run_ai_io(_call_groq, question, search_context, history)
 
         prior = history or []
         new_history = (prior + [
@@ -257,6 +286,7 @@ async def _process_ask(
         remaining_answer = answer[first_chunk_limit:]
 
         await thinking_msg.edit_text(header + first_chunk)
+        answer_displayed = True
         await asyncio.to_thread(_save_ask_context, chat_id, thinking_msg.message_id, new_history)
 
         # Fix 2: mark overflow chunks with _ASK_OVERFLOW_PREFIX so the followup
@@ -270,7 +300,8 @@ async def _process_ask(
             )
     except Exception as e:
         logger.error("Ask error: %s", e)
-        await thinking_msg.edit_text("❌ Something went wrong with the AI. Please try again later.")
+        if not answer_displayed:
+            await thinking_msg.edit_text("❌ Something went wrong with the AI. Please try again later.")
 
 
 def _is_ask_bot_message(text: str | None) -> bool:
@@ -340,6 +371,8 @@ async def ask_followup_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
     message = update.message
     if not message or not message.text:
+        return
+    if update.effective_user and update.effective_user.id == context.bot.id:
         return
 
     replied = message.reply_to_message

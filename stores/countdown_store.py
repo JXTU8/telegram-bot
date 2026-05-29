@@ -61,6 +61,50 @@ def add_countdown(
     created_by: int,
 ) -> str:
     """Add or overwrite a named countdown. Returns the short code."""
+    if hasattr(redis, "eval"):
+        code = ""
+        for _ in range(200):
+            data = _load_chat(chat_id)
+            existing_code = data.get(name, {}).get("code", "")
+            code = existing_code or _gen_code({v.get("code", "") for v in data.values()})
+            entry = {
+                "target_date": target_date.isoformat(),
+                "reminder_hour": hour,
+                "reminder_minute": minute,
+                "created_by": created_by,
+                "code": code,
+            }
+            lua = """
+            local raw = redis.call('GET', KEYS[1])
+            local data = {}
+            if raw then data = cjson.decode(raw) end
+            if data[ARGV[1]] and data[ARGV[1]]['code'] and data[ARGV[1]]['code'] ~= '' then
+                local existing = data[ARGV[1]]['code']
+                local entry = cjson.decode(ARGV[2])
+                entry['code'] = existing
+                data[ARGV[1]] = entry
+                redis.call('SET', KEYS[1], cjson.encode(data))
+                return existing
+            end
+            for _, item in pairs(data) do
+                if item['code'] == ARGV[3] then
+                    return ''
+                end
+            end
+            data[ARGV[1]] = cjson.decode(ARGV[2])
+            redis.call('SET', KEYS[1], cjson.encode(data))
+            return ARGV[3]
+            """
+            saved_code = redis.eval(
+                lua, 1, _rkey(chat_id), name,
+                json.dumps(entry, separators=(",", ":")),
+                code,
+            )
+            if saved_code:
+                return saved_code.decode("utf-8") if isinstance(saved_code, bytes) else str(saved_code)
+        logger.warning("add_countdown: could not reserve unique code after retries for chat %s", chat_id)
+        return code
+
     data = _load_chat(chat_id)
     existing_codes = {v.get("code", "") for v in data.values()}
     existing_code = data.get(name, {}).get("code", "")
@@ -85,6 +129,21 @@ def get_all_countdowns(chat_id: int) -> dict:
 
 
 def remove_countdown(chat_id: int, name: str) -> bool:
+    if hasattr(redis, "eval"):
+        lua = """
+        local raw = redis.call('GET', KEYS[1])
+        if not raw then return 0 end
+        local data = cjson.decode(raw)
+        if not data[ARGV[1]] then return 0 end
+        data[ARGV[1]] = nil
+        redis.call('SET', KEYS[1], cjson.encode(data))
+        return 1
+        """
+        try:
+            return bool(redis.eval(lua, 1, _rkey(chat_id), name))
+        except Exception as e:
+            logger.error("Redis remove countdown error for chat %s: %s", chat_id, e)
+            return False
     data = _load_chat(chat_id)
     if name in data:
         del data[name]

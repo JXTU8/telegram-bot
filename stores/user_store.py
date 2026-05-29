@@ -25,6 +25,29 @@ def _seen_key(chat_id: int) -> str:
 def track_seen_user(chat_id: int, user_id: int, name: str) -> None:
     key = _seen_key(chat_id)
     try:
+        if hasattr(redis, "eval"):
+            lua = """
+            local users = {}
+            local raw = redis.call('GET', KEYS[1])
+            if raw then users = cjson.decode(raw) end
+            users[ARGV[1]] = ARGV[2]
+            local count = 0
+            for _ in pairs(users) do
+                count = count + 1
+            end
+            if count > tonumber(ARGV[3]) then
+                local evict = count - tonumber(ARGV[3])
+                for uid in pairs(users) do
+                    users[uid] = nil
+                    evict = evict - 1
+                    if evict <= 0 then break end
+                end
+            end
+            redis.call('SET', KEYS[1], cjson.encode(users), 'EX', ARGV[4])
+            return 1
+            """
+            redis.eval(lua, 1, key, str(user_id), name, str(_SEEN_USERS_CAP), str(_SEEN_USERS_TTL))
+            return
         users = _decode_dict(redis.get(key))
         users[str(user_id)] = name
         # Evict oldest entries when over cap (insertion order preserved in Python 3.7+)
