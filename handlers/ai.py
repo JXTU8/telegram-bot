@@ -3,6 +3,10 @@ handlers/ai.py
 ──────────────
 Groq AI client, Serper web search, /ask command, and /choose flow.
 Other handlers that need AI (roast, 8ball, hot…) import _call_groq_fun from here.
+
+Search policy:
+  - Group chats: web search enabled for everyone.
+  - Private (DM) chats: web search only for bot owner; others get plain Groq.
 """
 from __future__ import annotations
 
@@ -18,12 +22,13 @@ from concurrent.futures import ThreadPoolExecutor
 import requests
 from groq import Groq
 from telegram import Update
+from telegram.constants import ChatType
 from telegram.error import TelegramError
 from telegram.ext import ContextTypes, ConversationHandler
 
 from config import env_int
 from constants import THINKING_MESSAGES, VERDICT_LINES
-from helpers import _track, _delete_tracked, ASK_DECISION, ASK_OPTIONS, CONV_TIMEOUT
+from helpers import _track, _delete_tracked, ASK_DECISION, ASK_OPTIONS, CONV_TIMEOUT, _is_owner
 
 logger = logging.getLogger(__name__)
 
@@ -131,7 +136,7 @@ def _search_web(query: str) -> str:
         return ""
 
 
-# ── Fix 13: shared Groq base function ────────────────────────────────────────
+# ── Shared Groq base function ─────────────────────────────────────────────────
 
 def _groq_complete(messages: list, max_tokens: int = 1024, temperature: float = 0.7) -> str:
     """Single low-level call to Groq. Shared by all public helpers."""
@@ -180,11 +185,11 @@ def _call_groq_fun(prompt: str) -> str:
     )
 
 
-# ── Fix 9: per-user ask rate limiting ────────────────────────────────────────
+# ── Per-user ask rate limiting ────────────────────────────────────────────────
 
-_ASK_COOLDOWNS: dict = {}           # user_id -> monotonic timestamp of last ask
-_ASK_COOLDOWN_SECONDS: float = 3.0  # minimum gap between AI calls per user
-_ASK_COOLDOWNS_MAX = 5_000          # evict oldest entries beyond this size
+_ASK_COOLDOWNS: dict = {}
+_ASK_COOLDOWN_SECONDS: float = 3.0
+_ASK_COOLDOWNS_MAX = 5_000
 _ask_cooldowns_lock = threading.Lock()
 
 
@@ -205,7 +210,6 @@ def _set_ask_cooldown(user_id: int) -> None:
         for uid in expired:
             del _ASK_COOLDOWNS[uid]
         if len(_ASK_COOLDOWNS) >= _ASK_COOLDOWNS_MAX:
-            # Evict the oldest 10 % (dict preserves insertion order in Py 3.7+)
             evict = _ASK_COOLDOWNS_MAX // 10
             for k in list(_ASK_COOLDOWNS)[:evict]:
                 del _ASK_COOLDOWNS[k]
@@ -215,8 +219,8 @@ def _set_ask_cooldown(user_id: int) -> None:
 # ── Ask conversation context (Redis-backed, TTL 6 h) ─────────────────────────
 
 _ASK_CTX_TTL = 6 * 3600
-_ASK_PREFIX         = "🤖 Q: "   # prefix on the first answer message
-_ASK_OVERFLOW_PREFIX = "🤖 ↪ "  # Fix 2: prefix on continuation/overflow messages
+_ASK_PREFIX          = "🤖 Q: "
+_ASK_OVERFLOW_PREFIX = "🤖 ↪ "
 
 
 def _ask_ctx_key(chat_id: int, message_id: int) -> str:
@@ -258,19 +262,22 @@ async def _process_ask(
     chat_id: int,
     reply_target,
     context: ContextTypes.DEFAULT_TYPE,
+    use_search: bool = True,
 ) -> None:
     """Core logic shared by /ask and the plain-text follow-up handler."""
-    thinking_msg = await reply_target.reply_text("🤖 Searching and thinking...")
+    thinking_msg = await reply_target.reply_text(
+        "🤖 Searching and thinking..." if use_search else "🤖 Thinking..."
+    )
     answer_displayed = False
     try:
-        search_context = await _run_ai_io(_search_web, question)
+        search_context = await _run_ai_io(_search_web, question) if use_search else ""
         answer = await _run_ai_io(_call_groq, question, search_context, history)
 
         prior = history or []
         new_history = (prior + [
             {"role": "user",      "content": question},
             {"role": "assistant", "content": answer},
-        ])[-6:]   # cap at 3 exchanges
+        ])[-6:]
 
         max_len = 3900
         if history:
@@ -289,8 +296,6 @@ async def _process_ask(
         answer_displayed = True
         await asyncio.to_thread(_save_ask_context, chat_id, thinking_msg.message_id, new_history)
 
-        # Fix 2: mark overflow chunks with _ASK_OVERFLOW_PREFIX so the followup
-        # handler can detect them and load their context.
         for i in range(0, len(remaining_answer), max_len):
             overflow_msg = await thinking_msg.reply_text(
                 _ASK_OVERFLOW_PREFIX + remaining_answer[i:i + max_len]
@@ -334,7 +339,6 @@ async def ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         return
 
-    # Fix 9: rate limit
     user_id = update.effective_user.id
     remaining = _ask_on_cooldown(user_id)
     if remaining:
@@ -352,11 +356,15 @@ async def ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         replied
         and replied.from_user
         and replied.from_user.id == context.bot.id
-        and _is_ask_bot_message(replied.text)   # Fix 2: covers overflow too
+        and _is_ask_bot_message(replied.text)
     ):
         history = await asyncio.to_thread(_load_ask_context, chat_id, replied.message_id)
 
-    await _process_ask(question, history, chat_id, update.message, context)
+    # Web search allowed in groups, or in DMs only for the bot owner
+    is_private = update.effective_chat.type == ChatType.PRIVATE
+    use_search = (not is_private) or _is_owner(update.effective_user)
+
+    await _process_ask(question, history, chat_id, update.message, context, use_search=use_search)
 
 
 # ── Plain-text reply follow-up handler ───────────────────────────────────────
@@ -380,7 +388,7 @@ async def ask_followup_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         not replied
         or not replied.from_user
         or replied.from_user.id != context.bot.id
-        or not _is_ask_bot_message(replied.text)   # Fix 2: covers overflow
+        or not _is_ask_bot_message(replied.text)
     ):
         return
 
@@ -388,7 +396,6 @@ async def ask_followup_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     if not question or len(question) > MAX_ASK_LENGTH:
         return
 
-    # Fix 9: rate limit followups too
     user_id = update.effective_user.id
     remaining = _ask_on_cooldown(user_id)
     if remaining:
@@ -407,11 +414,15 @@ async def ask_followup_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         return
 
+    # Web search allowed in groups, or in DMs only for the bot owner
+    is_private = update.effective_chat.type == ChatType.PRIVATE
+    use_search = (not is_private) or _is_owner(update.effective_user)
+
     logger.info(
         "ask_followup from user %s (depth %s, prev msg %s)",
         update.effective_user.id, len(history) // 2, replied.message_id,
     )
-    await _process_ask(question, history, chat_id, message, context)
+    await _process_ask(question, history, chat_id, message, context, use_search=use_search)
 
 
 # ── /choose flow ──────────────────────────────────────────────────────────────
