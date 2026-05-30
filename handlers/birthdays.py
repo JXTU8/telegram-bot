@@ -2,6 +2,16 @@
 handlers/birthdays.py
 ─────────────────────
 /birthday, /addbirthday, /deletebirthday, and the daily birthday check job.
+
+Fixes applied:
+  Bug 1 — deletebirthday_command: typed @username mentions no longer silently
+           fail for admins; error message is now accurate about the limitation.
+  Bug 2 — birthday_command listing: corrupt Redis entries (missing day/month)
+           are now skipped instead of displaying as January 1 birthdays.
+  Bug 3 — _parse_and_save_birthday: _days_until_birthday is now wrapped in
+           try/except so a save that succeeds always sends a confirmation.
+  Bug 4 — birthday_check_job: a daily Redis claim key (SETNX) prevents
+           duplicate birthday messages on bot restart at midnight.
 """
 
 import asyncio
@@ -14,7 +24,9 @@ from datetime import date
 from telegram import Update
 from telegram.ext import ContextTypes
 
+from config import TIMEZONE
 from constants import BIRTHDAY_MESSAGES, _MONTH_NAMES
+from db import redis
 from stores.birthday_store import save_birthday, get_all_birthdays, get_all_birthday_chats, delete_birthday
 from helpers import _display_user, _arg_text, _mentioned_target, _escape_md, _today, _is_chat_admin
 
@@ -65,7 +77,7 @@ async def _parse_and_save_birthday(
     match = re.fullmatch(r"(\d{1,2})[/\-.](\d{1,2})", text.strip())
     if not match:
         await update.message.reply_text(
-            "⚠️ Use the format `DD/MM`.\n_(e.g. `/birthday 25/12` for December 25)_",
+            "⚠️ Use the format `DD/MM`.\n_(e.g. `/addbirthday 25/12` for December 25)_",
             parse_mode="Markdown",
         )
         return False
@@ -81,8 +93,16 @@ async def _parse_and_save_birthday(
 
     name = _display_user(user)
     await asyncio.to_thread(save_birthday, chat_id, user.id, name, day, month)
-    days_left = _days_until_birthday(day, month)
-    tag = "🎉 That's today!" if days_left == 0 else f"in {days_left} days"
+
+    # Bug 3 fix: _days_until_birthday is called AFTER the save succeeds.
+    # Wrap it so an unexpected date-math edge case never swallows the
+    # confirmation message — the birthday is already stored either way.
+    try:
+        days_left = _days_until_birthday(day, month)
+        tag = "🎉 That's today!" if days_left == 0 else f"in {days_left} days"
+    except ValueError:
+        tag = ""
+
     await update.message.reply_text(
         f"🎂 *Birthday saved!*\n"
         f"*{_escape_md(name)}* — {day:02d} {_MONTH_NAMES[month]}  _{tag}_\n\n"
@@ -123,9 +143,20 @@ async def birthday_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             parse_mode="Markdown",
         )
         return
+
     entries = []
     for uid_str, info in bdays.items():
-        d, m = info.get("day", 1), info.get("month", 1)
+        # Bug 2 fix: use 0 as default (matches birthday_check_job) so that
+        # corrupt entries with missing day/month are explicitly detected and
+        # skipped rather than silently displayed as January 1 birthdays.
+        d = info.get("day", 0)
+        m = info.get("month", 0)
+        if not d or not m:
+            logger.warning(
+                "Skipping corrupt birthday entry (missing day/month) "
+                "for user %s in chat %s", uid_str, chat_id,
+            )
+            continue
         name = info.get("name", uid_str)
         try:
             days_left = _days_until_birthday(d, m)
@@ -133,12 +164,14 @@ async def birthday_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             logger.warning("Skipping corrupt birthday in chat %s user %s: %s", chat_id, uid_str, e)
             continue
         entries.append((days_left, d, m, name))
+
     if not entries:
         await update.message.reply_text(
             "⚠️ No valid birthdays found. Please re-add birthdays with `/addbirthday DD/MM`.",
             parse_mode="Markdown",
         )
         return
+
     entries.sort()
     lines = ["🎂 *Upcoming Birthdays*\n"]
     for days_left, d, m, name in entries:
@@ -185,6 +218,12 @@ async def deletebirthday_command(update: Update, context: ContextTypes.DEFAULT_T
             await update.message.reply_text("⚠️ Only admins can delete someone else's birthday.")
             return
 
+        # Bug 1 fix: only text_mention entities carry a .user object with the
+        # real user ID. A plain typed @username produces a "mention" entity
+        # with no user ID — the Bot API gives us no way to resolve it to an ID
+        # without the user having interacted with the bot.
+        # We attempt to extract the ID, and if unavailable we surface a clear,
+        # accurate error instead of the previous misleading message.
         target_uid = None
         for entity in (update.message.entities or []):
             if entity.type == "text_mention" and entity.user:
@@ -193,7 +232,10 @@ async def deletebirthday_command(update: Update, context: ContextTypes.DEFAULT_T
 
         if not target_uid:
             await update.message.reply_text(
-                "⚠️ Please mention the user directly (they must be a group member with a visible account)."
+                "⚠️ Couldn't resolve that user's ID.\n\n"
+                "Please select them from Telegram's mention picker "
+                "(tap `@` and choose from the list) rather than typing the username manually. "
+                "Typed @usernames don't carry the user ID the bot needs to delete their birthday."
             )
             return
 
@@ -228,6 +270,9 @@ async def deletebirthday_command(update: Update, context: ContextTypes.DEFAULT_T
 
 async def birthday_check_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Runs daily at 00:01 MYT. Sends birthday greetings to each chat."""
+    from datetime import datetime
+    today_str = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
+
     all_chats = await asyncio.to_thread(get_all_birthday_chats)
     send_sem = asyncio.Semaphore(8)
     tasks = []
@@ -238,21 +283,53 @@ async def birthday_check_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 await context.bot.send_message(chat_id=_chat_id, text=_msg)
                 logger.info("Sent birthday message to chat %s for %s", _chat_id, _name)
             except Exception as e:
-                logger.warning("Birthday message failed for chat %s user %s: %s", _chat_id, _uid_str, e)
+                logger.warning(
+                    "Birthday message failed for chat %s user %s: %s",
+                    _chat_id, _uid_str, e,
+                )
 
     for chat_id, bdays in all_chats.items():
         try:
             for uid_str, info in bdays.items():
                 d, m = info.get("day", 0), info.get("month", 0)
-                if _is_birthday_today(d, m):
-                    name = info.get("name", "Someone")
-                    try:
-                        msg = random.choice(BIRTHDAY_MESSAGES).format(name=name)
-                    except Exception as e:
-                        logger.warning("Birthday template failed for chat %s user %s: %s", chat_id, uid_str, e)
-                        msg = f"🎉 Happy birthday, {name}!"
-                    tasks.append(asyncio.create_task(_send_birthday(chat_id, uid_str, name, msg)))
+                if not _is_birthday_today(d, m):
+                    continue
+
+                # Bug 4 fix: use a daily SETNX claim key so that if the bot
+                # restarts exactly at midnight, the job cannot fire twice and
+                # send duplicate birthday messages to the same chat.
+                claim_key = f"bday_sent:{chat_id}:{uid_str}:{today_str}"
+                try:
+                    claimed = await asyncio.to_thread(redis.setnx, claim_key, "1")
+                    if not claimed:
+                        logger.info(
+                            "Birthday already sent for user %s in chat %s today, skipping.",
+                            uid_str, chat_id,
+                        )
+                        continue
+                    # Expire after 26 hours so the key is gone well before the
+                    # next midnight run.
+                    await asyncio.to_thread(redis.expire, claim_key, 60 * 60 * 26)
+                except Exception as e:
+                    # If Redis is temporarily unavailable we still attempt the
+                    # send rather than silently skipping the birthday message.
+                    logger.warning(
+                        "Could not set birthday claim key for user %s chat %s: %s — sending anyway.",
+                        uid_str, chat_id, e,
+                    )
+
+                name = info.get("name", "Someone")
+                try:
+                    msg = random.choice(BIRTHDAY_MESSAGES).format(name=name)
+                except Exception as e:
+                    logger.warning(
+                        "Birthday template failed for chat %s user %s: %s",
+                        chat_id, uid_str, e,
+                    )
+                    msg = f"🎉 Happy birthday, {name}!"
+                tasks.append(asyncio.create_task(_send_birthday(chat_id, uid_str, name, msg)))
         except Exception as e:
             logger.warning("Birthday check failed for chat %s; continuing: %s", chat_id, e)
+
     if tasks:
         await asyncio.gather(*tasks)
