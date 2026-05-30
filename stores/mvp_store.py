@@ -41,41 +41,20 @@ def save_mvp_win(chat_id: int, date_str: str, user_id: str, name: str) -> dict:
     try:
         daily_key = _daily_key(chat_id, date_str)
         daily_json = json.dumps(daily, separators=(",", ":"))
-        if hasattr(redis, "setnx"):
-            created = redis.setnx(daily_key, daily_json)
-            if not created:
-                existing = _decode_dict(redis.get(daily_key))
-                return existing or daily
-            redis.expire(daily_key, _MVP_DAILY_TTL)
-        else:
-            existing = _decode_dict(redis.get(daily_key))
-            if existing:
-                return existing
-            redis.set(daily_key, daily_json, ex=_MVP_DAILY_TTL)
+
+        existing = _decode_dict(redis.get(daily_key))
+        if existing:
+            return existing
+        redis.set(daily_key, daily_json, ex=_MVP_DAILY_TTL)
 
         wins_key = _wins_key(chat_id)
-        if hasattr(redis, "eval"):
-            lua = """
-            local board = {}
-            local raw = redis.call('GET', KEYS[1])
-            if raw then board = cjson.decode(raw) end
-            local entry = board[ARGV[1]] or {name = ARGV[2], wins = 0, last_won = ''}
-            entry['name'] = ARGV[2]
-            entry['wins'] = tonumber(entry['wins'] or 0) + 1
-            entry['last_won'] = ARGV[3]
-            board[ARGV[1]] = entry
-            redis.call('SET', KEYS[1], cjson.encode(board))
-            return 1
-            """
-            redis.eval(lua, 1, wins_key, user_id, name, date_str)
-        else:
-            board = _decode_dict(redis.get(wins_key))
-            entry = board.get(user_id, {"name": name, "wins": 0, "last_won": ""})
-            entry["name"] = name
-            entry["wins"] = int(entry.get("wins", 0)) + 1
-            entry["last_won"] = date_str
-            board[user_id] = entry
-            redis.set(wins_key, json.dumps(board, separators=(",", ":")))
+        board = _decode_dict(redis.get(wins_key))
+        entry = board.get(user_id, {"name": name, "wins": 0, "last_won": ""})
+        entry["name"] = name
+        entry["wins"] = int(entry.get("wins", 0)) + 1
+        entry["last_won"] = date_str
+        board[user_id] = entry
+        redis.set(wins_key, json.dumps(board, separators=(",", ":")))
         return daily
     except Exception as e:
         logger.error("Redis mvp save error for chat %s user %s: %s", chat_id, user_id, e)

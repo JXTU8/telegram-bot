@@ -27,30 +27,6 @@ def save_quote(chat_id: int, author: str, text: str, saved_by: str) -> int:
     """
     key = _quotes_key(chat_id)
     try:
-        if hasattr(redis, "eval"):
-            lua = """
-            local quotes = {}
-            local raw = redis.call('GET', KEYS[1])
-            if raw then quotes = cjson.decode(raw) end
-            local text_norm = string.lower(ARGV[2])
-            for _, q in ipairs(quotes) do
-                if string.lower(q['text'] or '') == text_norm and (q['author'] or '') == ARGV[1] then
-                    return -1
-                end
-            end
-            table.insert(quotes, cjson.decode(ARGV[3]))
-            while #quotes > tonumber(ARGV[4]) do
-                table.remove(quotes, 1)
-            end
-            redis.call('SET', KEYS[1], cjson.encode(quotes))
-            return #quotes
-            """
-            quote = {"author": author, "text": text, "saved_by": saved_by}
-            return int(redis.eval(
-                lua, 1, key, author, text.strip().casefold(),
-                json.dumps(quote, separators=(",", ":")),
-                str(_QUOTE_CAP),
-            ))
         quotes = _decode_list(redis.get(key))
         text_norm = text.strip().casefold()
         if any(
@@ -100,24 +76,6 @@ def get_all_quotes(chat_id: int) -> list:
 def delete_quote(chat_id: int, index: int) -> tuple:
     key = _quotes_key(chat_id)
     try:
-        if hasattr(redis, "eval"):
-            lua = """
-            local quotes = {}
-            local raw = redis.call('GET', KEYS[1])
-            if raw then quotes = cjson.decode(raw) end
-            local idx = tonumber(ARGV[1])
-            if idx < 1 or idx > #quotes then
-                return cjson.encode({ok = false, count = #quotes})
-            end
-            local removed = table.remove(quotes, idx)
-            redis.call('SET', KEYS[1], cjson.encode(quotes))
-            return cjson.encode({ok = true, text = removed['text'] or '', author = removed['author'] or ''})
-            """
-            result = redis.eval(lua, 1, key, str(index))
-            data = json.loads(result.decode("utf-8") if isinstance(result, bytes) else result)
-            if not data.get("ok"):
-                return False, f"⚠️ Invalid number. There are {data.get('count', 0)} quote(s)."
-            return True, f'✅ Deleted quote #{index}: "{data["text"]}" — {data["author"]}'
         quotes = _decode_list(redis.get(key))
         if not (1 <= index <= len(quotes)):
             return False, f"⚠️ Invalid number. There are {len(quotes)} quote(s)."

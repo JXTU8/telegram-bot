@@ -18,7 +18,7 @@ from stores._utils import _decode_list
 
 logger = logging.getLogger(__name__)
 
-_REMIND_COUNT_TTL = 60 * 60 * 24 * 366   # keep cap state for max 1-year reminders
+_REMIND_COUNT_TTL = 60 * 60 * 24 * 366
 
 
 # ── Per-user reminder count ───────────────────────────────────────────────────
@@ -28,7 +28,6 @@ def _remind_count_key(user_id: int) -> str:
 
 
 def increment_remind_count(user_id: int) -> int:
-    """Atomically increment and return the new count. Keeps TTL aligned with max reminder age."""
     key = _remind_count_key(user_id)
     try:
         new_val = redis.incr(key)
@@ -48,17 +47,12 @@ def get_remind_count(user_id: int) -> int:
 
 
 def decrement_remind_count(user_id: int) -> None:
-    """Atomically decrement the reminder count, flooring at 0 via Lua script."""
     key = _remind_count_key(user_id)
-    lua_script = """
-    local v = tonumber(redis.call('GET', KEYS[1]))
-    if v and v > 0 then
-        return redis.call('DECR', KEYS[1])
-    end
-    return 0
-    """
     try:
-        redis.eval(lua_script, 1, key)
+        raw = redis.get(key)
+        v = int(raw) if raw is not None else 0
+        if v > 0:
+            redis.decr(key)
     except Exception as e:
         logger.error("Redis remind decr error for user %s: %s", user_id, e)
 
@@ -80,7 +74,6 @@ def save_remind_job(
     text: str,
     fire_at: float,
 ) -> str:
-    """Persist a remind job. Returns a unique job_id string, or empty string on failure."""
     job_id = os.urandom(4).hex()
     key = _remind_jobs_key(chat_id)
     try:
@@ -91,20 +84,9 @@ def save_remind_job(
             "text": text,
             "fire_at": fire_at,
         }
-        if hasattr(redis, "eval"):
-            lua = """
-            local jobs = {}
-            local raw = redis.call('GET', KEYS[1])
-            if raw then jobs = cjson.decode(raw) end
-            table.insert(jobs, cjson.decode(ARGV[1]))
-            redis.call('SET', KEYS[1], cjson.encode(jobs))
-            return 1
-            """
-            redis.eval(lua, 1, key, json.dumps(job, separators=(",", ":")))
-        else:
-            jobs = _decode_list(redis.get(key))
-            jobs.append(job)
-            redis.set(key, json.dumps(jobs, separators=(",", ":")))
+        jobs = _decode_list(redis.get(key))
+        jobs.append(job)
+        redis.set(key, json.dumps(jobs, separators=(",", ":")))
         return job_id
     except Exception as e:
         logger.error("Redis remind job save error for chat %s: %s", chat_id, e)
@@ -114,34 +96,14 @@ def save_remind_job(
 def delete_remind_job(chat_id: int, job_id: str) -> None:
     key = _remind_jobs_key(chat_id)
     try:
-        if hasattr(redis, "eval"):
-            lua = """
-            local jobs = {}
-            local raw = redis.call('GET', KEYS[1])
-            if raw then jobs = cjson.decode(raw) end
-            local kept = {}
-            for _, job in ipairs(jobs) do
-                if job['job_id'] ~= ARGV[1] then
-                    table.insert(kept, job)
-                end
-            end
-            redis.call('SET', KEYS[1], cjson.encode(kept))
-            return 1
-            """
-            redis.eval(lua, 1, key, job_id)
-        else:
-            jobs = _decode_list(redis.get(key))
-            jobs = [j for j in jobs if j.get("job_id") != job_id]
-            redis.set(key, json.dumps(jobs, separators=(",", ":")))
+        jobs = _decode_list(redis.get(key))
+        jobs = [j for j in jobs if j.get("job_id") != job_id]
+        redis.set(key, json.dumps(jobs, separators=(",", ":")))
     except Exception as e:
         logger.error("Redis remind job delete error for chat %s: %s", chat_id, e)
 
 
 def try_claim_remind_job(job_id: str) -> bool:
-    """
-    Atomically claim a remind job so only one scheduler closure fires it.
-    Returns True if successfully claimed, False if already claimed.
-    """
     key = _remind_claim_key(job_id)
     try:
         claimed = redis.setnx(key, "1")
@@ -150,11 +112,10 @@ def try_claim_remind_job(job_id: str) -> bool:
         return bool(claimed)
     except Exception as e:
         logger.error("Redis remind claim error for job %s: %s", job_id, e)
-        return True  # on Redis failure, allow the fire rather than miss it
+        return True
 
 
 def get_user_remind_jobs(chat_id: int, user_id: int) -> list:
-    """Return still-pending remind jobs for a specific user in a chat."""
     key = _remind_jobs_key(chat_id)
     try:
         jobs = _decode_list(redis.get(key))
@@ -169,7 +130,6 @@ def get_user_remind_jobs(chat_id: int, user_id: int) -> list:
 
 
 def get_remind_job(chat_id: int, user_id: int, job_id: str) -> dict:
-    """Return a specific remind job even when it is due or slightly overdue."""
     key = _remind_jobs_key(chat_id)
     try:
         jobs = _decode_list(redis.get(key))
@@ -183,10 +143,6 @@ def get_remind_job(chat_id: int, user_id: int, job_id: str) -> dict:
 
 
 def get_all_remind_jobs() -> dict:
-    """
-    Return {chat_id: [job_dicts]} for all chats with pending remind jobs.
-    Drops jobs more than 10 minutes overdue. Uses SCAN + mget.
-    """
     from stores._utils import _key_to_chat_id
     try:
         keys = []
@@ -215,11 +171,6 @@ def get_all_remind_jobs() -> dict:
 
 
 def get_all_remind_jobs_for_restore() -> dict:
-    """
-    Like get_all_remind_jobs but returns ALL jobs including overdue ones.
-    Used exclusively by restore_remind_jobs on startup so no reminder is
-    silently dropped when the bot restarts after a prolonged outage.
-    """
     from stores._utils import _key_to_chat_id
     try:
         keys = []
@@ -237,7 +188,6 @@ def get_all_remind_jobs_for_restore() -> dict:
             chat_id = _key_to_chat_id(key)
             if chat_id is None:
                 continue
-            # Keep every job that has a fire_at; drop only obviously corrupt entries
             valid = [j for j in _decode_list(raw) if j.get("fire_at") is not None]
             if valid:
                 result[chat_id] = valid
@@ -248,14 +198,12 @@ def get_all_remind_jobs_for_restore() -> dict:
 
 
 # ── Remindall (group reminder) job persistence ────────────────────────────────
-# Fix 6: /remindall jobs are now persisted so they survive bot restarts.
 
 def _remindall_jobs_key(chat_id: int) -> str:
     return f"remindall_jobs:{chat_id}"
 
 
 def save_remindall_job(chat_id: int, set_by: str, text: str, fire_at: float) -> str:
-    """Persist a group remind job. Returns a unique job_id string."""
     job_id = os.urandom(4).hex()
     key = _remindall_jobs_key(chat_id)
     try:
@@ -284,7 +232,6 @@ def delete_remindall_job(chat_id: int, job_id: str) -> None:
 
 
 def get_all_remindall_jobs() -> dict:
-    """Return {chat_id: [job_dicts]} for pending group reminders. Drops >10 min overdue."""
     from stores._utils import _key_to_chat_id
     try:
         keys = []
