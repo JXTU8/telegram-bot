@@ -6,6 +6,7 @@ Daily reminder job + job restore on startup.
 """
 
 import asyncio
+import html as _html
 import logging
 import threading
 from datetime import date, datetime
@@ -36,6 +37,11 @@ _reminder_generation_lock = threading.Lock()
 _reminder_generations: dict[str, int] = {}
 
 
+def _h(text: str) -> str:
+    """HTML-escape a string for use in parse_mode='HTML' messages."""
+    return _html.escape(str(text))
+
+
 # ── Daily reminder job ────────────────────────────────────────────────────────
 
 async def daily_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -63,16 +69,16 @@ async def daily_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
     if days_left < 0:
         await context.bot.send_message(
             chat_id,
-            f"✅ *{_escape_md(name)}* countdown has passed! ({td})\nUse `/addcountdown` to add a new one.",
-            parse_mode="Markdown",
+            f"✅ <b>{_h(name)}</b> countdown has passed! ({td})\nUse /addcountdown to add a new one.",
+            parse_mode="HTML",
         )
         await asyncio.to_thread(remove_countdown, chat_id, name)
         job.schedule_removal()
         return
     await context.bot.send_message(
         chat_id,
-        f"⏰ *{_escape_md(name)}*\n📆 Target: *{td}*\n{_days_label(days_left)}",
-        parse_mode="Markdown",
+        f"⏰ <b>{_h(name)}</b>\n📆 Target: <b>{td}</b>\n{_days_label(days_left)}",
+        parse_mode="HTML",
     )
     logger.info("Sent reminder for '%s' to chat %s — %s days left", name, chat_id, days_left)
 
@@ -148,13 +154,12 @@ async def received_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         )
         return ASK_NAME
     context.user_data["new_countdown_name"] = name
-    name_safe = _escape_md(name)
     bot_msg = await update.message.reply_text(
-        f"✅ Name set to *{name_safe}*\n\n"
+        f"✅ Name set to <b>{_h(name)}</b>\n\n"
         "Step 2/3 — What is the target date?\n"
-        "Format: `YYYY-MM-DD` _(e.g. 2025-12-31)_\n\n"
-        f"⏰ You have *{CONV_TIMEOUT} seconds* to reply.",
-        parse_mode="Markdown",
+        "Format: <code>YYYY-MM-DD</code> (e.g. 2025-12-31)\n\n"
+        f"⏰ You have <b>{CONV_TIMEOUT} seconds</b> to reply.",
+        parse_mode="HTML",
     )
     _track(context, update.message, bot_msg)
     return ASK_DATE
@@ -180,11 +185,11 @@ async def received_date(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         return ASK_DATE
     context.user_data["new_countdown_date"] = target_date
     bot_msg = await update.message.reply_text(
-        f"✅ Date set to *{target_date}*\n\n"
+        f"✅ Date set to <b>{target_date}</b>\n\n"
         "Step 3/3 — What time should the group be reminded daily?\n"
-        f"Format: `HH:MM` in 24hr MYT _(e.g. {DEFAULT_REMINDER_HOUR:02d}:{DEFAULT_REMINDER_MINUTE:02d})_\n\n"
-        f"⏰ You have *{CONV_TIMEOUT} seconds* to reply.",
-        parse_mode="Markdown",
+        f"Format: <code>HH:MM</code> in 24hr MYT (e.g. {DEFAULT_REMINDER_HOUR:02d}:{DEFAULT_REMINDER_MINUTE:02d})\n\n"
+        f"⏰ You have <b>{CONV_TIMEOUT} seconds</b> to reply.",
+        parse_mode="HTML",
     )
     _track(context, update.message, bot_msg)
     return ASK_TIME
@@ -221,19 +226,18 @@ async def received_time(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     days_left = (target_date - today).days
     _track(context, update.message)
     await _delete_tracked(context)
-    name_safe = _escape_md(name)
     await context.bot.send_message(
         chat_id=chat_id,
         text=(
-            f"🎉 *Countdown Added!*\n\n"
-            f"📛 Name: *{name_safe}*\n"
-            f"🔑 Code: `{code}`\n"
-            f"📆 Target: *{target_date}*\n"
+            f"🎉 <b>Countdown Added!</b>\n\n"
+            f"📛 Name: <b>{_h(name)}</b>\n"
+            f"🔑 Code: <code>{_h(code)}</code>\n"
+            f"📆 Target: <b>{target_date}</b>\n"
             f"{_days_label(days_left)}\n"
-            f"🔔 Daily reminder at *{hour:02d}:{minute:02d} MYT*\n\n"
-            f"_Edit: `/editcountdown {code}`  ·  Remove: `/removecountdown {code}`_"
+            f"🔔 Daily reminder at <b>{hour:02d}:{minute:02d} MYT</b>\n\n"
+            f"<i>Edit: /editcountdown {_h(code)}  ·  Remove: /removecountdown {_h(code)}</i>"
         ),
-        parse_mode="Markdown",
+        parse_mode="HTML",
     )
     context.user_data.clear()
     logger.info("Chat %s added countdown '%s' -> %s at %02d:%02d", chat_id, name, target_date, hour, minute)
@@ -271,13 +275,12 @@ async def editcountdown_start(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return ConversationHandler.END
     context.user_data["edit_countdown_name"] = name
-    name_safe = _escape_md(name)
     bot_msg = await update.message.reply_text(
-        f"✏️ *Editing: {name_safe}*\n\n"
-        "What do you want to change? Type `date` or `time`\n\n"
-        f"⏰ You have *{CONV_TIMEOUT} seconds* to reply.\n"
+        f"✏️ <b>Editing: {_h(name)}</b>\n\n"
+        "What do you want to change? Type <code>date</code> or <code>time</code>\n\n"
+        f"⏰ You have <b>{CONV_TIMEOUT} seconds</b> to reply.\n"
         "Type /cancel to stop.",
-        parse_mode="Markdown",
+        parse_mode="HTML",
     )
     _track(context, update.message, bot_msg)
     return ASK_EDIT_FIELD
@@ -295,12 +298,12 @@ async def received_edit_field(update: Update, context: ContextTypes.DEFAULT_TYPE
     context.user_data["edit_field"] = field
     _track(context, update.message)
     if field == "date":
-        prompt = "Enter the new target date:\nFormat: `YYYY-MM-DD` _(e.g. 2025-12-31)_"
+        prompt = "Enter the new target date:\nFormat: <code>YYYY-MM-DD</code> (e.g. 2025-12-31)"
     else:
-        prompt = "Enter the new reminder time:\nFormat: `HH:MM` in 24hr MYT _(e.g. 08:30)_"
+        prompt = "Enter the new reminder time:\nFormat: <code>HH:MM</code> in 24hr MYT (e.g. 08:30)"
     bot_msg = await update.message.reply_text(
-        f"{prompt}\n\n⏰ You have *{CONV_TIMEOUT} seconds* to reply.",
-        parse_mode="Markdown",
+        f"{prompt}\n\n⏰ You have <b>{CONV_TIMEOUT} seconds</b> to reply.",
+        parse_mode="HTML",
     )
     _track(context, bot_msg)
     return ASK_EDIT_VALUE
@@ -361,16 +364,15 @@ async def received_edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE
     _track(context, update.message)
     await _delete_tracked(context)
     days_left = (target_date - _today()).days
-    name_safe = _escape_md(name)
     await context.bot.send_message(
         chat_id=chat_id,
         text=(
-            f"✅ *Countdown Updated — {name_safe}*\n\n"
-            f"📆 Target: *{target_date}*\n"
+            f"✅ <b>Countdown Updated — {_h(name)}</b>\n\n"
+            f"📆 Target: <b>{target_date}</b>\n"
             f"{_days_label(days_left)}\n"
-            f"🔔 Daily reminder at *{hour:02d}:{minute:02d} MYT*"
+            f"🔔 Daily reminder at <b>{hour:02d}:{minute:02d} MYT</b>"
         ),
-        parse_mode="Markdown",
+        parse_mode="HTML",
     )
     context.user_data.clear()
     logger.info("Chat %s edited countdown '%s' -> %s at %02d:%02d", chat_id, name, target_date, hour, minute)
@@ -398,9 +400,6 @@ async def list_countdown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     today = _today()
     seen  = await asyncio.to_thread(get_seen_users, chat_id)
 
-    # Fix 12: backfill codes for legacy countdowns that pre-date the code system.
-    # We mutate `countdowns[bname]["code"]` in-place so the update is visible
-    # when sorted_entries is built from countdowns.items() below — no re-read needed.
     needs_backfill = [n for n, e in countdowns.items() if not e.get("code")]
     for bname in needs_backfill:
         e = countdowns[bname]
@@ -412,8 +411,6 @@ async def list_countdown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 e.get("reminder_minute", DEFAULT_REMINDER_MINUTE),
                 e.get("created_by", 0),
             )
-            # Update the local dict so the display loop sees the new code
-            # without needing a second Redis round-trip.
             countdowns[bname]["code"] = new_code
             logger.info(
                 "list_countdown: backfilled code '%s' for '%s' in chat %s",
@@ -428,7 +425,6 @@ async def list_countdown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         except (KeyError, ValueError):
             return 9999
 
-    # sorted_entries is built AFTER the backfill loop so it reflects updated codes
     sorted_entries = sorted(countdowns.items(), key=_safe_sort_key)
 
     def _days_left_safe(entry):
@@ -452,7 +448,8 @@ async def list_countdown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             parse_mode="Markdown",
         )
         return
-    lines = ["📋 *Active Countdowns (soonest first):*\n"]
+
+    lines = ["<b>📋 Active Countdowns (soonest first):</b>\n"]
     for name, entry in sorted_entries:
         try:
             td = date.fromisoformat(entry["target_date"])
@@ -464,14 +461,13 @@ async def list_countdown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         code         = entry.get("code", "—")
         creator_id   = str(entry.get("created_by", ""))
         creator_name = seen.get(creator_id, "Unknown")
-        name_safe    = name
         lines.append(
-            f"• *{name_safe}* `[{code}]`\n"
+            f"• <b>{_h(name)}</b> <code>[{_h(code)}]</code>\n"
             f"  📆 {td}  |  {_days_label(days_left)}\n"
-            f"  🔔 {h:02d}:{m:02d} MYT  |  👤 {creator_name}\n"
+            f"  🔔 {h:02d}:{m:02d} MYT  |  👤 {_h(creator_name)}\n"
         )
-    lines.append("_Edit:_ `/editcountdown <code>`  ·  _Remove:_ `/removecountdown <code>`")
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    lines.append("<i>Edit: /editcountdown &lt;code&gt;  ·  Remove: /removecountdown &lt;code&gt;</i>")
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
 # ── /removecountdown ──────────────────────────────────────────────────────────
@@ -506,8 +502,8 @@ async def remove_countdown_cmd(update: Update, context: ContextTypes.DEFAULT_TYP
         for job in context.job_queue.get_jobs_by_name(jname):
             job.schedule_removal()
         await update.message.reply_text(
-            f"🗑️ Countdown *{_escape_md(name)}* has been removed.",
-            parse_mode="Markdown",
+            f"🗑️ Countdown <b>{_h(name)}</b> has been removed.",
+            parse_mode="HTML",
         )
         logger.info("Chat %s removed countdown '%s'", chat_id, name)
     else:
