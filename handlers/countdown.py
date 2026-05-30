@@ -463,8 +463,8 @@ async def list_countdown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         m            = entry.get("reminder_minute", DEFAULT_REMINDER_MINUTE)
         code         = entry.get("code", "—")
         creator_id   = str(entry.get("created_by", ""))
-        creator_name = _escape_md(seen.get(creator_id, "Unknown"))
-        name_safe    = _escape_md(name)
+        creator_name = seen.get(creator_id, "Unknown")
+        name_safe    = name
         lines.append(
             f"• *{name_safe}* `[{code}]`\n"
             f"  📆 {td}  |  {_days_label(days_left)}\n"
