@@ -61,6 +61,20 @@ def owner_only(func):
     return wrapper
 
 
+def requires_message(func):
+    """
+    Decorator that silently skips the handler if update.message is None.
+    Prevents AttributeError crashes from edited messages, channel posts,
+    or any other update type that does not carry a .message object.
+    """
+    @wraps(func)
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not update.message:
+            return
+        return await func(update, context)
+    return wrapper
+
+
 # ── User display ──────────────────────────────────────────────────────────────
 _INVISIBLE_NAME_CHARS = str.maketrans(
     "",

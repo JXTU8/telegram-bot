@@ -121,6 +121,10 @@ def main() -> None:
         .build()
     )
 
+    # ── Helper: only fire CommandHandlers on real messages, not edits/channel posts ──
+    def _cmd(name, handler):
+        return CommandHandler(name, handler, filters=filters.UpdateType.MESSAGE)
+
     # ── Conversation handlers ─────────────────────────────────────────────────
     countdown_conv = ConversationHandler(
         entry_points=[CommandHandler("addcountdown", add_countdown_start)],
@@ -167,69 +171,60 @@ def main() -> None:
     app.add_handler(edit_conv)
 
     # ── Commands ──────────────────────────────────────────────────────────────
-    app.add_handler(CommandHandler("start",           start_command))
-    app.add_handler(CommandHandler("help",            help_command))
-    # Fix 15: The standalone cancel_command below only fires when /cancel is sent
-    # OUTSIDE any active conversation. ConversationHandler fallbacks registered
-    # above take priority over regular CommandHandlers within their own group (0),
-    # so the two uses of /cancel never conflict.
-    app.add_handler(CommandHandler("cancel",          cancel_command))
-    app.add_handler(CommandHandler("ask",             ask_command))
-    app.add_handler(CommandHandler("listcountdown",   list_countdown))
-    app.add_handler(CommandHandler("removecountdown", remove_countdown_cmd))
-    app.add_handler(CommandHandler("fate",            fate_command))
-    app.add_handler(CommandHandler("luck",            luck_command))
-    app.add_handler(CommandHandler("luckboard",       luckboard_command))
-    app.add_handler(CommandHandler("fateboard",       fateboard_command))
-    app.add_handler(CommandHandler("streak",          streak_command))
-    app.add_handler(CommandHandler("ship",            ship_command))
-    app.add_handler(CommandHandler("shipboard",       shipboard_command))
-    app.add_handler(CommandHandler("roast",           roast_command))
-    app.add_handler(CommandHandler("compliment",      compliment_command))
-    app.add_handler(CommandHandler("vibecheck",       vibecheck_command))
-    app.add_handler(CommandHandler("rank",            rank_command))
-    app.add_handler(CommandHandler("truth",           truth_command))
-    app.add_handler(CommandHandler("dare",            dare_command))
-    app.add_handler(CommandHandler("wouldyourather",  would_you_rather_command))
-    app.add_handler(CommandHandler("coinflip",        coinflip_command))
-    app.add_handler(CommandHandler("8ball",           eightball_command))
-    app.add_handler(CommandHandler("curse",           curse_command))
-    app.add_handler(CommandHandler("bless",           bless_command))
-    app.add_handler(CommandHandler("decide",          decide_command))
-    app.add_handler(CommandHandler("poll",            poll_command))
-    app.add_handler(CommandHandler("toss",            toss_command))
-    app.add_handler(CommandHandler("game",            game_command))
-    app.add_handler(CommandHandler("birthday",        birthday_command))
-    app.add_handler(CommandHandler("addbirthday",     addbirthday_command))
-    app.add_handler(CommandHandler("deletebirthday",  deletebirthday_command))
-    app.add_handler(CommandHandler("remind",          remind_command))
-    app.add_handler(CommandHandler("cancelremind",    cancelremind_command))
-    app.add_handler(CommandHandler("remindall",       remindall_command))
-    app.add_handler(CommandHandler("quote",           quote_command))
-    app.add_handler(CommandHandler("quotes",          quotes_command))
-    app.add_handler(CommandHandler("deletequote",     deletequote_command))
-    app.add_handler(CommandHandler("mvp",             mvp_command))
-    app.add_handler(CommandHandler("mvpboard",        mvpboard_command))
-    app.add_handler(CommandHandler("hot",             hot_command))
-    app.add_handler(CommandHandler("stats",           stats_command))
-    app.add_handler(CommandHandler("leaderboard",     leaderboard_command))
-    app.add_handler(CommandHandler("recap",           recap_command))
-    app.add_handler(CommandHandler("profile",         profile_command))
-    app.add_handler(CommandHandler("status",          status_command))
-    app.add_handler(CommandHandler("lucktest",        lucktest_command))
+    app.add_handler(_cmd("start",           start_command))
+    app.add_handler(_cmd("help",            help_command))
+    app.add_handler(_cmd("cancel",          cancel_command))
+    app.add_handler(_cmd("ask",             ask_command))
+    app.add_handler(_cmd("listcountdown",   list_countdown))
+    app.add_handler(_cmd("removecountdown", remove_countdown_cmd))
+    app.add_handler(_cmd("fate",            fate_command))
+    app.add_handler(_cmd("luck",            luck_command))
+    app.add_handler(_cmd("luckboard",       luckboard_command))
+    app.add_handler(_cmd("fateboard",       fateboard_command))
+    app.add_handler(_cmd("streak",          streak_command))
+    app.add_handler(_cmd("ship",            ship_command))
+    app.add_handler(_cmd("shipboard",       shipboard_command))
+    app.add_handler(_cmd("roast",           roast_command))
+    app.add_handler(_cmd("compliment",      compliment_command))
+    app.add_handler(_cmd("vibecheck",       vibecheck_command))
+    app.add_handler(_cmd("rank",            rank_command))
+    app.add_handler(_cmd("truth",           truth_command))
+    app.add_handler(_cmd("dare",            dare_command))
+    app.add_handler(_cmd("wouldyourather",  would_you_rather_command))
+    app.add_handler(_cmd("coinflip",        coinflip_command))
+    app.add_handler(_cmd("8ball",           eightball_command))
+    app.add_handler(_cmd("curse",           curse_command))
+    app.add_handler(_cmd("bless",           bless_command))
+    app.add_handler(_cmd("decide",          decide_command))
+    app.add_handler(_cmd("poll",            poll_command))
+    app.add_handler(_cmd("toss",            toss_command))
+    app.add_handler(_cmd("game",            game_command))
+    app.add_handler(_cmd("birthday",        birthday_command))
+    app.add_handler(_cmd("addbirthday",     addbirthday_command))
+    app.add_handler(_cmd("deletebirthday",  deletebirthday_command))
+    app.add_handler(_cmd("remind",          remind_command))
+    app.add_handler(_cmd("cancelremind",    cancelremind_command))
+    app.add_handler(_cmd("remindall",       remindall_command))
+    app.add_handler(_cmd("quote",           quote_command))
+    app.add_handler(_cmd("quotes",          quotes_command))
+    app.add_handler(_cmd("deletequote",     deletequote_command))
+    app.add_handler(_cmd("mvp",             mvp_command))
+    app.add_handler(_cmd("mvpboard",        mvpboard_command))
+    app.add_handler(_cmd("hot",             hot_command))
+    app.add_handler(_cmd("stats",           stats_command))
+    app.add_handler(_cmd("leaderboard",     leaderboard_command))
+    app.add_handler(_cmd("recap",           recap_command))
+    app.add_handler(_cmd("profile",         profile_command))
+    app.add_handler(_cmd("status",          status_command))
+    app.add_handler(_cmd("lucktest",        lucktest_command))
 
     # ── Message handlers (group 0) ────────────────────────────────────────────
-    # ask_followup only fires for replies to bot /ask answers (filters.REPLY).
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.REPLY, ask_followup_handler))
 
     # ── Message handlers (group 1) ────────────────────────────────────────────
-    # seen_user_tracker runs on every message for user tracking.
     app.add_handler(MessageHandler(filters.ALL, seen_user_tracker), group=1)
 
     # ── Message handlers (group 2) ────────────────────────────────────────────
-    # game_guess_handler runs in group 2 so it fires independently of group-0
-    # handlers (ask_followup, conversation states). Non-number text is ignored
-    # silently inside the handler itself.
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, game_guess_handler), group=2)
 
     app.add_error_handler(error_handler)
