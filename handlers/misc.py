@@ -700,6 +700,14 @@ async def say_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     except Exception as e:
         await update.message.reply_text(f"❌ Failed: `{e}`", parse_mode="Markdown")
 
+@owner_only
+async def threadid_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    thread_id = getattr(update.message, "message_thread_id", None)
+    if thread_id:
+        await update.message.reply_text(f"🧵 Thread ID: `{thread_id}`", parse_mode="Markdown")
+    else:
+        await update.message.reply_text("⚠️ This is the main chat (no thread ID).")
+        
 # ── Background: seen-user tracking ───────────────────────────────────────────
 
 async def seen_user_tracker(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
