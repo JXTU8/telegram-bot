@@ -9,14 +9,16 @@ import asyncio
 import logging
 from datetime import datetime
 
+from telegram import Update
 from telegram.ext import (
     ApplicationBuilder, CallbackQueryHandler, CommandHandler,
-    ConversationHandler, MessageHandler, filters,
+    ConversationHandler, MessageHandler, TypeHandler, filters,
 )
 
 from config import TOKEN, TIMEZONE
 from keep_alive import keep_alive
 from stores.luck_store import delete_old_fateboard_keys
+from stores.ban_store import is_banned
 
 # ── Handlers ──────────────────────────────────────────────────────────────────
 from handlers.misc import (
@@ -24,6 +26,7 @@ from handlers.misc import (
     stats_command, profile_command, status_command,
     seen_user_tracker, error_handler, conversation_timeout,
     cancel_command, leaderboard_command, recap_command,
+    ban_command, unban_command, banlist_command,
 )
 from handlers.countdown import (
     add_countdown_start, received_name, received_date, received_time,
@@ -78,6 +81,20 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+# ── Ban gate ──────────────────────────────────────────────────────────────────
+
+async def ban_gate(update: Update, context) -> None:
+    from telegram.ext import ApplicationHandlerStop
+    from helpers import _is_owner
+    user = update.effective_user
+    if user and not user.is_bot:
+        if _is_owner(user):
+            return
+        banned = await asyncio.to_thread(is_banned, user.id)
+        if banned:
+            raise ApplicationHandlerStop
+
+
 # ── Startup hook ──────────────────────────────────────────────────────────────
 
 async def on_startup(app) -> None:
@@ -124,6 +141,9 @@ def main() -> None:
     # ── Helper: only fire CommandHandlers on real messages, not edits/channel posts ──
     def _cmd(name, handler):
         return CommandHandler(name, handler, filters=filters.UpdateType.MESSAGE)
+
+    # ── Ban gate — must be registered first, runs before everything else ──────
+    app.add_handler(TypeHandler(Update, ban_gate), group=-1)
 
     # ── Conversation handlers ─────────────────────────────────────────────────
     countdown_conv = ConversationHandler(
@@ -217,6 +237,9 @@ def main() -> None:
     app.add_handler(_cmd("profile",         profile_command))
     app.add_handler(_cmd("status",          status_command))
     app.add_handler(_cmd("lucktest",        lucktest_command))
+    app.add_handler(_cmd("ban",             ban_command))
+    app.add_handler(_cmd("unban",           unban_command))
+    app.add_handler(_cmd("banlist",         banlist_command))
 
     # ── Message handlers (group 0) ────────────────────────────────────────────
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.REPLY, ask_followup_handler))
