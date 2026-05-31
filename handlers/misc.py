@@ -2,7 +2,7 @@
 handlers/misc.py
 ────────────────
 /start, /help (paginated), /stats, /recap, /leaderboard, /profile,
-/status, /cancel, and background tracking helpers.
+/status, /cancel, /ban, /unban, /banlist, and background tracking helpers.
 """
 
 import asyncio
@@ -18,6 +18,7 @@ from telegram.ext import ContextTypes, ConversationHandler
 from config import TIMEZONE, VERSION
 from db import redis
 from constants import _MONTH_NAMES
+from stores.ban_store import ban_user, unban_user, get_banned_users
 from stores.birthday_store import get_all_birthdays
 from stores.countdown_store import get_all_countdowns
 from stores.luck_store import get_fate_board, get_fate_streak
@@ -29,10 +30,9 @@ from stores.user_store import get_seen_users, track_seen_user
 from helpers import (
     _display_user, _escape_md, _delete_tracked,
     _display_name_or_id, owner_only, _days_label,
+    _is_owner, BOT_OWNER_ID,
 )
 
-# Fix 16: moved from a lazy import inside profile_command to the top level.
-# There is no circular dependency — luck.py does not import from misc.py.
 from handlers.luck import _get_fate
 
 logger = logging.getLogger(__name__)
@@ -258,13 +258,9 @@ async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
-# ── /recap ─────────────────────────────────────────────────────────────────────
+# ── /recap ────────────────────────────────────────────────────────────────────
 
 async def recap_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Today's group activity summary.
-    Fix 9: now includes next upcoming countdown and birthdays this week.
-    """
     chat_id   = update.effective_chat.id
     today_str = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
 
@@ -277,8 +273,8 @@ async def recap_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         asyncio.to_thread(get_today_mvp, chat_id, today_str),
         asyncio.to_thread(get_quote_count, chat_id),
         asyncio.to_thread(get_seen_users, chat_id),
-        asyncio.to_thread(get_all_countdowns, chat_id),   # Fix 9
-        asyncio.to_thread(get_all_birthdays, chat_id),    # Fix 9
+        asyncio.to_thread(get_all_countdowns, chat_id),
+        asyncio.to_thread(get_all_birthdays, chat_id),
         return_exceptions=True,
     )
 
@@ -292,13 +288,11 @@ async def recap_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     lines = [f"📋 *Daily Recap — {today_str}*\n"]
 
-    # ── MVP ───────────────────────────────────────────────────────────────────
     if mvp:
         lines.append(f"🏆 *MVP:* {_escape_md(mvp.get('name', '?'))}")
     else:
         lines.append("🏆 *MVP:* _Not crowned yet — use /mvp_")
 
-    # ── Luck extremes ─────────────────────────────────────────────────────────
     if board:
         sorted_board = sorted(board.items(), key=lambda kv: kv[1]["score"], reverse=True)
         luckiest    = sorted_board[0][1]
@@ -315,7 +309,6 @@ async def recap_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     else:
         lines.append("🍀 *Luck:* _Nobody checked yet — use /luck_")
 
-    # ── Top ship ──────────────────────────────────────────────────────────────
     if ship_list:
         p = ship_list[0]
         a = _escape_md(p["label_a"])
@@ -324,7 +317,6 @@ async def recap_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     else:
         lines.append("💞 *Ships:* _None yet — use /ship_")
 
-    # ── Fix 9: Next upcoming countdown ───────────────────────────────────────
     today_date      = datetime.now(TIMEZONE).date()
     next_countdown  = None
     min_days        = float("inf")
@@ -344,7 +336,6 @@ async def recap_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     else:
         lines.append("⏱ *Countdowns:* _None active — use /addcountdown_")
 
-    # ── Fix 9: Birthdays this week ────────────────────────────────────────────
     upcoming_bdays = []
     for uid_str, bday in bday_dict.items():
         try:
@@ -370,7 +361,6 @@ async def recap_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     else:
         lines.append("🎂 *Birthdays:* _None this week_")
 
-    # ── Misc counts ───────────────────────────────────────────────────────────
     lines.append(f"💬 *Quotes saved:* {total_quotes} total")
     lines.append(f"👤 *Members tracked:* {len(seen_users)}")
     lines.append("\n_Run /leaderboard for the full rankings_")
@@ -435,7 +425,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
-# ── /profile ─────────────────────────────────────────────────────────────────
+# ── /profile ──────────────────────────────────────────────────────────────────
 
 def _profile_target(update: Update):
     message = update.message
@@ -483,7 +473,6 @@ async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     seen      = await asyncio.to_thread(get_seen_users, chat_id)
     seen_name = _display_name_or_id(seen.get(str(user_id), name), user_id)
 
-    # Fix 16: _get_fate is now imported at the top of this module (no lazy import)
     luck_score, luck_tier, _ = _get_fate(user_id)
     if luck_score == 999:
         luck_display = "999 ⚡ MAXIMUM"
@@ -536,14 +525,16 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     from handlers.ai import groq_client, SERPER_API_KEY
 
     redis_detail = _escape_md(redis_msg[:120].replace("`", "").replace("\n", " "))
+    banned_count = len(await asyncio.to_thread(get_banned_users))
 
     lines = [
         "🧪 *Bot Status*",
-        f"Version: *{VERSION}*",                              # Fix 19
+        f"Version: *{VERSION}*",
         f"Redis: *{'ok' if redis_ok else 'error'}*",
         f"Redis detail: `{redis_detail}`",
         f"Job queue: *{'ok' if context.application.job_queue else 'missing'}*",
         f"Scheduled jobs: *{job_count if job_count >= 0 else 'unknown'}*",
+        f"Banned users: *{banned_count}*",
         f"BOT\\_TOKEN: *{_env_status('BOT_TOKEN')}*",
         f"Redis URL/token: *{_env_status('UPSTASH_REDIS_REST_URL')}/{_env_status('UPSTASH_REDIS_REST_TOKEN')}*",
         f"Groq: *{'ready' if groq_client else 'missing key'}*",
@@ -559,6 +550,125 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await update.message.reply_text(
         "ℹ️ No active flow to cancel.\n"
         "Use /help to see all available commands."
+    )
+
+
+# ── /ban, /unban, /banlist (owner only) ───────────────────────────────────────
+
+def _resolve_ban_target(update: Update) -> tuple:
+    """
+    Resolve a ban target from the command message.
+    Priority:
+      1. text_mention entity (tap from Telegram's mention picker) — has a real user ID
+      2. Reply to any message — use the sender's ID
+      3. Bare numeric ID passed as the first argument
+    Returns (user_id: int | None, display: str).
+    """
+    message = update.message
+
+    # 1. text_mention — most reliable, always has the user ID
+    for entity in (message.entities or []):
+        if entity.type == "text_mention" and getattr(entity, "user", None):
+            u = entity.user
+            return u.id, _display_user(u)
+
+    # 2. Reply to a message
+    if message.reply_to_message and message.reply_to_message.from_user:
+        u = message.reply_to_message.from_user
+        return u.id, _display_user(u)
+
+    # 3. Bare numeric ID as first argument
+    args = (message.text or "").split()[1:]
+    if args and args[0].lstrip("-").isdigit():
+        uid = int(args[0])
+        return uid, str(uid)
+
+    return None, ""
+
+
+@owner_only
+async def ban_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /ban — block a user from using any bot command or interaction.
+    Usage:
+      /ban <user_id>           — by numeric ID
+      /ban (reply to message)  — ban whoever sent that message
+      /ban @mention            — use Telegram's mention picker (not a typed @username)
+    """
+    user_id, display = _resolve_ban_target(update)
+    if user_id is None:
+        await update.message.reply_text(
+            "Usage:\n"
+            "• `/ban <user_id>` — e.g. `/ban 123456789`\n"
+            "• Reply to any of their messages + `/ban`\n"
+            "• `/ban` with a mention from Telegram's picker\n\n"
+            "_Typed @usernames won't work — use the picker or a reply._",
+            parse_mode="Markdown",
+        )
+        return
+
+    # Never allow banning the owner
+    if user_id == BOT_OWNER_ID or _is_owner(
+        type("_U", (), {"id": user_id, "username": "", "is_bot": False})()
+    ):
+        await update.message.reply_text("⚠️ Cannot ban the bot owner.")
+        return
+
+    newly_banned = await asyncio.to_thread(ban_user, user_id)
+    name_safe = _escape_md(display)
+    if newly_banned:
+        await update.message.reply_text(
+            f"🔨 *{name_safe}* (`{user_id}`) has been banned from using this bot.",
+            parse_mode="Markdown",
+        )
+    else:
+        await update.message.reply_text(
+            f"ℹ️ *{name_safe}* (`{user_id}`) is already banned.",
+            parse_mode="Markdown",
+        )
+
+
+@owner_only
+async def unban_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /unban — restore bot access for a previously banned user.
+    Same targeting options as /ban.
+    """
+    user_id, display = _resolve_ban_target(update)
+    if user_id is None:
+        await update.message.reply_text(
+            "Usage:\n"
+            "• `/unban <user_id>`\n"
+            "• Reply to any of their messages + `/unban`",
+            parse_mode="Markdown",
+        )
+        return
+
+    was_banned = await asyncio.to_thread(unban_user, user_id)
+    name_safe = _escape_md(display)
+    if was_banned:
+        await update.message.reply_text(
+            f"✅ *{name_safe}* (`{user_id}`) has been unbanned.",
+            parse_mode="Markdown",
+        )
+    else:
+        await update.message.reply_text(
+            f"ℹ️ *{name_safe}* (`{user_id}`) wasn't banned.",
+            parse_mode="Markdown",
+        )
+
+
+@owner_only
+async def banlist_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """List all currently banned user IDs."""
+    banned = await asyncio.to_thread(get_banned_users)
+    if not banned:
+        await update.message.reply_text("✅ No users are currently banned.")
+        return
+    ids = "\n".join(f"• `{uid}`" for uid in sorted(banned))
+    await update.message.reply_text(
+        f"🔨 *Banned users ({len(banned)}):*\n{ids}",
+        parse_mode="Markdown",
     )
 
 
