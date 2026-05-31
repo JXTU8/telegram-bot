@@ -675,13 +675,17 @@ async def banlist_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def say_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     /say <chat_id> <message>
-    Sends a message to any chat the bot is in.
+    /say <chat_id> <thread_id> <message>
     Example: /say -1003861255064 Hello everyone!
+    Example: /say -1003861255064 123 Hello topic!
     """
     if not context.args or len(context.args) < 2:
         await update.message.reply_text(
-            "Usage: `/say <chat_id> <message>`\n"
-            "Example: `/say -1003861255064 Hello everyone!`",
+            "Usage:\n"
+            "`/say <chat_id> <message>`\n"
+            "`/say <chat_id> <thread_id> <message>`\n\n"
+            "Example: `/say -1003861255064 Hello!`\n"
+            "Example: `/say -1003861255064 123 Hello topic!`",
             parse_mode="Markdown",
         )
         return
@@ -692,11 +696,28 @@ async def say_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.message.reply_text("⚠️ Invalid chat ID. Must be a number.")
         return
 
-    text = " ".join(context.args[1:])
+    # Check if second arg is a thread_id (number) or start of message (text)
+    thread_id = None
+    if len(context.args) >= 3 and context.args[1].lstrip("-").isdigit():
+        thread_id = int(context.args[1])
+        text = " ".join(context.args[2:])
+    else:
+        text = " ".join(context.args[1:])
+
+    if not text:
+        await update.message.reply_text("⚠️ Message can't be empty.")
+        return
 
     try:
-        await context.bot.send_message(chat_id=chat_id, text=text)
-        await update.message.reply_text(f"✅ Sent to `{chat_id}`.", parse_mode="Markdown")
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            message_thread_id=thread_id,
+        )
+        reply = f"✅ Sent to `{chat_id}`"
+        if thread_id:
+            reply += f" (thread `{thread_id}`)"
+        await update.message.reply_text(reply + ".", parse_mode="Markdown")
     except Exception as e:
         await update.message.reply_text(f"❌ Failed: `{e}`", parse_mode="Markdown")
 
@@ -707,7 +728,7 @@ async def threadid_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await update.message.reply_text(f"🧵 Thread ID: `{thread_id}`", parse_mode="Markdown")
     else:
         await update.message.reply_text("⚠️ This is the main chat (no thread ID).")
-        
+
 # ── Background: seen-user tracking ───────────────────────────────────────────
 
 async def seen_user_tracker(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
