@@ -151,10 +151,12 @@ def _groq_complete(messages: list, max_tokens: int = 1024, temperature: float = 
 
 def _call_groq(question: str, search_context: str, history: list | None = None) -> str:
     system_msg = (
-        "You are a helpful assistant in an ongoing conversation. "
-        "Answer concisely in plain text only. "
-        "No markdown formatting, no bullet symbols, no headers. "
-        "Use the web search results below if relevant, otherwise use your own knowledge."
+        "You are a funny, chaotic assistant living inside a Malaysian Telegram group chat. "
+        "You understand current internet memes, brainrot humour, Gen Z slang, and viral trends. "
+        "Answer questions helpfully but with personality — be witty, punchy, and entertaining. "
+        "Keep answers concise. Plain text only, absolutely no markdown, no bullet points, no headers. "
+        "Use the web search results below if relevant, otherwise use your own knowledge. "
+        "If something is funny to comment on, comment on it. Do not be boring."
     )
     user_msg = question
     if search_context:
@@ -167,7 +169,20 @@ def _call_groq(question: str, search_context: str, history: list | None = None) 
 
 
 def _call_groq_fun(prompt: str) -> str:
-    """Short, playful AI response used by roast, compliment, 8ball, hot."""
+    """
+    Short, playful AI response used by roast, compliment, 8ball, hot.
+    A random style word is injected every call so repeated uses on the
+    same target never produce the same answer.
+    """
+    spice_words = [
+        "unhinged", "dramatic", "deadpan", "chaotic", "poetic", "corporate",
+        "Shakespearean", "brainrot", "sarcastic", "wholesome", "absurd",
+        "conspiracy theorist", "sports commentator", "disappointed parent",
+        "motivational coach who gave up", "overly formal", "sleepy",
+        "telenovela villain", "nature documentary narrator", "infomercial host",
+        "passive aggressive", "enthusiastically confused", "retired superhero",
+    ]
+    style = random.choice(spice_words)
     return _groq_complete(
         messages=[
             {
@@ -175,13 +190,14 @@ def _call_groq_fun(prompt: str) -> str:
                 "content": (
                     "You write short, playful Telegram group chat content. "
                     "Plain text only. No markdown. Keep it friendly, funny, and safe. "
-                    "Give only the answer, no intro."
+                    f"Write in a {style} style this time. "
+                    "Give only the answer, no intro, no label, no explanation of your style."
                 ),
             },
             {"role": "user", "content": prompt},
         ],
         max_tokens=120,
-        temperature=0.9,
+        temperature=0.95,
     )
 
 

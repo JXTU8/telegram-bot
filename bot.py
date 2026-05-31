@@ -26,7 +26,7 @@ from handlers.misc import (
     stats_command, profile_command, status_command,
     seen_user_tracker, error_handler, conversation_timeout,
     cancel_command, leaderboard_command, recap_command,
-    ban_command, unban_command, banlist_command,
+    ban_command, unban_command, banlist_command,say_command
 )
 from handlers.countdown import (
     add_countdown_start, received_name, received_date, received_time,
@@ -240,6 +240,7 @@ def main() -> None:
     app.add_handler(_cmd("ban",             ban_command))
     app.add_handler(_cmd("unban",           unban_command))
     app.add_handler(_cmd("banlist",         banlist_command))
+    app.add_handler(_cmd("say", say_command))
 
     # ── Message handlers (group 0) ────────────────────────────────────────────
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.REPLY, ask_followup_handler))

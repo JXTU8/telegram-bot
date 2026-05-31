@@ -671,6 +671,34 @@ async def banlist_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         parse_mode="Markdown",
     )
 
+@owner_only
+async def say_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /say <chat_id> <message>
+    Sends a message to any chat the bot is in.
+    Example: /say -1003861255064 Hello everyone!
+    """
+    if not context.args or len(context.args) < 2:
+        await update.message.reply_text(
+            "Usage: `/say <chat_id> <message>`\n"
+            "Example: `/say -1003861255064 Hello everyone!`",
+            parse_mode="Markdown",
+        )
+        return
+
+    try:
+        chat_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("⚠️ Invalid chat ID. Must be a number.")
+        return
+
+    text = " ".join(context.args[1:])
+
+    try:
+        await context.bot.send_message(chat_id=chat_id, text=text)
+        await update.message.reply_text(f"✅ Sent to `{chat_id}`.", parse_mode="Markdown")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Failed: `{e}`", parse_mode="Markdown")
 
 # ── Background: seen-user tracking ───────────────────────────────────────────
 
