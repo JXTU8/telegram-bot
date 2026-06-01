@@ -10,6 +10,7 @@ Messages older than 2 hours are automatically expired by Redis TTL.
 """
 
 import asyncio
+import html as _html
 import logging
 from datetime import datetime
 
@@ -30,6 +31,8 @@ def _format_snipe_page(messages: list, index: int) -> tuple:
     Build (text, keyboard) for one snipe page.
     messages is already sorted most-recent-first, sliced to _SNIPE_MAX_SHOW.
     index 0 = most recent, index N-1 = oldest shown.
+
+    Uses HTML parse mode so raw user message text can never break formatting.
     """
     total = len(messages)
     if total == 0:
@@ -46,16 +49,18 @@ def _format_snipe_page(messages: list, index: int) -> tuple:
     except Exception:
         time_str = "unknown time"
 
-    name = msg.get("name", "Unknown")
+    # HTML-escape user-supplied fields so special chars never break rendering
+    name = _html.escape(msg.get("name", "Unknown"))
     text = msg.get("text", "")
     if len(text) > 800:
         text = text[:800] + "..."
+    text = _html.escape(text)
 
     page_text = (
-        f"🔍 *Snipe Log* — {index + 1} of {total}\n"
+        f"🔍 <b>Snipe Log</b> — {index + 1} of {total}\n"
         f"━━━━━━━━━━━━━━━\n"
-        f"👤 *{name}*\n"
-        f"🕐 _{time_str} MYT_\n"
+        f"👤 <b>{name}</b>\n"
+        f"🕐 <i>{time_str} MYT</i>\n"
         f"━━━━━━━━━━━━━━━\n"
         f"{text}"
     )
@@ -98,7 +103,7 @@ async def snipe_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     text, keyboard = _format_snipe_page(messages, 0)
-    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=keyboard)
+    await update.message.reply_text(text, parse_mode="HTML", reply_markup=keyboard)
 
 
 # ── Snipe pagination callback ─────────────────────────────────────────────────
@@ -135,6 +140,6 @@ async def snipe_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     text, keyboard = _format_snipe_page(messages, index)
     try:
-        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=keyboard)
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=keyboard)
     except Exception as e:
         logger.debug("snipe_callback edit skipped: %s", e)
