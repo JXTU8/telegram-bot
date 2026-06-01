@@ -66,8 +66,6 @@ from handlers.quotes import (
     quote_command, quotes_command, quotes_callback,
     deletequote_command,
 )
-from handlers.snipe import snipe_command, snipe_callback
-from stores.snipe_store import save_snipe_message
 
 # ── Conversation states ───────────────────────────────────────────────────────
 from helpers import (
@@ -96,34 +94,6 @@ async def ban_gate(update: Update, context) -> None:
         banned = await asyncio.to_thread(is_banned, user.id)
         if banned:
             raise ApplicationHandlerStop
-
-
-# ── Snipe message logger ──────────────────────────────────────────────────────
-
-async def snipe_logger(update: Update, context) -> None:
-    """
-    Silently stores every plain-text non-command message the bot sees.
-    Runs in handler group 3 so it never interferes with other handlers.
-    Skips: commands, media, bot messages, empty text.
-    """
-    message = update.message
-    if not message or not message.text:
-        return
-    user = update.effective_user
-    if not user or user.is_bot:
-        return
-    # Skip commands
-    if message.text.startswith("/"):
-        return
-    chat_id = update.effective_chat.id
-    from helpers import _display_user
-    await asyncio.to_thread(
-        save_snipe_message,
-        chat_id,
-        user.id,
-        _display_user(user),
-        message.text,
-    )
 
 
 # ── Startup hook ──────────────────────────────────────────────────────────────
@@ -215,7 +185,6 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(help_callback,         pattern=r"^help:"))
     app.add_handler(CallbackQueryHandler(quotes_callback,       pattern=r"^quote:"))
     app.add_handler(CallbackQueryHandler(cancelremind_callback, pattern=r"^cancelremind:"))
-    app.add_handler(CallbackQueryHandler(snipe_callback,        pattern=r"^snipe:"))
 
     # ── Conversation handlers ─────────────────────────────────────────────────
     app.add_handler(countdown_conv)
@@ -275,7 +244,6 @@ def main() -> None:
     app.add_handler(_cmd("banlist",         banlist_command))
     app.add_handler(_cmd("say",             say_command))
     app.add_handler(_cmd("threadid",        threadid_command))
-    app.add_handler(_cmd("snipe",           snipe_command))
 
     # ── Message handlers (group 0) ────────────────────────────────────────────
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.REPLY, ask_followup_handler))
@@ -285,9 +253,6 @@ def main() -> None:
 
     # ── Message handlers (group 2) ────────────────────────────────────────────
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, game_guess_handler), group=2)
-
-    # ── Message handlers (group 3) — snipe logger ────────────────────────────
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, snipe_logger), group=3)
 
     app.add_error_handler(error_handler)
 
