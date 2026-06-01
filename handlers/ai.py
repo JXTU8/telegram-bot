@@ -43,6 +43,28 @@ else:
     groq_client = None
     logger.warning("GROQ_API_KEY not set — /ask, /roast, /compliment, /8ball, /hot will use fallbacks.")
 
+# ── Roastmax allowed user IDs ─────────────────────────────────────────────────
+# Set ROASTMAX_ALLOWED_IDS in Render as a comma-separated list of Telegram user IDs
+# e.g. ROASTMAX_ALLOWED_IDS=123456789,987654321
+
+def _load_roastmax_ids() -> set:
+    raw = os.getenv("ROASTMAX_ALLOWED_IDS", "")
+    ids = set()
+    for part in raw.replace(",", " ").split():
+        try:
+            ids.add(int(part.strip()))
+        except ValueError:
+            pass
+    return ids
+
+ROASTMAX_ALLOWED_IDS: set = _load_roastmax_ids()
+
+
+def is_roastmax_allowed(user_id: int) -> bool:
+    """Return True if this user is allowed to use /roastmax."""
+    return user_id in ROASTMAX_ALLOWED_IDS
+
+
 # ── Serper web search + LRU cache ────────────────────────────────────────────
 
 SERPER_API_KEY = os.getenv("SERPER_API_KEY", "")
@@ -198,6 +220,60 @@ def _call_groq_fun(prompt: str) -> str:
         ],
         max_tokens=120,
         temperature=0.95,
+    )
+
+
+def _call_groq_roastmax(target: str, msg_context: str = "") -> str:
+    """
+    Savage comedy-roast style response for /roastmax.
+    Think professional roast dinner — maximally brutal wit but never
+    targeting appearance, identity, religion, or anything genuinely hurtful.
+    A random angle is injected every call for variety.
+    """
+    angles = [
+        "stand-up comedian doing a roast dinner set",
+        "British panel show judge who has completely given up",
+        "disappointed ancient philosopher",
+        "overly dramatic telenovela villain monologue",
+        "sports pundit who has lost all respect for the player",
+        "exhausted HR manager reading their final warning out loud",
+        "nature documentary narrator describing a failed organism",
+        "old wise man who has seen too much and is tired",
+        "corporate performance review gone completely off the rails",
+        "Shakespearean tragedy about absolute mediocrity",
+        "battle rapper who studied philosophy",
+        "disappointed university professor marking a zero-effort essay",
+    ]
+    angle = random.choice(angles)
+    context_line = (
+        f'They literally just said: "{msg_context}"\nUse that as your main ammunition.\n\n'
+        if msg_context else ""
+    )
+    return _groq_complete(
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You are a savage but brilliant roast comedian performing at a comedy roast dinner. "
+                    "Deliver the most brutally funny roast possible — sharp wit, clever wordplay, "
+                    "and devastating observations about someone's choices, behaviour, and decisions. "
+                    "Never target physical appearance, ethnicity, religion, gender, or anything that "
+                    "could cause real personal hurt. Pure comedy. Savage but not cruel. "
+                    "Plain text only. No markdown. Two to three sentences maximum. "
+                    "Give only the roast, no intro, no label."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Roast {target} in the style of a {angle}.\n"
+                    f"{context_line}"
+                    "Make it absolutely devastating but keep it funny, not mean-spirited."
+                ),
+            },
+        ],
+        max_tokens=150,
+        temperature=0.97,
     )
 
 

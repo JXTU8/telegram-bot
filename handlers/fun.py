@@ -3,7 +3,7 @@ handlers/fun.py
 ───────────────
 Fun commands: ship, roast, compliment, vibecheck, rank, truth, dare,
 wouldyourather, coinflip, 8ball, curse, bless, mvp, hot, toss, decide,
-poll, game.
+poll, game, roastmax.
 """
 
 import asyncio
@@ -28,7 +28,7 @@ from constants import (
 from stores.ship_store import save_ship_pair, get_top_ship_pairs, get_shipboard_reset_time
 from stores.user_store import track_seen_user, get_seen_users
 from stores.mvp_store import get_today_mvp, save_mvp_win, get_mvp_board
-from handlers.ai import groq_client, _call_groq_fun
+from handlers.ai import groq_client, _call_groq_fun, _call_groq_roastmax, is_roastmax_allowed
 from helpers import (
     _display_user, _arg_text, _normalize_target, _daily_rng,
     _mentioned_target, _target_from_mention_or_sender, _escape_md,
@@ -43,10 +43,7 @@ _POLL_MAX_OPTIONS = 10
 _POLL_MAX_QUESTION_LEN = 300
 _POLL_MAX_OPTION_LEN = 100
 
-# Fix 17: _POLL_COOLDOWNS is intentionally in-memory only (not Redis-backed).
-# Polls cannot be deleted by the bot once sent, so the cooldown just needs to
-# throttle rapid fire within a single session. Resetting on restart is fine.
-_POLL_COOLDOWNS: dict = {}          # (chat_id, user_id) -> monotonic timestamp
+_POLL_COOLDOWNS: dict = {}
 _POLL_COOLDOWN_SECONDS: float = 30.0
 _POLL_COOLDOWNS_MAX = 5_000
 
@@ -181,6 +178,42 @@ def _ship_comment(score: float, seed: str = "") -> str:
     return rng.choice(SHIP_TIER_LINES[-1][1])
 
 
+# ── Roast target resolver ─────────────────────────────────────────────────────
+
+def _resolve_roast_target(update: Update, context: ContextTypes.DEFAULT_TYPE) -> tuple:
+    """
+    Resolve the roast target and any message context.
+
+    Priority:
+      1. @mention or text_mention in the command message
+      2. Reply to someone else's message (uses that message's text as context)
+      3. Sender themselves (self-roast)
+
+    Returns (target_name: str, msg_context: str)
+    """
+    message = update.message
+    replied = message.reply_to_message if message else None
+
+    # 1. Explicit mention in the command
+    mentioned = _mentioned_target(update, context)
+    if mentioned:
+        # If they also replied, grab the replied message text as bonus context
+        msg_context = ""
+        if replied and replied.text:
+            msg_context = replied.text[:300]
+        return mentioned, msg_context
+
+    # 2. Reply to someone else's message — target is the replied-to author
+    if replied and replied.from_user and not replied.from_user.is_bot:
+        if replied.from_user.id != update.effective_user.id:
+            target = _display_user(replied.from_user)
+            msg_context = (replied.text or "")[:300]
+            return target, msg_context
+
+    # 3. Self-roast
+    return _display_user(update.effective_user), ""
+
+
 # ── /ship ─────────────────────────────────────────────────────────────────────
 
 async def ship_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -257,22 +290,66 @@ async def shipboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
-# ── /roast & /compliment ──────────────────────────────────────────────────────
+# ── /roast ────────────────────────────────────────────────────────────────────
 
 async def roast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    target = _target_from_mention_or_sender(update, context)
+    target, msg_context = _resolve_roast_target(update, context)
     fallback = random.choice(ROAST_LINES).format(target=target)
     if not groq_client:
         await update.message.reply_text(fallback)
         return
     try:
-        prompt = (f"Write one short, playful, friendly roast for someone named '{target}' in a Telegram group. "
-                  "Use their name. Keep it funny and harmless, not mean. One sentence only.")
+        context_line = (
+            f' They just said: "{msg_context[:200]}".'
+            if msg_context else ""
+        )
+        prompt = (
+            f"Write one short, playful, friendly roast for someone named '{target}' "
+            f"in a Telegram group.{context_line} "
+            "Use their name. Keep it funny and harmless, not mean. One sentence only."
+        )
         await update.message.reply_text(await asyncio.to_thread(_call_groq_fun, prompt))
     except Exception as e:
         logger.warning("Groq roast failed: %s", e)
         await update.message.reply_text(fallback)
 
+
+# ── /roastmax ─────────────────────────────────────────────────────────────────
+
+async def roastmax_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Savage comedy-roast command, restricted to authorised users only.
+    Authorised user IDs are read from the ROASTMAX_ALLOWED_IDS env var.
+    Supports @mention, reply-to-message (with message context), or self-roast.
+    """
+    user_id = update.effective_user.id
+
+    if not is_roastmax_allowed(user_id):
+        await update.message.reply_text(
+            "🔒 You don't have access to /roastmax."
+        )
+        return
+
+    if not groq_client:
+        await update.message.reply_text(
+            "⚠️ AI is not configured. Ask the admin to set up `GROQ_API_KEY`."
+        )
+        return
+
+    target, msg_context = _resolve_roast_target(update, context)
+
+    try:
+        result = await asyncio.to_thread(_call_groq_roastmax, target, msg_context)
+        await update.message.reply_text(f"🔥 {result}")
+    except Exception as e:
+        logger.warning("Groq roastmax failed: %s", e)
+        await update.message.reply_text(
+            f"💀 The roast machine broke but {_escape_md(target)} should still feel bad about themselves.",
+            parse_mode="Markdown",
+        )
+
+
+# ── /compliment ───────────────────────────────────────────────────────────────
 
 async def compliment_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     target = _target_from_mention_or_sender(update, context)
@@ -598,9 +675,7 @@ async def toss_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 # ── /game — Number guessing ────────────────────────────────────────────────────
 
-# In-memory game state per chat. Intentionally ephemeral — games reset on
-# bot restart, which is fine (games are short-lived anyway).
-_ACTIVE_GAMES: dict = {}   # chat_id -> {"number": int, "job_name": str, "timer_version": int}
+_ACTIVE_GAMES: dict = {}
 _GAME_RANGE = (1, 100)
 _GAME_TIMEOUT_SECONDS = 60
 
@@ -650,14 +725,7 @@ async def game_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def game_guess_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Process number guesses for an active game. Registered in handler group 2
-    so it runs alongside group-0 handlers (ask_followup, conversations) without
-    blocking or being blocked by them.
-
-    Behaviour the user can expect:
-      - Correct number  → congratulations + game ends
-      - Wrong number    → 📈 Higher / 📉 Lower reply (bot replied = guess was detected)
-      - Non-number text → silently ignored (no reply = not treated as a guess)
-    The inactivity timer resets to 60 s after every valid (in-range) guess.
+    so it runs alongside group-0 handlers without blocking or being blocked by them.
     """
     chat_id = update.effective_chat.id
     if chat_id not in _ACTIVE_GAMES:
@@ -665,7 +733,6 @@ async def game_guess_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     text = (update.message.text or "").strip()
 
-    # Silently ignore non-numeric text (letters, punctuation, emoji, etc.)
     if not text.lstrip("-").isdigit():
         return
 
@@ -676,7 +743,6 @@ async def game_guess_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     lo, hi = _GAME_RANGE
     if not (lo <= guess <= hi):
-        # Still a number but out of range — reply so user knows the bot saw it
         await update.message.reply_text(f"⚠️ Guess must be between {lo} and {hi}!")
         return
 
@@ -687,7 +753,6 @@ async def game_guess_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     timer_version = game["timer_version"]
     user_name = _display_user(update.effective_user)
 
-    # Cancel the current inactivity timer before deciding what to do
     for job in context.application.job_queue.get_jobs_by_name(job_name):
         job.schedule_removal()
 
@@ -700,7 +765,6 @@ async def game_guess_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return
 
-    # Wrong guess — give a directional hint and reschedule the inactivity reveal
     hint = "📈 Higher!" if guess < number else "📉 Lower!"
     await update.message.reply_text(hint)
 
