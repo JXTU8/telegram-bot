@@ -325,9 +325,6 @@ async def roastmax_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     user_id = update.effective_user.id
 
     if not is_roastmax_allowed(user_id):
-        await update.message.reply_text(
-            "🔒 You don't have access to /roastmax."
-        )
         return
 
     if not groq_client:

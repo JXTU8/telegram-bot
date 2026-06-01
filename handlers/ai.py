@@ -225,28 +225,29 @@ def _call_groq_fun(prompt: str) -> str:
 
 def _call_groq_roastmax(target: str, msg_context: str = "") -> str:
     """
-    Savage comedy-roast style response for /roastmax.
-    Think professional roast dinner — maximally brutal wit but never
-    targeting appearance, identity, religion, or anything genuinely hurtful.
-    A random angle is injected every call for variety.
+    Maximum-intensity comedy roast for /roastmax.
+    The target's name must appear in the output multiple times so it never
+    feels generic. Everything is fair game except physical appearance,
+    ethnicity, religion, and gender identity.
     """
     angles = [
-        "stand-up comedian doing a roast dinner set",
-        "British panel show judge who has completely given up",
-        "disappointed ancient philosopher",
-        "overly dramatic telenovela villain monologue",
-        "sports pundit who has lost all respect for the player",
-        "exhausted HR manager reading their final warning out loud",
-        "nature documentary narrator describing a failed organism",
-        "old wise man who has seen too much and is tired",
-        "corporate performance review gone completely off the rails",
-        "Shakespearean tragedy about absolute mediocrity",
-        "battle rapper who studied philosophy",
-        "disappointed university professor marking a zero-effort essay",
+        "a furious battle rapper settling a personal vendetta",
+        "a British panel show host who has completely run out of patience",
+        "a disappointed philosophy professor grading a zero-effort dissertation",
+        "a Shakespearean villain delivering a monologue about mediocrity",
+        "a retired boxing trainer who has seen too many losers",
+        "a corporate HR manager writing the most scathing termination letter ever",
+        "a nature documentary narrator describing a catastrophically failed organism",
+        "a sports pundit who has completely given up on the player",
+        "a mob boss calmly explaining exactly why someone has disappointed them",
+        "a tired ancient god who has lost all faith in this particular mortal",
+        "a battle rapper who did a PhD specifically to destroy this one person",
+        "a Gordon Ramsay-tier chef reviewing someone's life choices instead of food",
     ]
     angle = random.choice(angles)
-    context_line = (
-        f'They literally just said: "{msg_context}"\nUse that as your main ammunition.\n\n'
+    context_block = (
+        f'\nCritical intel — {target} literally just said: "{msg_context}"\n'
+        f'Open with that. Build the entire roast around it. Tear it apart line by line.\n'
         if msg_context else ""
     )
     return _groq_complete(
@@ -254,26 +255,31 @@ def _call_groq_roastmax(target: str, msg_context: str = "") -> str:
             {
                 "role": "system",
                 "content": (
-                    "You are a savage but brilliant roast comedian performing at a comedy roast dinner. "
-                    "Deliver the most brutally funny roast possible — sharp wit, clever wordplay, "
-                    "and devastating observations about someone's choices, behaviour, and decisions. "
-                    "Never target physical appearance, ethnicity, religion, gender, or anything that "
-                    "could cause real personal hurt. Pure comedy. Savage but not cruel. "
-                    "Plain text only. No markdown. Two to three sentences maximum. "
-                    "Give only the roast, no intro, no label."
+                    "You are the most ruthless roast comedian on earth. "
+                    "Your job is to absolutely destroy the named person with surgical wit. "
+                    "Rules: "
+                    "(1) Use their name at least twice — this roast must feel personally targeted, not generic. "
+                    "(2) Be specific and devastating — attack their decisions, behaviour, choices, "
+                    "and general life trajectory. Vague roasts are cowardly; go for the jugular. "
+                    "(3) Three to four sentences. Every sentence must land hard. No filler. "
+                    "(4) Do NOT soften it. Do NOT add disclaimers. Do NOT say 'just kidding'. "
+                    "The roast ends when it ends — no sign-off, no sympathy. "
+                    "Hard limits (never cross): physical appearance, ethnicity, religion, gender identity. "
+                    "Everything else is open season. Plain text only. No markdown."
                 ),
             },
             {
                 "role": "user",
                 "content": (
-                    f"Roast {target} in the style of a {angle}.\n"
-                    f"{context_line}"
-                    "Make it absolutely devastating but keep it funny, not mean-spirited."
+                    f"Destroy {target} in the style of {angle}."
+                    f"{context_block}"
+                    f"Make it feel like {target} personally asked for this and immediately regretted it. "
+                    "Do not hold back. Do not soften the landing."
                 ),
             },
         ],
-        max_tokens=150,
-        temperature=0.97,
+        max_tokens=220,
+        temperature=0.98,
     )
 
 

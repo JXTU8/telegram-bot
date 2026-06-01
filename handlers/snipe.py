@@ -9,6 +9,7 @@ Only plain-text messages (no commands, no media) are logged.
 Messages older than 2 hours are automatically expired by Redis TTL.
 """
 
+import asyncio
 import logging
 from datetime import datetime
 
@@ -86,8 +87,8 @@ async def snipe_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     chat_id  = update.effective_chat.id
-    all_msgs = get_snipe_messages(chat_id)          # most-recent-first
-    messages = all_msgs[:_SNIPE_MAX_SHOW]           # cap at 10
+    all_msgs = await asyncio.to_thread(get_snipe_messages, chat_id)   # most-recent-first
+    messages = all_msgs[:_SNIPE_MAX_SHOW]                              # cap at 10
 
     if not messages:
         await update.message.reply_text(
@@ -121,7 +122,7 @@ async def snipe_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     chat_id  = query.message.chat_id
-    all_msgs = get_snipe_messages(chat_id)
+    all_msgs = await asyncio.to_thread(get_snipe_messages, chat_id)
     messages = all_msgs[:_SNIPE_MAX_SHOW]
 
     if not messages:
