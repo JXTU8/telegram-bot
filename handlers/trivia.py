@@ -51,7 +51,7 @@ async def _generate_question(topic: str = "") -> dict | None:
       {"question": "...", "options": {"A":"...","B":"...","C":"...","D":"..."}, "answer":"B", "fact":"..."}
     """
     try:
-        from ai import groq_client, _groq_complete
+        from handlers.ai import groq_client, _groq_complete
     except ImportError:
         return None
     if not groq_client:
@@ -127,7 +127,7 @@ async def trivia_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     try:
-        from ai import groq_client
+        from handlers.ai import groq_client
     except ImportError:
         groq_client = None
     if not groq_client:
