@@ -209,18 +209,22 @@ async def trivia_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def trivia_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    await query.answer()
+    if not query or not query.data:
+        return
 
     if query.data == "trivia:noop":
+        await query.answer("This trivia question is already over.")
         return
 
     parts = query.data.split(":", 3)
     if len(parts) != 4:
+        await query.answer("Invalid trivia button.", show_alert=True)
         return
     _, chat_id_str, qid, chosen = parts
     try:
         chat_id = int(chat_id_str)
     except ValueError:
+        await query.answer("Invalid trivia button.", show_alert=True)
         return
 
     game = _ACTIVE_TRIVIA.get(chat_id)
@@ -237,6 +241,7 @@ async def trivia_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     name    = _display_user(user)
 
     if chosen == correct:
+        await query.answer("Correct!")
         # ── Correct ───────────────────────────────────────────────────────────
         game["answered_by"] = user.id
         _ACTIVE_TRIVIA.pop(chat_id, None)
