@@ -358,6 +358,19 @@ HOT_VERDICTS = [
     (100, "💥 MAXIMUM HOT. Undeniably elite."),
 ]
 
+PREDICT_FALLBACK_LINES = [
+    "The crystal ball sees chaos ahead. Proceed with caution.",
+    "All signs point to yes — but the universe reserves the right to change its mind.",
+    "The stars have consulted. The answer is aggressively unclear.",
+    "Probability says maybe. Fate says why not. Nobody asked either of them.",
+    "The cosmic committee reviewed this. They were divided.",
+    "The future is foggy but the vibes are sending something.",
+    "The timeline branch on this one is looking... interesting.",
+    "Bold move. The universe is watching with popcorn.",
+    "Unclear. The oracle is on lunch break.",
+    "The outcome depends entirely on choices you have already made. Good luck.",
+]
+
 TOSS_VERDICTS = [
     "The universe has selected its champion.",
     "Fate has spoken. No appeals.",

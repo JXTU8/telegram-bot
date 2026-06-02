@@ -23,7 +23,7 @@ from constants import (
     ROAST_LINES, COMPLIMENT_LINES, VIBE_TIERS,
     TRUTH_QUESTIONS, DARE_PROMPTS, WOULD_YOU_RATHER_PROMPTS,
     EIGHT_BALL_ANSWERS, CURSE_LINES, BLESS_LINES, MVP_LINES, HOT_VERDICTS,
-    TOSS_VERDICTS,
+    TOSS_VERDICTS, PREDICT_FALLBACK_LINES,
 )
 from stores.ship_store import save_ship_pair, get_top_ship_pairs, get_shipboard_reset_time
 from stores.user_store import track_seen_user, get_seen_users
@@ -554,6 +554,48 @@ async def hot_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         f"🌡️ *Hot or Not — {_escape_md(text)}*\nScore: {score}/100\n{verdict}",
         parse_mode="Markdown",
     )
+
+
+# ── /predict ──────────────────────────────────────────────────────────────────
+
+async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    text = _arg_text(context)
+    if not text:
+        await update.message.reply_text(
+            "Usage: `/predict <scenario>`\n"
+            "Examples:\n"
+            "• `/predict will I pass my exam`\n"
+            "• `/predict who wins the group trivia tonight`\n"
+            "• `/predict should I sleep early`",
+            parse_mode="Markdown",
+        )
+        return
+    today_str = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
+    rng       = random.Random(f"predict:{_normalize_target(text)}:{today_str}")
+    fallback  = rng.choice(PREDICT_FALLBACK_LINES)
+    if not groq_client:
+        await update.message.reply_text(
+            f"🔮 *Prediction*\n\n_{_escape_md(text)}_\n\n{fallback}",
+            parse_mode="Markdown",
+        )
+        return
+    try:
+        prompt = (
+            f"Give a short, dramatic, entertaining prediction for this scenario: '{text}'. "
+            "Be confident and creative. Max 2 sentences. "
+            "No markdown, no bullet points, plain text only."
+        )
+        result = await asyncio.to_thread(_call_groq_fun, prompt)
+        await update.message.reply_text(
+            f"🔮 *Prediction*\n\n_{_escape_md(text)}_\n\n{result}",
+            parse_mode="Markdown",
+        )
+    except Exception as e:
+        logger.warning("Groq predict failed: %s", e)
+        await update.message.reply_text(
+            f"🔮 *Prediction*\n\n_{_escape_md(text)}_\n\n{fallback}",
+            parse_mode="Markdown",
+        )
 
 
 # ── /decide ───────────────────────────────────────────────────────────────────

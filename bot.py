@@ -27,7 +27,7 @@ from handlers.misc import (
     seen_user_tracker, error_handler, conversation_timeout,
     cancel_command, leaderboard_command, recap_command,
     ban_command, unban_command, banlist_command, say_command,
-    threadid_command,
+    threadid_command, cmdstats_command, command_stats_tracker,
 )
 from handlers.countdown import (
     add_countdown_start, received_name, received_date, received_time,
@@ -53,6 +53,10 @@ from handlers.fun import (
     mvp_command, mvpboard_command, hot_command,
     decide_command, poll_command, toss_command,
     game_command, game_guess_handler,
+    predict_command,
+)
+from handlers.trivia import (
+    trivia_command, trivia_callback, triviaboard_command,
 )
 from handlers.reminders import (
     remind_command, cancelremind_command, cancelremind_callback,
@@ -185,6 +189,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(help_callback,         pattern=r"^help:"))
     app.add_handler(CallbackQueryHandler(quotes_callback,       pattern=r"^quote:"))
     app.add_handler(CallbackQueryHandler(cancelremind_callback, pattern=r"^cancelremind:"))
+    app.add_handler(CallbackQueryHandler(trivia_callback,       pattern=r"^trivia:"))
 
     # ── Conversation handlers ─────────────────────────────────────────────────
     app.add_handler(countdown_conv)
@@ -233,6 +238,10 @@ def main() -> None:
     app.add_handler(_cmd("mvp",             mvp_command))
     app.add_handler(_cmd("mvpboard",        mvpboard_command))
     app.add_handler(_cmd("hot",             hot_command))
+    app.add_handler(_cmd("predict",         predict_command))
+    app.add_handler(_cmd("trivia",          trivia_command))
+    app.add_handler(_cmd("triviaboard",     triviaboard_command))
+    app.add_handler(_cmd("cmdstats",        cmdstats_command))
     app.add_handler(_cmd("stats",           stats_command))
     app.add_handler(_cmd("leaderboard",     leaderboard_command))
     app.add_handler(_cmd("recap",           recap_command))
@@ -249,7 +258,8 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.REPLY, ask_followup_handler))
 
     # ── Message handlers (group 1) ────────────────────────────────────────────
-    app.add_handler(MessageHandler(filters.ALL, seen_user_tracker), group=1)
+    app.add_handler(MessageHandler(filters.ALL,     seen_user_tracker),      group=1)
+    app.add_handler(MessageHandler(filters.COMMAND, command_stats_tracker),  group=1)
 
     # ── Message handlers (group 2) ────────────────────────────────────────────
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, game_guess_handler), group=2)

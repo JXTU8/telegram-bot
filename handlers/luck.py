@@ -21,6 +21,7 @@ from stores.luck_store import (
     save_fate_entry, get_fate_board,
     update_fate_streak, get_fate_streak,
     delete_old_fateboard_keys,
+    increment_luck_checks,
 )
 from stores.user_store import track_seen_user
 from stores.birthday_store import get_all_birthdays
@@ -250,6 +251,11 @@ async def luck_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             asyncio.to_thread(track_seen_user, update.effective_chat.id, target_user_id, target_name)
         )
         t2.add_done_callback(_log_background_failure("track_seen_user"))
+
+        t3 = asyncio.create_task(
+            asyncio.to_thread(increment_luck_checks, target_user_id)
+        )
+        t3.add_done_callback(_log_background_failure("increment_luck_checks"))
 
         old_streak, old_cat = await asyncio.to_thread(get_fate_streak, target_user_id)
         streak = await asyncio.to_thread(_update_streak_sync, target_user_id, today_str, tier_category)

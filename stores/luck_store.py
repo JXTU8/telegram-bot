@@ -111,3 +111,30 @@ def get_fate_streak(user_id: int) -> tuple:
     except Exception as e:
         logger.error("Redis streak read error for user %s: %s", user_id, e)
         return 0, "neutral"
+
+
+# ── Lifetime luck check counter ───────────────────────────────────────────────
+
+def _luck_checks_key(user_id: int) -> str:
+    return f"luck_checks:{user_id}"
+
+
+def increment_luck_checks(user_id: int) -> int:
+    """Increment and return the lifetime /luck check count for a user."""
+    key = _luck_checks_key(user_id)
+    try:
+        return int(redis.incr(key))
+    except Exception as e:
+        logger.error("Redis luck checks incr error for user %s: %s", user_id, e)
+        return 0
+
+
+def get_luck_check_count(user_id: int) -> int:
+    """Return the lifetime /luck check count for a user (0 if never checked)."""
+    key = _luck_checks_key(user_id)
+    try:
+        raw = redis.get(key)
+        return int(raw) if raw is not None else 0
+    except Exception as e:
+        logger.error("Redis luck checks read error for user %s: %s", user_id, e)
+        return 0

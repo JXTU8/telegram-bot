@@ -21,12 +21,13 @@ from constants import _MONTH_NAMES
 from stores.ban_store import ban_user, unban_user, get_banned_users
 from stores.birthday_store import get_all_birthdays
 from stores.countdown_store import get_all_countdowns
-from stores.luck_store import get_fate_board, get_fate_streak
+from stores.luck_store import get_fate_board, get_fate_streak, get_luck_check_count
 from stores.mvp_store import get_user_mvp_stats, get_today_mvp, get_mvp_board
 from stores.quote_store import get_quote_count, get_user_quote_counts
 from stores.reminder_store import get_user_remind_jobs
-from stores.ship_store import get_top_ship_pairs, get_shipboard_reset_time
+from stores.ship_store import get_top_ship_pairs, get_shipboard_reset_time, get_user_ship_stats
 from stores.user_store import get_seen_users, track_seen_user
+from stores.stats_store import get_cmd_stats, get_cmd_stats_today, increment_cmd_stat
 from helpers import (
     _display_user, _escape_md, _delete_tracked,
     _display_name_or_id, owner_only, _days_label,
@@ -84,7 +85,8 @@ HELP_PAGES = {
         "🤖 *AI*\n\n"
         "/ask <question> — ask AI anything\n"
         "/8ball <question> — magic 8-ball\n"
-        "/hot <anything> — rate anything out of 100"
+        "/hot <anything> — rate anything out of 100\n"
+        "/predict <scenario> — AI predicts the outcome"
     ),
     "luck": (
         "🍀 *Daily Luck*\n\n"
@@ -96,6 +98,8 @@ HELP_PAGES = {
     "fun": (
         "🎉 *Fun*\n\n"
         "/game — number guessing game (1–100)\n"
+        "/trivia [topic] — AI trivia question, first correct answer wins\n"
+        "/triviaboard — all-time trivia leaderboard\n"
         "/ship @user1 @user2 — compatibility percentage\n"
         "/shipboard — top ship pairs in this group\n"
         "/roast @user — personalised roast\n"
@@ -451,12 +455,14 @@ async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     name    = _display_user(target_user)
     today   = datetime.now(TIMEZONE).date()
 
-    bdays, reminders, streak, mvp_stats, quote_counts = await asyncio.gather(
+    bdays, reminders, streak, mvp_stats, quote_counts, ship_stats, luck_checks = await asyncio.gather(
         asyncio.to_thread(get_all_birthdays, chat_id),
         asyncio.to_thread(get_user_remind_jobs, chat_id, user_id),
         asyncio.to_thread(get_fate_streak, user_id),
         asyncio.to_thread(get_user_mvp_stats, chat_id, user_id),
         asyncio.to_thread(get_user_quote_counts, chat_id, name),
+        asyncio.to_thread(get_user_ship_stats, chat_id, name),
+        asyncio.to_thread(get_luck_check_count, user_id),
     )
 
     bday = bdays.get(str(user_id))
@@ -473,6 +479,19 @@ async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     seen      = await asyncio.to_thread(get_seen_users, chat_id)
     seen_name = _display_name_or_id(seen.get(str(user_id), name), user_id)
 
+    # Ship stats (current 48-hour window)
+    ship_appearances = ship_stats.get("appearances", 0) if isinstance(ship_stats, dict) else 0
+    best_score       = ship_stats.get("best_score", 0.0) if isinstance(ship_stats, dict) else 0.0
+    best_partner     = ship_stats.get("best_partner", "") if isinstance(ship_stats, dict) else ""
+    if ship_appearances > 0 and best_partner:
+        ship_line = f"*{ship_appearances}* _(best: {_escape_md(best_partner)} `{best_score:.1f}%`)_"
+    elif ship_appearances > 0:
+        ship_line = f"*{ship_appearances}*"
+    else:
+        ship_line = "*0* _(not shipped yet this cycle)_"
+
+    total_luck_checks = luck_checks if isinstance(luck_checks, int) else 0
+
     luck_score, luck_tier, _ = _get_fate(user_id)
     if luck_score == 999:
         luck_display = "999 ⚡ MAXIMUM"
@@ -486,8 +505,10 @@ async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             f"👤 *Profile — {_escape_md(seen_name)}*",
             f"🍀 Today's luck: *{_escape_md(luck_tier)}* (`{luck_display}`)",
             f"📈 Luck streak: *{_escape_md(streak_line)}*",
+            f"🎯 Total luck checks: *{total_luck_checks}*",
             f"🏆 MVP wins: *{mvp_wins}*",
             f"Last MVP: *{_escape_md(last_mvp)}*",
+            f"💞 Ships this cycle: {ship_line}",
             f"⏰ Pending reminders: *{len(reminders)}*",
             f"🎂 Birthday: *{_escape_md(birthday_line)}*",
             f"💬 Quotes authored/saved: *{authored_quotes}/{saved_quotes}*",
@@ -728,6 +749,51 @@ async def threadid_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await update.message.reply_text(f"🧵 Thread ID: `{thread_id}`", parse_mode="Markdown")
     else:
         await update.message.reply_text("⚠️ This is the main chat (no thread ID).")
+
+
+# ── /cmdstats (owner only) ────────────────────────────────────────────────────
+
+@owner_only
+async def cmdstats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show lifetime and today's command usage, sorted by popularity."""
+    lifetime, today = await asyncio.gather(
+        asyncio.to_thread(get_cmd_stats),
+        asyncio.to_thread(get_cmd_stats_today),
+    )
+    if not lifetime:
+        await update.message.reply_text("📊 No command usage data yet.")
+        return
+
+    sorted_all = sorted(lifetime.items(), key=lambda x: x[1], reverse=True)
+    total_uses  = sum(lifetime.values())
+    today_total = sum(today.values())
+
+    lines = [
+        "📊 *Command Usage Stats*\n",
+        f"Lifetime total: *{total_uses}* uses  ·  Today: *{today_total}*\n",
+    ]
+    for i, (cmd, count) in enumerate(sorted_all[:20], 1):
+        today_count = today.get(cmd, 0)
+        today_tag   = f" _(+{today_count} today)_" if today_count else ""
+        lines.append(f"{i}. `/{cmd}` — *{count}*{today_tag}")
+
+    if len(sorted_all) > 20:
+        lines.append(f"\n_...and {len(sorted_all) - 20} more commands_")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+# ── Background: command stats tracking ───────────────────────────────────────
+
+async def command_stats_tracker(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Fires on every command message (group 1). Increments the usage counter."""
+    msg = update.message
+    if not msg or not msg.text or not msg.text.startswith("/"):
+        return
+    # Strip the leading slash, any @BotName suffix, and lowercase
+    raw = msg.text.split()[0].lstrip("/").split("@")[0].lower()
+    if raw:
+        await asyncio.to_thread(increment_cmd_stat, raw)
 
 # ── Background: seen-user tracking ───────────────────────────────────────────
 
