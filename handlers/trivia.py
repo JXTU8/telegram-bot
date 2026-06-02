@@ -217,14 +217,19 @@ async def trivia_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     logger.info("Trivia started in chat %s  qid=%s  topic=%s", chat_id, qid, category)
 
 
+# ── Callback handler ──────────────────────────────────────────────────────────
+
 async def trivia_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if not query or not query.data:
         return
 
-    # ── Acknowledge immediately — MUST happen before any async work ──────────
-    # Without this, Telegram shows a loading spinner until its 30-second timeout,
-    # which is exactly the symptom: the spinner runs, then _on_timeout fires.
+    # ── Acknowledge FIRST — before any I/O or dict access ────────────────────
+    # Telegram shows a loading spinner on the button until query.answer() is
+    # called. Anything that raises or blocks before this line will leave the
+    # button frozen. Previously this was called deep inside conditional branches,
+    # so a slow Redis call or a KeyError on a corrupt game entry meant it was
+    # never reached — causing the 30-second spinner until _on_timeout fired.
     await query.answer()
 
     logger.info(
@@ -234,7 +239,7 @@ async def trivia_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     )
 
     if query.data == "trivia:noop":
-        return  # query already answered above; nothing else to do
+        return  # query already acknowledged above; nothing else to do
 
     parts = query.data.split(":", 3)
     if len(parts) != 4:
@@ -245,22 +250,49 @@ async def trivia_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     except ValueError:
         return
 
-    game = _ACTIVE_TRIVIA.get(chat_id) or await asyncio.to_thread(get_active_trivia, chat_id)
-    if not game or game["qid"] != qid:
-        # Question already ended — edit silently, no need to show_alert since
-        # query is already acknowledged.
+    # ── Fast path: in-memory check (synchronous, zero I/O) ───────────────────
+    game = _ACTIVE_TRIVIA.get(chat_id)
+
+    # ── Slow path: Redis fallback (only when memory missed, e.g. post-restart) -
+    # query.answer() is already done above, so this I/O no longer blocks it.
+    if game is None:
+        game = await asyncio.to_thread(get_active_trivia, chat_id)
+
+    if not game or game.get("qid") != qid:
+        # Question already ended — quietly remove the keyboard so stale buttons
+        # don't confuse users. No alert needed since the message was already edited
+        # by the winner path or the timeout job.
         try:
             await query.edit_message_reply_markup(reply_markup=None)
         except TelegramError:
             pass
         return
-    if game.get("answered_by"):
-        return  # race: someone else clicked first, timeout/winner will update the message
 
-    data    = game["data"]
-    correct = data["answer"]
-    user    = update.effective_user
-    name    = _display_user(user)
+    if game.get("answered_by"):
+        # Another user clicked correct a split-second earlier; their winner edit
+        # is already in flight. Nothing to do here.
+        return
+
+    # ── Safe field access — .get() so a corrupt Redis entry can't raise ───────
+    # Previously these were bare dict["key"] accesses. A KeyError on a partially
+    # written Redis entry would crash the handler before query.answer() was ever
+    # called, leaving the spinner running until the timeout job fired.
+    data    = game.get("data") or {}
+    correct = data.get("answer")
+    options = data.get("options") or {}
+    fact    = data.get("fact", "")
+
+    if not correct or not options:
+        # Corrupt game entry — log, clean up, and exit gracefully.
+        logger.warning(
+            "Trivia: corrupt game entry for chat %s — missing data/answer/options", chat_id
+        )
+        _ACTIVE_TRIVIA.pop(chat_id, None)
+        await asyncio.to_thread(clear_active_trivia, chat_id)
+        return
+
+    user = update.effective_user
+    name = _display_user(user)
 
     if chosen == correct:
         # ── Correct ───────────────────────────────────────────────────────────
@@ -270,22 +302,22 @@ async def trivia_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         wins = await asyncio.to_thread(record_trivia_win, chat_id, user.id, name)
 
-        correct_text = data["options"][correct]
+        correct_text = options.get(correct, correct)
         win_line     = random.choice(_WIN_LINES)
         try:
             await query.edit_message_text(
                 f"✅ *{_escape_md(name)}* got it!  {win_line}\n\n"
                 f"*{correct}. {_escape_md(correct_text)}*\n"
-                f"📖 _{_escape_md(data['fact'])}_\n\n"
+                f"📖 _{_escape_md(fact)}_\n\n"
                 f"🏆 {_escape_md(name)} — *{wins}* trivia win{'s' if wins != 1 else ''}",
                 parse_mode="Markdown",
-                reply_markup=_disabled_keyboard(data["options"], correct),
+                reply_markup=_disabled_keyboard(options, correct),
             )
         except TelegramError as e:
             logger.warning("Trivia win edit failed: %s", e)
-    else:
-        # ── Wrong — no message edit; let them keep trying ─────────────────────
-        pass
+    # ── Wrong ─────────────────────────────────────────────────────────────────
+    # query is already acknowledged. The button stays active so the user can
+    # keep guessing. No message edit or alert needed.
 
 
 # ── /triviaboard ──────────────────────────────────────────────────────────────
