@@ -217,12 +217,16 @@ async def trivia_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     logger.info("Trivia started in chat %s  qid=%s  topic=%s", chat_id, qid, category)
 
 
-# ── Callback handler ──────────────────────────────────────────────────────────
-
 async def trivia_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if not query or not query.data:
         return
+
+    # ── Acknowledge immediately — MUST happen before any async work ──────────
+    # Without this, Telegram shows a loading spinner until its 30-second timeout,
+    # which is exactly the symptom: the spinner runs, then _on_timeout fires.
+    await query.answer()
+
     logger.info(
         "Trivia callback received from user=%s data=%s",
         getattr(update.effective_user, "id", None),
@@ -230,27 +234,28 @@ async def trivia_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     )
 
     if query.data == "trivia:noop":
-        await query.answer("This trivia question is already over.")
-        return
+        return  # query already answered above; nothing else to do
 
     parts = query.data.split(":", 3)
     if len(parts) != 4:
-        await query.answer("Invalid trivia button.", show_alert=True)
         return
     _, chat_id_str, qid, chosen = parts
     try:
         chat_id = int(chat_id_str)
     except ValueError:
-        await query.answer("Invalid trivia button.", show_alert=True)
         return
 
     game = _ACTIVE_TRIVIA.get(chat_id) or await asyncio.to_thread(get_active_trivia, chat_id)
     if not game or game["qid"] != qid:
-        await query.answer("⏰ This question has already ended.", show_alert=True)
+        # Question already ended — edit silently, no need to show_alert since
+        # query is already acknowledged.
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except TelegramError:
+            pass
         return
     if game.get("answered_by"):
-        await query.answer("⚠️ Already answered by someone else!", show_alert=True)
-        return
+        return  # race: someone else clicked first, timeout/winner will update the message
 
     data    = game["data"]
     correct = data["answer"]
@@ -258,7 +263,6 @@ async def trivia_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     name    = _display_user(user)
 
     if chosen == correct:
-        await query.answer("Correct!")
         # ── Correct ───────────────────────────────────────────────────────────
         game["answered_by"] = user.id
         _ACTIVE_TRIVIA.pop(chat_id, None)
@@ -280,8 +284,8 @@ async def trivia_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         except TelegramError as e:
             logger.warning("Trivia win edit failed: %s", e)
     else:
-        # ── Wrong ─────────────────────────────────────────────────────────────
-        await query.answer("❌ Wrong! Keep trying.", show_alert=True)
+        # ── Wrong — no message edit; let them keep trying ─────────────────────
+        pass
 
 
 # ── /triviaboard ──────────────────────────────────────────────────────────────
