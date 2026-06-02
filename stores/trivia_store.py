@@ -14,9 +14,40 @@ from stores._utils import _decode_dict
 
 logger = logging.getLogger(__name__)
 
+_ACTIVE_TTL = 180
+
 
 def _wins_key(chat_id: int) -> str:
     return f"trivia_wins:{chat_id}"
+
+
+def _active_key(chat_id: int) -> str:
+    return f"trivia_active:{chat_id}"
+
+
+def save_active_trivia(chat_id: int, game: dict, ttl: int = _ACTIVE_TTL) -> None:
+    """Save the active trivia question so button callbacks survive process changes."""
+    try:
+        redis.set(_active_key(chat_id), json.dumps(game, separators=(",", ":")), ex=ttl)
+    except Exception as e:
+        logger.error("Redis active trivia save error for chat %s: %s", chat_id, e)
+
+
+def get_active_trivia(chat_id: int) -> dict:
+    """Return the active trivia question for a chat, or {} if none exists."""
+    try:
+        return _decode_dict(redis.get(_active_key(chat_id)))
+    except Exception as e:
+        logger.error("Redis active trivia read error for chat %s: %s", chat_id, e)
+        return {}
+
+
+def clear_active_trivia(chat_id: int) -> None:
+    """Clear the active trivia question for a chat."""
+    try:
+        redis.delete(_active_key(chat_id))
+    except Exception as e:
+        logger.error("Redis active trivia clear error for chat %s: %s", chat_id, e)
 
 
 def record_trivia_win(chat_id: int, user_id: int, name: str) -> int:

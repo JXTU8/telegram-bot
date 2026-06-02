@@ -17,6 +17,13 @@ from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
 from helpers import _display_user, _escape_md, _arg_text
+from stores.trivia_store import (
+    clear_active_trivia,
+    get_active_trivia,
+    get_trivia_board,
+    record_trivia_win,
+    save_active_trivia,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -120,7 +127,8 @@ def _disabled_keyboard(options: dict, correct: str) -> InlineKeyboardMarkup:
 async def trivia_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
 
-    if chat_id in _ACTIVE_TRIVIA:
+    active_game = _ACTIVE_TRIVIA.get(chat_id) or await asyncio.to_thread(get_active_trivia, chat_id)
+    if active_game:
         await update.message.reply_text(
             "⚠️ A question is already active! Answer it first — or wait for the timer."
         )
@@ -149,12 +157,13 @@ async def trivia_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     qid = os.urandom(4).hex()
-    _ACTIVE_TRIVIA[chat_id] = {
+    game = {
         "qid":         qid,
         "data":        data,
         "category":    category,
         "answered_by": None,
     }
+    _ACTIVE_TRIVIA[chat_id] = game
 
     question_text = (
         f"🧠 *Trivia — {_escape_md(category)}*\n"
@@ -167,18 +176,21 @@ async def trivia_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     try:
         sent = await thinking.edit_text(question_text, parse_mode="Markdown", reply_markup=keyboard)
-        _ACTIVE_TRIVIA[chat_id]["message_id"] = sent.message_id
+        game["message_id"] = sent.message_id
+        await asyncio.to_thread(save_active_trivia, chat_id, game)
     except TelegramError as e:
         logger.warning("Trivia: failed to post question: %s", e)
         _ACTIVE_TRIVIA.pop(chat_id, None)
+        await asyncio.to_thread(clear_active_trivia, chat_id)
         return
 
     # ── Auto-reveal timer ─────────────────────────────────────────────────────
     async def _on_timeout(ctx: ContextTypes.DEFAULT_TYPE, _cid=chat_id, _qid=qid) -> None:
-        game = _ACTIVE_TRIVIA.get(_cid)
+        game = _ACTIVE_TRIVIA.get(_cid) or await asyncio.to_thread(get_active_trivia, _cid)
         if not game or game["qid"] != _qid or game.get("answered_by"):
             return
         _ACTIVE_TRIVIA.pop(_cid, None)
+        await asyncio.to_thread(clear_active_trivia, _cid)
         d      = game["data"]
         letter = d["answer"]
         try:
@@ -211,6 +223,11 @@ async def trivia_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     query = update.callback_query
     if not query or not query.data:
         return
+    logger.info(
+        "Trivia callback received from user=%s data=%s",
+        getattr(update.effective_user, "id", None),
+        query.data,
+    )
 
     if query.data == "trivia:noop":
         await query.answer("This trivia question is already over.")
@@ -227,7 +244,7 @@ async def trivia_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.answer("Invalid trivia button.", show_alert=True)
         return
 
-    game = _ACTIVE_TRIVIA.get(chat_id)
+    game = _ACTIVE_TRIVIA.get(chat_id) or await asyncio.to_thread(get_active_trivia, chat_id)
     if not game or game["qid"] != qid:
         await query.answer("⏰ This question has already ended.", show_alert=True)
         return
@@ -245,8 +262,8 @@ async def trivia_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         # ── Correct ───────────────────────────────────────────────────────────
         game["answered_by"] = user.id
         _ACTIVE_TRIVIA.pop(chat_id, None)
+        await asyncio.to_thread(clear_active_trivia, chat_id)
 
-        from stores.trivia_store import record_trivia_win
         wins = await asyncio.to_thread(record_trivia_win, chat_id, user.id, name)
 
         correct_text = data["options"][correct]
@@ -270,7 +287,6 @@ async def trivia_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 # ── /triviaboard ──────────────────────────────────────────────────────────────
 
 async def triviaboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    from stores.trivia_store import get_trivia_board
     chat_id = update.effective_chat.id
     rows    = await asyncio.to_thread(get_trivia_board, chat_id, 10)
     if not rows:
