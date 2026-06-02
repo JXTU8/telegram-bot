@@ -10,7 +10,7 @@ import json
 import logging
 
 from db import redis
-from _utils import _decode_dict
+from stores._utils import _decode_dict
 
 logger = logging.getLogger(__name__)
 
