@@ -287,7 +287,12 @@ def main() -> None:
     app.add_error_handler(error_handler)
 
     logger.info("Bot is running...")
-    app.run_polling()
+    # Pass allowed_updates explicitly so Telegram resets any server-side filter it has
+    # cached from a previous run.  When allowed_updates is omitted (None), Telegram
+    # silently reuses the last value it was given — if that value ever excluded
+    # callback_query, every inline button goes undelivered indefinitely regardless of
+    # handler registration.  Update.ALL_TYPES fixes this permanently.
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
