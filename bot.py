@@ -7,6 +7,7 @@ All logic lives in handlers/ — edit this file only when adding/removing comman
 
 import asyncio
 import logging
+import time as _time
 from datetime import datetime
 
 from telegram import Update
@@ -19,6 +20,12 @@ from config import TOKEN, TIMEZONE
 from keep_alive import keep_alive
 from stores.luck_store import delete_old_fateboard_keys
 from stores.ban_store import is_banned
+
+# ── Ban cache — avoids a Redis round-trip on every single update/click ────────
+# Banned status is cached per-user for 5 minutes. A newly banned user can still
+# send up to one more update within the cache window, which is acceptable.
+_BAN_CACHE: dict = {}          # user_id → (monotonic_timestamp, is_banned: bool)
+_BAN_CACHE_TTL = 300           # seconds
 
 # ── Handlers ──────────────────────────────────────────────────────────────────
 from handlers.misc import (
@@ -92,12 +99,21 @@ async def ban_gate(update: Update, context) -> None:
     from telegram.ext import ApplicationHandlerStop
     from helpers import _is_owner
     user = update.effective_user
-    if user and not user.is_bot:
-        if _is_owner(user):
-            return
-        banned = await asyncio.to_thread(is_banned, user.id)
-        if banned:
+    if not user or user.is_bot:
+        return
+    if _is_owner(user):
+        return
+    uid = user.id
+    now = _time.monotonic()
+    cached = _BAN_CACHE.get(uid)
+    if cached and now - cached[0] < _BAN_CACHE_TTL:
+        if cached[1]:           # cached as banned
             raise ApplicationHandlerStop
+        return                  # cached as not banned — skip Redis entirely
+    banned = await asyncio.to_thread(is_banned, uid)
+    _BAN_CACHE[uid] = (now, banned)
+    if banned:
+        raise ApplicationHandlerStop
 
 
 # ── Startup hook ──────────────────────────────────────────────────────────────
@@ -186,10 +202,14 @@ def main() -> None:
     )
 
     # ── Callback handlers (most specific patterns first) ──────────────────────
-    app.add_handler(CallbackQueryHandler(help_callback,         pattern=r"^help:"))
-    app.add_handler(CallbackQueryHandler(quotes_callback,       pattern=r"^quote:"))
-    app.add_handler(CallbackQueryHandler(cancelremind_callback, pattern=r"^cancelremind:"))
-    app.add_handler(CallbackQueryHandler(trivia_callback,       pattern=r"^trivia:"))
+    # Patterns use "prefix:.*" so they work under both re.match (PTB 20.x) and
+    # re.fullmatch (PTB 21.x).  The old "^prefix:" form only matched the literal
+    # six-character string "prefix:" under fullmatch, so the handlers were never
+    # called and every inline button hung with a loading animation.
+    app.add_handler(CallbackQueryHandler(help_callback,         pattern=r"^help:.+"))
+    app.add_handler(CallbackQueryHandler(quotes_callback,       pattern=r"^quote:.+"))
+    app.add_handler(CallbackQueryHandler(cancelremind_callback, pattern=r"^cancelremind:.+"))
+    app.add_handler(CallbackQueryHandler(trivia_callback,       pattern=r"^trivia:.+"))
 
     # ── Conversation handlers ─────────────────────────────────────────────────
     app.add_handler(countdown_conv)

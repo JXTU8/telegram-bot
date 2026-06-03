@@ -224,65 +224,70 @@ async def trivia_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not query or not query.data:
         return
     logger.info(
-        "Trivia callback received from user=%s data=%s",
+        "Trivia callback: user=%s data=%s",
         getattr(update.effective_user, "id", None),
         query.data,
     )
 
+    # Wrapper so an expired/already-answered query never crashes the handler.
+    # Telegram raises BadRequest if the query ID is too old (> ~60 s) or has
+    # already been answered — we always want processing to continue regardless.
+    async def _answer(*args, **kwargs):
+        try:
+            await query.answer(*args, **kwargs)
+        except Exception as e:
+            logger.warning("trivia query.answer failed (query may have expired): %s", e)
+
     if query.data == "trivia:noop":
-        await query.answer("This trivia question is already over.")
+        await _answer("This trivia question is already over.")
         return
 
     parts = query.data.split(":", 3)
     if len(parts) != 4:
-        await query.answer("Invalid trivia button.", show_alert=True)
+        await _answer("Invalid trivia button.", show_alert=True)
         return
     _, chat_id_str, qid, chosen = parts
     try:
         chat_id = int(chat_id_str)
     except ValueError:
-        await query.answer("Invalid trivia button.", show_alert=True)
+        await _answer("Invalid trivia button.", show_alert=True)
         return
 
     # ── Fast path: game is in the in-process dict (the normal case) ───────────
-    # All the state we need is immediately available, so we can call
-    # query.answer() with accurate feedback before doing any async I/O.
+    # No async I/O before _answer() — the animation stops in milliseconds.
     game = _ACTIVE_TRIVIA.get(chat_id)
 
     if game is not None:
         if game.get("qid") != qid:
-            await query.answer("⏰ This question has already ended.", show_alert=True)
+            await _answer("⏰ This question has already ended.", show_alert=True)
             return
         if game.get("answered_by"):
-            await query.answer("⚠️ Already answered by someone else!", show_alert=True)
+            await _answer("⚠️ Already answered by someone else!", show_alert=True)
             return
         data    = game.get("data") or {}
         correct = data.get("answer")
         if not correct:
-            await query.answer("⏰ This question has already ended.", show_alert=True)
+            await _answer("⏰ This question has already ended.", show_alert=True)
             return
         if chosen == correct:
-            await query.answer("✅ Correct!")
+            await _answer("✅ Correct!")
         else:
-            # ── Wrong (fast path) ─────────────────────────────────────────────
-            await query.answer("❌ Wrong! Keep trying.", show_alert=True)
+            await _answer("❌ Wrong! Keep trying.", show_alert=True)
             return
 
     else:
         # ── Slow path: game not in memory (e.g. after a bot restart) ─────────
-        # Acknowledge the click IMMEDIATELY so the loading animation stops,
-        # then do the Redis lookup. We lose the "Correct!" popup here, but
-        # keeping the button responsive is more important.
-        await query.answer()
+        # Acknowledge immediately so the animation stops, then check Redis.
+        await _answer()
         game = await asyncio.to_thread(get_active_trivia, chat_id)
         if not game or game.get("qid") != qid or game.get("answered_by"):
             return
         data    = game.get("data") or {}
         correct = data.get("answer")
         if not correct or chosen != correct:
-            return   # Wrong answer in slow path — animation already stopped above
+            return   # Wrong answer in slow path — animation already stopped
 
-    # ── Correct answer: record the win and update the question message ─────────
+    # ── Correct answer: record win and update the message ─────────────────────
     user = update.effective_user
     name = _display_user(user)
 
