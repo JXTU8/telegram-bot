@@ -28,7 +28,11 @@ from stores.reminder_store import (
     get_all_remind_jobs_for_restore,
     save_remindall_job, delete_remindall_job, get_all_remindall_jobs,
 )
-from helpers import _display_user, _arg_text, _is_chat_admin, _is_owner, _escape_md
+from stores.settings_store import get_selected_reminder_destination
+from helpers import (
+    _display_user, _arg_text, _is_chat_admin, _is_owner, _escape_md,
+    _message_thread_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +49,17 @@ _UNIT_MAP = {
     "h": 3600, "hr": 3600, "hrs": 3600, "hour": 3600, "hours": 3600,
 }
 _MAX_REMIND_SECONDS = 365 * 24 * 3600
+
+
+def _selected_reminder_target(update: Update) -> tuple[int, int | None]:
+    selected = get_selected_reminder_destination()
+    if selected:
+        return int(selected["chat_id"]), selected.get("thread_id")
+    return update.effective_chat.id, _message_thread_id(update)
+
+
+def _send_thread_kwargs(thread_id) -> dict:
+    return {"message_thread_id": thread_id} if thread_id is not None else {}
 
 
 def _parse_remind_seconds(unit_str: str) -> int:
@@ -198,11 +213,13 @@ async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     user         = update.effective_user
     chat_id      = update.effective_chat.id
+    target_chat_id, target_thread_id = await asyncio.to_thread(_selected_reminder_target, update)
     user_mention = user.mention_html() if user else "Hey"
 
     fire_at = time.time() + seconds
     job_id  = await asyncio.to_thread(
-        save_remind_job, chat_id, user_id, user_mention, reminder_text, fire_at
+        save_remind_job, chat_id, user_id, user_mention, reminder_text, fire_at,
+        target_chat_id, target_thread_id,
     )
     if not job_id:
         await asyncio.to_thread(decrement_remind_count, user_id)
@@ -213,6 +230,7 @@ async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         ctx: ContextTypes.DEFAULT_TYPE,
         _cid=chat_id, _jid=job_id, _uid=user_id,
         _mention=user_mention, _text=reminder_text,
+        _target_cid=target_chat_id, _target_thread_id=target_thread_id,
     ) -> None:
         claimed = await asyncio.to_thread(try_claim_remind_job, _jid)
         if not claimed:
@@ -223,9 +241,10 @@ async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             logger.info("Remind job %s was cancelled, skipping fire.", _jid)
             return
         await ctx.bot.send_message(
-            chat_id=_cid,
+            chat_id=_target_cid,
             text=f"⏰ Reminder for {_mention}!\n{_text}",
             parse_mode="HTML",
+            **_send_thread_kwargs(_target_thread_id),
         )
         await asyncio.to_thread(delete_remind_job, _cid, _jid)
         await asyncio.to_thread(decrement_remind_count, _uid)
@@ -379,18 +398,23 @@ async def remindall_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
 
     chat_id          = update.effective_chat.id
+    target_chat_id, target_thread_id = await asyncio.to_thread(_selected_reminder_target, update)
     set_by_raw       = _display_user(user)
     set_by_safe      = _escape_md(set_by_raw)
     reminder_text_safe = _escape_md(reminder_text)
 
     fire_at = time.time() + seconds
-    job_id  = await asyncio.to_thread(save_remindall_job, chat_id, set_by_raw, reminder_text, fire_at)
+    job_id  = await asyncio.to_thread(
+        save_remindall_job, chat_id, set_by_raw, reminder_text, fire_at,
+        target_chat_id, target_thread_id,
+    )
 
     async def _fire_group(ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await ctx.bot.send_message(
-            chat_id=chat_id,
+            chat_id=target_chat_id,
             text=f"📢 *Group Reminder* (set by {set_by_safe})\n\n{reminder_text_safe}",
             parse_mode="Markdown",
+            **_send_thread_kwargs(target_thread_id),
         )
         if job_id:
             await asyncio.to_thread(delete_remindall_job, chat_id, job_id)
@@ -425,11 +449,14 @@ async def restore_remind_jobs(app) -> None:
             user_id = job["user_id"]
             mention = job["user_mention_html"]
             text    = job["text"]
+            target_chat_id = job.get("target_chat_id", chat_id)
+            target_thread_id = job.get("target_thread_id")
 
             async def _fire(
                 ctx,
                 _cid=chat_id, _jid=job_id, _uid=user_id,
                 _mention=mention, _text=text, _overdue=is_overdue,
+                _target_cid=target_chat_id, _target_thread_id=target_thread_id,
             ):
                 claimed = await asyncio.to_thread(try_claim_remind_job, _jid)
                 if not claimed:
@@ -442,7 +469,12 @@ async def restore_remind_jobs(app) -> None:
                 msg = f"⏰ Reminder for {_mention}!\n{_text}"
                 if _overdue:
                     msg += "\n\n⚠️ Note: This reminder fired late due to a bot restart. Sorry!"
-                await ctx.bot.send_message(chat_id=_cid, text=msg, parse_mode="HTML")
+                await ctx.bot.send_message(
+                    chat_id=_target_cid,
+                    text=msg,
+                    parse_mode="HTML",
+                    **_send_thread_kwargs(_target_thread_id),
+                )
                 await asyncio.to_thread(delete_remind_job, _cid, _jid)
                 await asyncio.to_thread(decrement_remind_count, _uid)
 
@@ -465,15 +497,19 @@ async def restore_remindall_jobs(app) -> None:
             set_by    = _escape_md(job["set_by"])
             text      = job["text"]
             text_safe = _escape_md(text)
+            target_chat_id = job.get("target_chat_id", chat_id)
+            target_thread_id = job.get("target_thread_id")
 
             async def _fire(
                 ctx,
                 _cid=chat_id, _jid=job_id, _by=set_by, _text=text_safe,
+                _target_cid=target_chat_id, _target_thread_id=target_thread_id,
             ):
                 await ctx.bot.send_message(
-                    chat_id=_cid,
+                    chat_id=_target_cid,
                     text=f"📢 *Group Reminder* (set by {_by})\n\n{_text}",
                     parse_mode="Markdown",
+                    **_send_thread_kwargs(_target_thread_id),
                 )
                 await asyncio.to_thread(delete_remindall_job, _cid, _jid)
 

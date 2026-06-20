@@ -73,6 +73,8 @@ def save_remind_job(
     user_mention_html: str,
     text: str,
     fire_at: float,
+    target_chat_id: int = None,
+    target_thread_id=None,
 ) -> str:
     job_id = os.urandom(4).hex()
     key = _remind_jobs_key(chat_id)
@@ -83,6 +85,8 @@ def save_remind_job(
             "user_mention_html": user_mention_html,
             "text": text,
             "fire_at": fire_at,
+            "target_chat_id": target_chat_id if target_chat_id is not None else chat_id,
+            "target_thread_id": target_thread_id,
         }
         jobs = _decode_list(redis.get(key))
         jobs.append(job)
@@ -203,7 +207,14 @@ def _remindall_jobs_key(chat_id: int) -> str:
     return f"remindall_jobs:{chat_id}"
 
 
-def save_remindall_job(chat_id: int, set_by: str, text: str, fire_at: float) -> str:
+def save_remindall_job(
+    chat_id: int,
+    set_by: str,
+    text: str,
+    fire_at: float,
+    target_chat_id: int = None,
+    target_thread_id=None,
+) -> str:
     job_id = os.urandom(4).hex()
     key = _remindall_jobs_key(chat_id)
     try:
@@ -213,6 +224,8 @@ def save_remindall_job(chat_id: int, set_by: str, text: str, fire_at: float) -> 
             "set_by": set_by,
             "text": text,
             "fire_at": fire_at,
+            "target_chat_id": target_chat_id if target_chat_id is not None else chat_id,
+            "target_thread_id": target_thread_id,
         })
         redis.set(key, json.dumps(jobs, separators=(",", ":")))
         return job_id

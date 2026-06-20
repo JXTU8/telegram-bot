@@ -75,6 +75,38 @@ def requires_message(func):
     return wrapper
 
 
+def _message_thread_id(update: Update):
+    message = getattr(update, "effective_message", None) or getattr(update, "message", None)
+    return getattr(message, "message_thread_id", None)
+
+
+def _thread_kwargs(update: Update) -> dict:
+    thread_id = _message_thread_id(update)
+    return {"message_thread_id": thread_id} if thread_id is not None else {}
+
+
+def _patch_message_reply_to_thread(update: Update) -> None:
+    message = getattr(update, "message", None)
+    thread_id = getattr(message, "message_thread_id", None)
+    if message is None or thread_id is None or getattr(message, "_thread_reply_patched", False):
+        return
+    original_reply_text = message.reply_text
+
+    async def reply_text_in_thread(*args, **kwargs):
+        kwargs.setdefault("message_thread_id", thread_id)
+        return await original_reply_text(*args, **kwargs)
+
+    try:
+        message.reply_text = reply_text_in_thread
+        message._thread_reply_patched = True
+    except Exception as e:
+        try:
+            object.__setattr__(message, "reply_text", reply_text_in_thread)
+            object.__setattr__(message, "_thread_reply_patched", True)
+        except Exception:
+            logger.debug("Could not patch reply_text for thread %s: %s", thread_id, e)
+
+
 # ── User display ──────────────────────────────────────────────────────────────
 _INVISIBLE_NAME_CHARS = str.maketrans(
     "",

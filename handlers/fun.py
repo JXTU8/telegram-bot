@@ -32,7 +32,7 @@ from handlers.ai import groq_client, _call_groq_fun, _call_groq_roastmax, is_roa
 from helpers import (
     _display_user, _arg_text, _normalize_target, _daily_rng,
     _mentioned_target, _target_from_mention_or_sender, _escape_md,
-    _display_name_or_id,
+    _display_name_or_id, _message_thread_id,
     BOT_OWNER_ID, BOT_OWNER_USERNAMES, _is_owner,
 )
 
@@ -733,12 +733,22 @@ async def game_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     lo, hi = _GAME_RANGE
     number   = random.randint(lo, hi)
     job_name = f"game_reveal:{chat_id}"
-    _ACTIVE_GAMES[chat_id] = {"number": number, "job_name": job_name, "timer_version": 1}
+    thread_id = _message_thread_id(update)
+    _ACTIVE_GAMES[chat_id] = {
+        "number": number,
+        "job_name": job_name,
+        "timer_version": 1,
+        "thread_id": thread_id,
+    }
 
-    async def _reveal(ctx: ContextTypes.DEFAULT_TYPE, _cid=chat_id, _n=number, _version=1) -> None:
+    async def _reveal(
+        ctx: ContextTypes.DEFAULT_TYPE,
+        _cid=chat_id, _n=number, _version=1, _thread_id=thread_id,
+    ) -> None:
         game = _ACTIVE_GAMES.get(_cid)
         if game and game.get("timer_version") == _version:
             _ACTIVE_GAMES.pop(_cid, None)
+            thread_kwargs = {"message_thread_id": _thread_id} if _thread_id is not None else {}
             await ctx.bot.send_message(
                 chat_id=_cid,
                 text=(
@@ -747,6 +757,7 @@ async def game_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     f"_Start a new game with /game_"
                 ),
                 parse_mode="Markdown",
+                **thread_kwargs,
             )
 
     context.application.job_queue.run_once(
@@ -807,10 +818,16 @@ async def game_guess_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     hint = "📈 Higher!" if guess < number else "📉 Lower!"
     await update.message.reply_text(hint)
 
-    async def _reveal(ctx: ContextTypes.DEFAULT_TYPE, _cid=chat_id, _n=number, _version=timer_version) -> None:
+    reveal_thread_id = game.get("thread_id")
+
+    async def _reveal(
+        ctx: ContextTypes.DEFAULT_TYPE,
+        _cid=chat_id, _n=number, _version=timer_version, _thread_id=reveal_thread_id,
+    ) -> None:
         game = _ACTIVE_GAMES.get(_cid)
         if game and game.get("timer_version") == _version:
             _ACTIVE_GAMES.pop(_cid, None)
+            thread_kwargs = {"message_thread_id": _thread_id} if _thread_id is not None else {}
             await ctx.bot.send_message(
                 chat_id=_cid,
                 text=(
@@ -819,6 +836,7 @@ async def game_guess_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     f"_Start a new game with /game_"
                 ),
                 parse_mode="Markdown",
+                **thread_kwargs,
             )
 
     context.application.job_queue.run_once(

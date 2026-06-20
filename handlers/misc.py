@@ -31,7 +31,7 @@ from stores.stats_store import get_cmd_stats, get_cmd_stats_today, increment_cmd
 from helpers import (
     _display_user, _escape_md, _delete_tracked,
     _display_name_or_id, owner_only, _days_label,
-    _is_owner, BOT_OWNER_ID,
+    _is_owner, BOT_OWNER_ID, _thread_kwargs,
 )
 
 from handlers.luck import _get_fate
@@ -860,12 +860,16 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 async def conversation_timeout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if "new_countdown_name" in context.user_data or "new_countdown_date" in context.user_data:
         hint = "Start again with /addcountdown."
+        thread_kwargs = {}
     elif "edit_countdown_name" in context.user_data:
         hint = "Start again with /editcountdown."
+        thread_kwargs = {}
     elif "decision" in context.user_data:
         hint = "Start again with /choose."
+        thread_kwargs = _thread_kwargs(update)
     else:
         hint = "Start again with the relevant command."
+        thread_kwargs = _thread_kwargs(update)
     await _delete_tracked(context)
     context.user_data.clear()
     chat = getattr(update, "effective_chat", None)
@@ -876,5 +880,6 @@ async def conversation_timeout(update: Update, context: ContextTypes.DEFAULT_TYP
         chat_id=chat.id,
         text=f"⏰ *Timed out!* You took too long to respond.\n{hint}",
         parse_mode="Markdown",
+        **thread_kwargs,
     )
     return ConversationHandler.END

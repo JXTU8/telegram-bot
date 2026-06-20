@@ -65,6 +65,9 @@ from handlers.fun import (
 from handlers.trivia import (
     trivia_command, trivia_callback, triviaboard_command,
 )
+from handlers.settings import (
+    settings_command, settings_callback,
+)
 from handlers.reminders import (
     remind_command, cancelremind_command, cancelremind_callback,
     remindall_command, restore_remind_jobs, restore_remindall_jobs,
@@ -84,6 +87,7 @@ from helpers import (
     ASK_DECISION, ASK_OPTIONS,
     ASK_EDIT_FIELD, ASK_EDIT_VALUE,
     CONV_TIMEOUT,
+    _patch_message_reply_to_thread,
 )
 
 logging.basicConfig(
@@ -159,9 +163,25 @@ def main() -> None:
         .build()
     )
 
+    def _threaded(handler):
+        async def wrapper(update: Update, context):
+            message = getattr(update, "message", None)
+            if message:
+                _patch_message_reply_to_thread(update)
+                try:
+                    from stores.settings_store import remember_reminder_destination
+                    chat = update.effective_chat
+                    title = getattr(chat, "title", None) or getattr(chat, "username", None) or str(chat.id)
+                    remember_reminder_destination(chat.id, title, getattr(message, "message_thread_id", None))
+                except Exception:
+                    pass
+            return await handler(update, context)
+        return wrapper
+
     # ── Helper: only fire CommandHandlers on real messages, not edits/channel posts ──
-    def _cmd(name, handler):
-        return CommandHandler(name, handler, filters=filters.UpdateType.MESSAGE)
+    def _cmd(name, handler, *, threaded=True):
+        active_handler = _threaded(handler) if threaded else handler
+        return CommandHandler(name, active_handler, filters=filters.UpdateType.MESSAGE)
 
     # ── Ban gate — must be registered first, runs before everything else ──────
     app.add_handler(TypeHandler(Update, ban_gate), group=-1)
@@ -180,11 +200,11 @@ def main() -> None:
     )
 
     choose_conv = ConversationHandler(
-        entry_points=[CommandHandler("choose", choose_start)],
+        entry_points=[CommandHandler("choose", _threaded(choose_start))],
         states={
-            ASK_DECISION: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_decision)],
-            ASK_OPTIONS:  [MessageHandler(filters.TEXT & ~filters.COMMAND, received_options)],
-            ConversationHandler.TIMEOUT: [MessageHandler(filters.ALL, conversation_timeout)],
+            ASK_DECISION: [MessageHandler(filters.TEXT & ~filters.COMMAND, _threaded(received_decision))],
+            ASK_OPTIONS:  [MessageHandler(filters.TEXT & ~filters.COMMAND, _threaded(received_options))],
+            ConversationHandler.TIMEOUT: [MessageHandler(filters.ALL, _threaded(conversation_timeout))],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
         conversation_timeout=CONV_TIMEOUT,
@@ -210,6 +230,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(quotes_callback,       pattern=r"^quote:.+"))
     app.add_handler(CallbackQueryHandler(cancelremind_callback, pattern=r"^cancelremind:.+"))
     app.add_handler(CallbackQueryHandler(trivia_callback,       pattern=r"^trivia:.+"))
+    app.add_handler(CallbackQueryHandler(settings_callback,     pattern=r"^settings:.+"))
 
     # ── Conversation handlers ─────────────────────────────────────────────────
     app.add_handler(countdown_conv)
@@ -221,8 +242,8 @@ def main() -> None:
     app.add_handler(_cmd("help",            help_command))
     app.add_handler(_cmd("cancel",          cancel_command))
     app.add_handler(_cmd("ask",             ask_command))
-    app.add_handler(_cmd("listcountdown",   list_countdown))
-    app.add_handler(_cmd("removecountdown", remove_countdown_cmd))
+    app.add_handler(_cmd("listcountdown",   list_countdown, threaded=False))
+    app.add_handler(_cmd("removecountdown", remove_countdown_cmd, threaded=False))
     app.add_handler(_cmd("fate",            fate_command))
     app.add_handler(_cmd("luck",            luck_command))
     app.add_handler(_cmd("luckboard",       luckboard_command))
@@ -261,6 +282,7 @@ def main() -> None:
     app.add_handler(_cmd("predict",         predict_command))
     app.add_handler(_cmd("trivia",          trivia_command))
     app.add_handler(_cmd("triviaboard",     triviaboard_command))
+    app.add_handler(_cmd("settings",        settings_command))
     app.add_handler(_cmd("cmdstats",        cmdstats_command))
     app.add_handler(_cmd("stats",           stats_command))
     app.add_handler(_cmd("leaderboard",     leaderboard_command))
@@ -275,14 +297,14 @@ def main() -> None:
     app.add_handler(_cmd("threadid",        threadid_command))
 
     # ── Message handlers (group 0) ────────────────────────────────────────────
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.REPLY, ask_followup_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.REPLY, _threaded(ask_followup_handler)))
 
     # ── Message handlers (group 1) ────────────────────────────────────────────
     app.add_handler(MessageHandler(filters.ALL,     seen_user_tracker),      group=1)
     app.add_handler(MessageHandler(filters.COMMAND, command_stats_tracker),  group=1)
 
     # ── Message handlers (group 2) ────────────────────────────────────────────
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, game_guess_handler), group=2)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _threaded(game_guess_handler)), group=2)
 
     app.add_error_handler(error_handler)
 

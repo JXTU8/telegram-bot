@@ -16,7 +16,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
-from helpers import _display_user, _escape_md, _arg_text
+from helpers import _display_user, _escape_md, _arg_text, _message_thread_id
 from stores.trivia_store import (
     clear_active_trivia,
     get_active_trivia,
@@ -126,6 +126,7 @@ def _disabled_keyboard(options: dict, correct: str) -> InlineKeyboardMarkup:
 
 async def trivia_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
+    thread_id = _message_thread_id(update)
 
     active_game = _ACTIVE_TRIVIA.get(chat_id) or await asyncio.to_thread(get_active_trivia, chat_id)
     if active_game:
@@ -162,6 +163,7 @@ async def trivia_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         "data":        data,
         "category":    category,
         "answered_by": None,
+        "thread_id":   thread_id,
     }
     _ACTIVE_TRIVIA[chat_id] = game
 
@@ -193,20 +195,33 @@ async def trivia_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await asyncio.to_thread(clear_active_trivia, _cid)
         d      = game["data"]
         letter = d["answer"]
+        timeout_text = (
+            f"⏰ *Time's up!* {random.choice(_TIMEOUT_LINES)}\n\n"
+            f"✅ Answer: *{letter}. {_escape_md(d['options'][letter])}*\n"
+            f"📖 _{_escape_md(d['fact'])}_"
+        )
         try:
             await ctx.bot.edit_message_text(
                 chat_id=_cid,
                 message_id=game["message_id"],
-                text=(
-                    f"⏰ *Time's up!* {random.choice(_TIMEOUT_LINES)}\n\n"
-                    f"✅ Answer: *{letter}. {_escape_md(d['options'][letter])}*\n"
-                    f"📖 _{_escape_md(d['fact'])}_"
-                ),
+                text=timeout_text,
                 parse_mode="Markdown",
                 reply_markup=_disabled_keyboard(d["options"], letter),
             )
         except TelegramError as e:
             logger.warning("Trivia timeout edit failed: %s", e)
+            try:
+                thread_kwargs = {}
+                if game.get("thread_id") is not None:
+                    thread_kwargs["message_thread_id"] = game["thread_id"]
+                await ctx.bot.send_message(
+                    chat_id=_cid,
+                    text=timeout_text,
+                    parse_mode="Markdown",
+                    **thread_kwargs,
+                )
+            except TelegramError as send_e:
+                logger.warning("Trivia timeout send failed: %s", send_e)
 
     context.application.job_queue.run_once(
         _on_timeout,

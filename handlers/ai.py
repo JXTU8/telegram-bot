@@ -28,7 +28,10 @@ from telegram.ext import ContextTypes, ConversationHandler
 
 from config import env_int
 from constants import THINKING_MESSAGES, VERDICT_LINES
-from helpers import _track, _delete_tracked, ASK_DECISION, ASK_OPTIONS, CONV_TIMEOUT, _is_owner
+from helpers import (
+    _track, _delete_tracked, ASK_DECISION, ASK_OPTIONS, CONV_TIMEOUT,
+    _is_owner, _thread_kwargs,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -585,7 +588,9 @@ async def received_options(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     _track(context, update.message)
     await _delete_tracked(context)
     thinking_msg = await context.bot.send_message(
-        chat_id=update.effective_chat.id, text=thinking
+        chat_id=update.effective_chat.id,
+        text=thinking,
+        **_thread_kwargs(update),
     )
     await asyncio.sleep(2)
     result_text = (
@@ -599,6 +604,10 @@ async def received_options(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await thinking_msg.edit_text(result_text)
     except TelegramError as e:
         logger.warning("Choose edit failed, sending fresh result: %s", e)
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=result_text)
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=result_text,
+            **_thread_kwargs(update),
+        )
     context.user_data.clear()
     return ConversationHandler.END
