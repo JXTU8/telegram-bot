@@ -28,7 +28,6 @@ from stores.reminder_store import (
     get_all_remind_jobs_for_restore,
     save_remindall_job, delete_remindall_job, get_all_remindall_jobs,
 )
-from stores.settings_store import get_selected_reminder_destination
 from helpers import (
     _display_user, _arg_text, _is_chat_admin, _is_owner, _escape_md,
     _message_thread_id,
@@ -52,9 +51,6 @@ _MAX_REMIND_SECONDS = 365 * 24 * 3600
 
 
 def _selected_reminder_target(update: Update) -> tuple[int, int | None]:
-    selected = get_selected_reminder_destination()
-    if selected:
-        return int(selected["chat_id"]), selected.get("thread_id")
     return update.effective_chat.id, _message_thread_id(update)
 
 

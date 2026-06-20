@@ -65,9 +65,6 @@ from handlers.fun import (
 from handlers.trivia import (
     trivia_command, trivia_callback, triviaboard_command,
 )
-from handlers.settings import (
-    settings_command, settings_callback,
-)
 from handlers.reminders import (
     remind_command, cancelremind_command, cancelremind_callback,
     remindall_command, restore_remind_jobs, restore_remindall_jobs,
@@ -168,13 +165,6 @@ def main() -> None:
             message = getattr(update, "message", None)
             if message:
                 _patch_message_reply_to_thread(update)
-                try:
-                    from stores.settings_store import remember_reminder_destination
-                    chat = update.effective_chat
-                    title = getattr(chat, "title", None) or getattr(chat, "username", None) or str(chat.id)
-                    remember_reminder_destination(chat.id, title, getattr(message, "message_thread_id", None))
-                except Exception:
-                    pass
             return await handler(update, context)
         return wrapper
 
@@ -230,7 +220,6 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(quotes_callback,       pattern=r"^quote:.+"))
     app.add_handler(CallbackQueryHandler(cancelremind_callback, pattern=r"^cancelremind:.+"))
     app.add_handler(CallbackQueryHandler(trivia_callback,       pattern=r"^trivia:.+"))
-    app.add_handler(CallbackQueryHandler(settings_callback,     pattern=r"^settings:.+"))
 
     # ── Conversation handlers ─────────────────────────────────────────────────
     app.add_handler(countdown_conv)
@@ -282,7 +271,6 @@ def main() -> None:
     app.add_handler(_cmd("predict",         predict_command))
     app.add_handler(_cmd("trivia",          trivia_command))
     app.add_handler(_cmd("triviaboard",     triviaboard_command))
-    app.add_handler(_cmd("settings",        settings_command))
     app.add_handler(_cmd("cmdstats",        cmdstats_command))
     app.add_handler(_cmd("stats",           stats_command))
     app.add_handler(_cmd("leaderboard",     leaderboard_command))
