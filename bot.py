@@ -34,7 +34,7 @@ from handlers.misc import (
     seen_user_tracker, error_handler, conversation_timeout,
     cancel_command, leaderboard_command, recap_command,
     ban_command, unban_command, banlist_command, say_command,
-    threadid_command, cmdstats_command, command_stats_tracker,
+    id_command, cmdstats_command, command_stats_tracker,
 )
 from handlers.countdown import (
     add_countdown_start, received_name, received_date, received_time,
@@ -52,7 +52,7 @@ from handlers.luck import (
 )
 from handlers.fun import (
     ship_command, shipboard_command,
-    roast_command, roastmax_command, compliment_command,
+    roast_command, compliment_command,
     vibecheck_command, rank_command,
     truth_command, dare_command, would_you_rather_command,
     coinflip_command, eightball_command,
@@ -241,7 +241,6 @@ def main() -> None:
     app.add_handler(_cmd("ship",            ship_command))
     app.add_handler(_cmd("shipboard",       shipboard_command))
     app.add_handler(_cmd("roast",           roast_command))
-    app.add_handler(_cmd("roastmax",        roastmax_command))
     app.add_handler(_cmd("compliment",      compliment_command))
     app.add_handler(_cmd("vibecheck",       vibecheck_command))
     app.add_handler(_cmd("rank",            rank_command))
@@ -282,7 +281,7 @@ def main() -> None:
     app.add_handler(_cmd("unban",           unban_command))
     app.add_handler(_cmd("banlist",         banlist_command))
     app.add_handler(_cmd("say",             say_command))
-    app.add_handler(_cmd("threadid",        threadid_command))
+    app.add_handler(_cmd("id",              id_command))
 
     # ── Message handlers (group 0) ────────────────────────────────────────────
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.REPLY, _threaded(ask_followup_handler)))
