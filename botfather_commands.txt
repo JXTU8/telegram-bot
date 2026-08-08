@@ -1,0 +1,60 @@
+=== BotFather Command List ===
+
+--- NORMAL USER COMMANDS ---
+start - Start the bot
+help - Show help menu
+cancel - Cancel active setup flow
+ask - Ask AI anything
+listcountdown - See all active countdowns
+removecountdown - Remove a countdown
+fate - Daily fate reading
+luck - Check daily luck
+luckboard - Today's luck leaderboard
+fateboard - Daily fate leaderboard
+streak - Check luck streak
+ship - Compatibility percentage
+shipboard - Top ship pairs
+roast - Personalised roast
+compliment - Personalised compliment
+vibecheck - Group mood score
+rank - Rank anything
+truth - Random truth question
+dare - Random dare question
+wouldyourather - Random would you rather
+coinflip - Heads or tails
+8ball - Magic 8-ball
+curse - Daily curse
+bless - Daily blessing
+decide - Instant pick
+poll - Send a poll
+toss - Pick a random person
+game - Number guessing game (1-100)
+birthday - See upcoming birthdays
+addbirthday - Set your birthday
+remind - Set a personal reminder
+cancelremind - View and cancel pending reminders
+quote - Show a random saved quote
+quotes - Browse saved quotes
+mvp - Today's MVP
+mvpboard - All-time MVP leaderboard
+hot - Rate anything out of 100
+predict - AI predicts the outcome
+trivia - AI trivia question
+triviaboard - All-time trivia leaderboard
+stats - Group activity overview
+leaderboard - Combined leaderboard
+recap - Today's full group activity summary
+profile - Your bot profile
+lucktest - Test your luck multiplier
+id - Get current Chat and Thread ID
+
+--- ADMIN / OWNER COMMANDS ---
+deletebirthday - Admin command (deletebirthday)
+remindall - Admin command (remindall)
+deletequote - Admin command (deletequote)
+cmdstats - Owner only command (cmdstats)
+status - Owner only command (status)
+ban - Owner only command (ban)
+unban - Owner only command (unban)
+banlist - Owner only command (banlist)
+say - Owner only command (say)

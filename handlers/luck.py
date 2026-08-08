@@ -20,7 +20,6 @@ from constants import (
 from stores.luck_store import (
     save_fate_entry, get_fate_board,
     update_fate_streak, get_fate_streak,
-    delete_old_fateboard_keys,
     increment_luck_checks,
 )
 from stores.user_store import track_seen_user
@@ -28,8 +27,7 @@ from stores.birthday_store import get_all_birthdays
 
 from helpers import (
     _display_user, _mentioned_target, _normalize_target, _today,
-    _escape_md,
-    BOT_OWNER_ID, _is_owner, owner_only, _arg_text,
+    _escape_md, owner_only, _arg_text,
 )
 from config import env_int
 
