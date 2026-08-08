@@ -62,7 +62,10 @@ def increment_cmd_stat(command: str) -> int:
 def get_cmd_stats() -> dict:
     """Return lifetime command usage counts."""
     try:
-        return _decode_hash_counts(redis.hgetall(_LIFETIME_KEY))
+        data = redis.hgetall(_LIFETIME_KEY)
+        if isinstance(data, list):
+            data = dict(zip(data[::2], data[1::2]))
+        return _decode_hash_counts(data)
     except Exception as e:
         logger.error("Redis command stats read error: %s", e)
         return {}
@@ -71,7 +74,10 @@ def get_cmd_stats() -> dict:
 def get_cmd_stats_today() -> dict:
     """Return today's command usage counts."""
     try:
-        return _decode_hash_counts(redis.hgetall(_today_key()))
+        data = redis.hgetall(_today_key())
+        if isinstance(data, list):
+            data = dict(zip(data[::2], data[1::2]))
+        return _decode_hash_counts(data)
     except Exception as e:
         logger.error("Redis daily command stats read error: %s", e)
         return {}

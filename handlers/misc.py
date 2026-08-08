@@ -525,10 +525,7 @@ def _env_status(name: str) -> str:
 
 def _redis_health() -> tuple:
     try:
-        if hasattr(redis, "ping"):
-            redis.ping()
-        else:
-            redis.get("__healthcheck__")
+        redis.get("__healthcheck__")
         return True, "ok"
     except Exception as e:
         return False, str(e)
