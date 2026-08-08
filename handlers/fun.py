@@ -33,7 +33,7 @@ from helpers import (
     _display_user, _arg_text, _normalize_target, _daily_rng,
     _mentioned_target, _target_from_mention_or_sender, _escape_md,
     _display_name_or_id, _message_thread_id,
-    BOT_OWNER_ID, BOT_OWNER_USERNAMES, _is_owner,
+    BOT_OWNER_ID, BOT_OWNER_USERNAMES,
 )
 
 logger = logging.getLogger(__name__)

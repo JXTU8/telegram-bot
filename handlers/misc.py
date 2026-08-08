@@ -17,7 +17,6 @@ from telegram.ext import ContextTypes, ConversationHandler
 
 from config import TIMEZONE, VERSION
 from db import redis
-from constants import _MONTH_NAMES
 from stores.ban_store import ban_user, unban_user, get_banned_users
 from stores.birthday_store import get_all_birthdays
 from stores.countdown_store import get_all_countdowns
@@ -420,7 +419,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         f"👥 Members tracked: *{member_count}*",
         f"💬 Quotes saved: *{quote_count}*",
         f"⏱ Active countdowns: *{countdown_count}*",
-        f"\n🍀 *Today's Luck*",
+        "\n🍀 *Today's Luck*",
         f"Checks: *{luck_count}*",
         f"Luckiest: {lucky_line}",
         f"\n💞 *Ships* _(resets in {reset_h}h {reset_m}m)_",

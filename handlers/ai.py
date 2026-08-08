@@ -21,7 +21,6 @@ from concurrent.futures import ThreadPoolExecutor
 import requests
 from groq import Groq
 from telegram import Update
-from telegram.constants import ChatType
 from telegram.error import TelegramError
 from telegram.ext import ContextTypes, ConversationHandler
 
@@ -29,7 +28,7 @@ from config import env_int
 from constants import THINKING_MESSAGES, VERDICT_LINES
 from helpers import (
     _track, _delete_tracked, ASK_DECISION, ASK_OPTIONS, CONV_TIMEOUT,
-    _is_owner, _thread_kwargs,
+    _thread_kwargs,
 )
 
 logger = logging.getLogger(__name__)
