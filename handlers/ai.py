@@ -5,8 +5,7 @@ Groq AI client, Serper web search, /ask command, and /choose flow.
 Other handlers that need AI (roast, 8ball, hot…) import _call_groq_fun from here.
 
 Search policy:
-  - Group chats: web search enabled for everyone.
-  - Private (DM) chats: web search only for bot owner; others get plain Groq.
+  - Always enabled for all chats.
 """
 from __future__ import annotations
 
@@ -45,28 +44,6 @@ if GROQ_API_KEY:
 else:
     groq_client = None
     logger.warning("GROQ_API_KEY not set — /ask, /roast, /compliment, /8ball, /hot will use fallbacks.")
-
-# ── Roastmax allowed user IDs ─────────────────────────────────────────────────
-# Set ROASTMAX_ALLOWED_IDS in Render as a comma-separated list of Telegram user IDs
-# e.g. ROASTMAX_ALLOWED_IDS=123456789,987654321
-
-def _load_roastmax_ids() -> set:
-    raw = os.getenv("ROASTMAX_ALLOWED_IDS", "")
-    ids = set()
-    for part in raw.replace(",", " ").split():
-        try:
-            ids.add(int(part.strip()))
-        except ValueError:
-            pass
-    return ids
-
-ROASTMAX_ALLOWED_IDS: set = _load_roastmax_ids()
-
-
-def is_roastmax_allowed(user_id: int) -> bool:
-    """Return True if this user is allowed to use /roastmax."""
-    return user_id in ROASTMAX_ALLOWED_IDS
-
 
 # ── Serper web search + LRU cache ────────────────────────────────────────────
 
@@ -224,66 +201,6 @@ def _call_groq_fun(prompt: str) -> str:
         ],
         max_tokens=120,
         temperature=0.95,
-    )
-
-
-def _call_groq_roastmax(target: str, msg_context: str = "") -> str:
-    """
-    Maximum-intensity comedy roast for /roastmax.
-    The target's name must appear in the output multiple times so it never
-    feels generic. Everything is fair game except physical appearance,
-    ethnicity, religion, and gender identity.
-    """
-    angles = [
-        "a furious battle rapper settling a personal vendetta",
-        "a British panel show host who has completely run out of patience",
-        "a disappointed philosophy professor grading a zero-effort dissertation",
-        "a Shakespearean villain delivering a monologue about mediocrity",
-        "a retired boxing trainer who has seen too many losers",
-        "a corporate HR manager writing the most scathing termination letter ever",
-        "a nature documentary narrator describing a catastrophically failed organism",
-        "a sports pundit who has completely given up on the player",
-        "a mob boss calmly explaining exactly why someone has disappointed them",
-        "a tired ancient god who has lost all faith in this particular mortal",
-        "a battle rapper who did a PhD specifically to destroy this one person",
-        "a Gordon Ramsay-tier chef reviewing someone's life choices instead of food",
-    ]
-    angle = random.choice(angles)
-    context_block = (
-        f'\nCritical intel — {target} literally just said: "{msg_context}"\n'
-        f'Open with that. Build the entire roast around it. Tear it apart line by line.\n'
-        if msg_context else ""
-    )
-    return _groq_complete(
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "You are the most ruthless roast comedian on earth. "
-                    "Your job is to absolutely destroy the named person with surgical wit. "
-                    "Rules: "
-                    "(1) Use their name at least twice — this roast must feel personally targeted, not generic. "
-                    "(2) Be specific and devastating — attack their decisions, behaviour, choices, "
-                    "and general life trajectory. Vague roasts are cowardly; go for the jugular. "
-                    "(3) Three to four sentences. Every sentence must land hard. No filler. "
-                    "(4) Do NOT soften it. Do NOT add disclaimers. Do NOT say 'just kidding'. "
-                    "The roast ends when it ends — no sign-off, no sympathy. "
-                    "Hard limits (never cross): physical appearance, ethnicity, religion, gender identity. "
-                    "Everything else is open season. Plain text only. No markdown."
-                ),
-            },
-            {
-                "role": "user",
-                "content": (
-                    f"Destroy {target} in the style of {angle}."
-                    f"{context_block}"
-                    f"Make it feel like {target} personally asked for this and immediately regretted it. "
-                    "Do not hold back. Do not soften the landing."
-                ),
-            },
-        ],
-        max_tokens=220,
-        temperature=0.98,
     )
 
 
@@ -462,11 +379,7 @@ async def ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     ):
         history = await asyncio.to_thread(_load_ask_context, chat_id, replied.message_id)
 
-    # Web search allowed in groups, or in DMs only for the bot owner
-    is_private = update.effective_chat.type == ChatType.PRIVATE
-    use_search = (not is_private) or _is_owner(update.effective_user)
-
-    await _process_ask(question, history, chat_id, update.message, context, use_search=use_search)
+    await _process_ask(question, history, chat_id, update.message, context, use_search=True)
 
 
 # ── Plain-text reply follow-up handler ───────────────────────────────────────
@@ -516,15 +429,11 @@ async def ask_followup_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         return
 
-    # Web search allowed in groups, or in DMs only for the bot owner
-    is_private = update.effective_chat.type == ChatType.PRIVATE
-    use_search = (not is_private) or _is_owner(update.effective_user)
-
     logger.info(
         "ask_followup from user %s (depth %s, prev msg %s)",
         update.effective_user.id, len(history) // 2, replied.message_id,
     )
-    await _process_ask(question, history, chat_id, message, context, use_search=use_search)
+    await _process_ask(question, history, chat_id, message, context, use_search=True)
 
 
 # ── /choose flow ──────────────────────────────────────────────────────────────

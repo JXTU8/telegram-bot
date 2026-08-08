@@ -742,13 +742,13 @@ async def say_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     except Exception as e:
         await update.message.reply_text(f"❌ Failed: `{e}`", parse_mode="Markdown")
 
-@owner_only
-async def threadid_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def id_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
     thread_id = getattr(update.message, "message_thread_id", None)
+    text = f"💬 Chat ID: `{chat_id}`"
     if thread_id:
-        await update.message.reply_text(f"🧵 Thread ID: `{thread_id}`", parse_mode="Markdown")
-    else:
-        await update.message.reply_text("⚠️ This is the main chat (no thread ID).")
+        text += f"\n🧵 Thread ID: `{thread_id}`"
+    await update.message.reply_text(text, parse_mode="Markdown")
 
 
 # ── /cmdstats (owner only) ────────────────────────────────────────────────────

@@ -28,7 +28,7 @@ from constants import (
 from stores.ship_store import save_ship_pair, get_top_ship_pairs, get_shipboard_reset_time
 from stores.user_store import track_seen_user, get_seen_users
 from stores.mvp_store import get_today_mvp, save_mvp_win, get_mvp_board
-from handlers.ai import groq_client, _call_groq_fun, _call_groq_roastmax, is_roastmax_allowed
+from handlers.ai import groq_client, _call_groq_fun
 from helpers import (
     _display_user, _arg_text, _normalize_target, _daily_rng,
     _mentioned_target, _target_from_mention_or_sender, _escape_md,
@@ -312,38 +312,6 @@ async def roast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     except Exception as e:
         logger.warning("Groq roast failed: %s", e)
         await update.message.reply_text(fallback)
-
-
-# ── /roastmax ─────────────────────────────────────────────────────────────────
-
-async def roastmax_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Savage comedy-roast command, restricted to authorised users only.
-    Authorised user IDs are read from the ROASTMAX_ALLOWED_IDS env var.
-    Supports @mention, reply-to-message (with message context), or self-roast.
-    """
-    user_id = update.effective_user.id
-
-    if not is_roastmax_allowed(user_id):
-        return
-
-    if not groq_client:
-        await update.message.reply_text(
-            "⚠️ AI is not configured. Ask the admin to set up `GROQ_API_KEY`."
-        )
-        return
-
-    target, msg_context = _resolve_roast_target(update, context)
-
-    try:
-        result = await asyncio.to_thread(_call_groq_roastmax, target, msg_context)
-        await update.message.reply_text(f"🔥 {result}")
-    except Exception as e:
-        logger.warning("Groq roastmax failed: %s", e)
-        await update.message.reply_text(
-            f"💀 The roast machine broke but {_escape_md(target)} should still feel bad about themselves.",
-            parse_mode="Markdown",
-        )
 
 
 # ── /compliment ───────────────────────────────────────────────────────────────
