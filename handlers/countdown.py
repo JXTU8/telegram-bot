@@ -24,7 +24,6 @@ from stores.user_store import get_seen_users
 from helpers import (
     _today, _days_label, _job_name,
     _track, _delete_tracked, _is_chat_admin,
-    _escape_md,
     ASK_NAME, ASK_DATE, ASK_TIME,
     ASK_EDIT_FIELD, ASK_EDIT_VALUE,
     CONV_TIMEOUT,

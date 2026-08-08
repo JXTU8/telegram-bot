@@ -11,7 +11,7 @@ import json
 import logging
 
 from db import redis
-from stores._utils import _decode_dict, _key_to_chat_id
+from stores._utils import _decode_dict
 
 logger = logging.getLogger(__name__)
 
