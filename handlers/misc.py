@@ -62,10 +62,12 @@ async def log_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     """Show the public update notes for the current bot release."""
     await update.message.reply_text(
         f"📢 *Countdown Bot Update — v{VERSION}*\n\n"
-        "Welcome to the first stable release!\n"
-        "• Countdown creation and daily reminders\n"
-        "• AI, luck, ships, games, and group summaries\n"
-        "• A cleaner command set — use /help to explore it",
+        "*What's new*\n"
+        "• `/ask` now uses Gemini 3.8 Flash\n"
+        "• Google-search context remains powered by Serper\n"
+        "• Faster AI replies with automatic-function calls disabled\n"
+        "• AI requests now time out safely instead of getting stuck\n\n"
+        "Use /help to browse all available commands.",
         parse_mode="Markdown",
     )
 

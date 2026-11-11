@@ -138,7 +138,7 @@ python bot.py
 |---|---|
 | `/start` | Introduction and quick-start |
 | `/help` | Paginated help menu by category |
-| `/log` | Latest bot update notes (`v1.0.0`) |
+| `/log` | Latest bot update notes (`v1.0.1`) |
 | `/cancel` | Cancel an active setup wizard |
 | `/status` | Bot health check (owner only) |
 | `/lucktest <score>` | Preview a luck card without saving (owner only) |

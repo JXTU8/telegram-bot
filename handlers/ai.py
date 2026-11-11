@@ -63,9 +63,12 @@ _SEARCH_CACHE: OrderedDict = OrderedDict()
 _search_cache_lock = threading.Lock()
 
 
-async def _run_ai_io(func, *args):
+async def _run_ai_io(func, *args, timeout: float = 35.0):
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(_AI_EXECUTOR, lambda: func(*args))
+    return await asyncio.wait_for(
+        loop.run_in_executor(_AI_EXECUTOR, lambda: func(*args)),
+        timeout=timeout,
+    )
 
 
 def _serper_session() -> requests.Session:
@@ -143,8 +146,7 @@ def _search_web(query: str) -> str:
 def _gemini_complete(
     contents: list,
     system_instruction: str,
-    max_tokens: int = 1024,
-    temperature: float = 0.7,
+    max_tokens: int = 2048,
 ) -> str:
     """Single text-only Gemini call shared by all public AI helpers."""
     response = gemini_client.models.generate_content(
@@ -153,7 +155,9 @@ def _gemini_complete(
         config=types.GenerateContentConfig(
             system_instruction=system_instruction,
             max_output_tokens=max_tokens,
-            temperature=temperature,
+            thinking_config=types.ThinkingConfig(thinking_level="low"),
+            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+            http_options=types.HttpOptions(timeout=30_000),
         ),
     )
     text = (response.text or "").strip()
@@ -183,7 +187,7 @@ def _call_gemini(question: str, search_context: str, history: list | None = None
             if content:
                 contents.append(types.Content(role=role, parts=[types.Part.from_text(text=content)]))
     contents.append(types.Content(role="user", parts=[types.Part.from_text(text=user_msg)]))
-    return _gemini_complete(contents, system_msg, max_tokens=1024, temperature=0.7)
+    return _gemini_complete(contents, system_msg)
 
 
 def _call_gemini_fun(prompt: str) -> str:
@@ -208,7 +212,7 @@ def _call_gemini_fun(prompt: str) -> str:
         "Give only the answer, no intro, no label, no explanation of your style."
     )
     contents = [types.Content(role="user", parts=[types.Part.from_text(text=prompt)])]
-    return _gemini_complete(contents, system_instruction, max_tokens=120, temperature=0.95)
+    return _gemini_complete(contents, system_instruction, max_tokens=512)
 
 
 # ── Per-user ask rate limiting ────────────────────────────────────────────────
@@ -328,6 +332,12 @@ async def _process_ask(
             )
             await asyncio.to_thread(
                 _save_ask_context, chat_id, overflow_msg.message_id, new_history
+            )
+    except asyncio.TimeoutError:
+        logger.warning("Ask request timed out after waiting for Gemini.")
+        if not answer_displayed:
+            await thinking_msg.edit_text(
+                "⚠️ The AI took too long to respond. Please try again in a moment."
             )
     except Exception as e:
         logger.error("Ask error: %s", e)
