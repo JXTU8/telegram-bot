@@ -9,7 +9,7 @@ A Telegram group bot for countdowns, AI-powered commands, daily luck, ships, gam
 | Category | Highlights |
 |---|---|
 | ⏱ **Countdowns** | Multi-step creation wizard, daily reminders, short codes, auto-cleanup of expired entries |
-| 🤖 **AI (Groq + Serper)** | `/ask` with web search + 6-hour conversation memory, AI roasts/compliments/8ball |
+| 🤖 **AI (Gemini + Serper)** | `/ask` with web search + 6-hour conversation memory, AI roasts/compliments/8ball |
 | 🍀 **Daily Luck** | Deterministic daily scores, tier system, streaks, April Fools reveal, New Year max-luck |
 | 🎮 **Games** | Number guessing game with 60 s inactivity reveal, higher/lower hints |
 | 💞 **Ships** | Deterministic daily compatibility scores, 48-hour rolling leaderboard |
@@ -23,7 +23,7 @@ A Telegram group bot for countdowns, AI-powered commands, daily luck, ships, gam
 
 - **Runtime** — Python 3.11+
 - **Bot framework** — [python-telegram-bot](https://github.com/python-telegram-bot/python-telegram-bot) v20 (async, job queue)
-- **AI** — [Groq](https://groq.com/) (`llama-3.3-70b-versatile`) for fast inference
+- **AI** — [Google Gemini](https://ai.google.dev/) (`gemini-3.8-flash`) for fast free-tier inference
 - **Web search** — [Serper](https://serper.dev/) (Google results, LRU cached)
 - **Database** — [Upstash Redis](https://upstash.com/) (serverless, REST)
 - **Web server** — Flask (keep-alive endpoint for Render free tier)
@@ -38,7 +38,7 @@ A Telegram group bot for countdowns, AI-powered commands, daily luck, ships, gam
 | `BOT_TOKEN` | ✅ | Telegram bot token from [@BotFather](https://t.me/BotFather) |
 | `UPSTASH_REDIS_REST_URL` | ✅ | Upstash Redis REST endpoint |
 | `UPSTASH_REDIS_REST_TOKEN` | ✅ | Upstash Redis auth token |
-| `GROQ_API_KEY` | ⚠️ | Enables `/ask`, `/roast`, `/compliment`, `/8ball`, `/hot` |
+| `GEMINI_API_KEY` | ⚠️ | Enables `/ask`, `/roast`, `/compliment`, `/8ball`, `/hot` |
 | `SERPER_API_KEY` | ⚠️ | Enables web search in `/ask` |
 | `BOT_OWNER_ID` | ⚠️ | Telegram user ID of the bot owner (unlocks `/status`, `/lucktest`) |
 | `BOT_OWNER_USERNAME` | ⚠️ | Username(s) of the bot owner, comma-separated |
@@ -48,7 +48,7 @@ A Telegram group bot for countdowns, AI-powered commands, daily luck, ships, gam
 | `FATE_LUCKY_ID` | ➖ | Force a user to always roll max luck |
 | `FATE_UNLUCKY_ID` | ➖ | Force a user to always roll min luck |
 | `SEARCH_CACHE_TTL_SECONDS` | ➖ | How long to cache Serper results (default: `900`) |
-| `GROQ_MODEL` | ➖ | Groq model to use (default: `llama-3.3-70b-versatile`) |
+| `GEMINI_MODEL` | ➖ | Gemini model to use (default: `gemini-3.8-flash`) |
 
 ---
 
@@ -156,7 +156,7 @@ db.py                   ← Upstash Redis client
 keep_alive.py           ← Flask server + self-ping thread
 
 handlers/
-  ai.py                 ← Groq client, Serper search, /ask, /choose
+  ai.py                 ← Gemini client, Serper search, /ask, /choose
   countdown.py          ← /addcountdown wizard, daily reminders
   fun.py                ← ship, roast, game, and other fun commands
   luck.py               ← luck engine, /luck, /luckboard, /streak
@@ -184,4 +184,4 @@ MIT — feel free to fork, extend, and deploy your own version.
 
 ---
 
-*Built with ❤️ using python-telegram-bot, Groq, and Upstash Redis.*
+*Built with ❤️ using python-telegram-bot, Gemini, and Upstash Redis.*

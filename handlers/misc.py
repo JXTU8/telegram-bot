@@ -446,7 +446,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     except Exception:
         job_count = -1
 
-    from handlers.ai import groq_client, SERPER_API_KEY
+    from handlers.ai import gemini_client, SERPER_API_KEY
 
     redis_detail = _escape_md(redis_msg[:120].replace("`", "").replace("\n", " "))
     banned_count = len(await asyncio.to_thread(get_banned_users))
@@ -461,7 +461,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         f"Banned users: *{banned_count}*",
         f"BOT\\_TOKEN: *{_env_status('BOT_TOKEN')}*",
         f"Redis URL/token: *{_env_status('UPSTASH_REDIS_REST_URL')}/{_env_status('UPSTASH_REDIS_REST_TOKEN')}*",
-        f"Groq: *{'ready' if groq_client else 'missing key'}*",
+        f"Gemini: *{'ready' if gemini_client else 'missing key'}*",
         f"Serper: *{'ready' if SERPER_API_KEY else 'missing key'}*",
         f"Timezone: *{_escape_md(TIMEZONE.zone)}*",
     ]

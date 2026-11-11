@@ -25,7 +25,7 @@ from constants import (
 )
 from stores.ship_store import save_ship_pair, get_top_ship_pairs, get_shipboard_reset_time
 from stores.user_store import track_seen_user
-from handlers.ai import groq_client, _call_groq_fun
+from handlers.ai import gemini_client, _call_gemini_fun
 from helpers import (
     _display_user, _arg_text, _normalize_target, _daily_rng,
     _mentioned_target, _target_from_mention_or_sender, _escape_md,
@@ -273,7 +273,7 @@ async def shipboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 async def roast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     target, msg_context = _resolve_roast_target(update, context)
     fallback = random.choice(ROAST_LINES).format(target=target)
-    if not groq_client:
+    if not gemini_client:
         await update.message.reply_text(fallback)
         return
     try:
@@ -286,9 +286,9 @@ async def roast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             f"in a Telegram group.{context_line} "
             "Use their name. Keep it funny and harmless, not mean. One sentence only."
         )
-        await update.message.reply_text(await asyncio.to_thread(_call_groq_fun, prompt))
+        await update.message.reply_text(await asyncio.to_thread(_call_gemini_fun, prompt))
     except Exception as e:
-        logger.warning("Groq roast failed: %s", e)
+        logger.warning("Gemini roast failed: %s", e)
         await update.message.reply_text(fallback)
 
 
@@ -297,15 +297,15 @@ async def roast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 async def compliment_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     target = _target_from_mention_or_sender(update, context)
     fallback = random.choice(COMPLIMENT_LINES).format(target=target)
-    if not groq_client:
+    if not gemini_client:
         await update.message.reply_text(fallback)
         return
     try:
         prompt = (f"Write one short, warm, genuine compliment for someone named '{target}' in a Telegram group. "
                   "Use their name. Keep it wholesome. One sentence only.")
-        await update.message.reply_text(await asyncio.to_thread(_call_groq_fun, prompt))
+        await update.message.reply_text(await asyncio.to_thread(_call_gemini_fun, prompt))
     except Exception as e:
-        logger.warning("Groq compliment failed: %s", e)
+        logger.warning("Gemini compliment failed: %s", e)
         await update.message.reply_text(fallback)
 
 
@@ -353,15 +353,15 @@ async def eightball_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await update.message.reply_text("Usage: /8ball <question>")
         return
     fallback = random.choice(EIGHT_BALL_ANSWERS)
-    if not groq_client:
+    if not gemini_client:
         await update.message.reply_text(f"🎱 {fallback}")
         return
     try:
         prompt = f"Answer this like a playful magic 8-ball. Keep it under 20 words. Question: {question}"
-        answer = await asyncio.to_thread(_call_groq_fun, prompt)
+        answer = await asyncio.to_thread(_call_gemini_fun, prompt)
         await update.message.reply_text(f"🎱 {answer}")
     except Exception as e:
-        logger.warning("Groq 8ball failed: %s", e)
+        logger.warning("Gemini 8ball failed: %s", e)
         await update.message.reply_text(f"🎱 {fallback}")
 
 
@@ -388,13 +388,13 @@ async def hot_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     rng = random.Random(f"hot:{_normalize_target(text)}:{today_str}")
     score = rng.randint(0, 100)
     fallback = next(v for limit, v in HOT_VERDICTS if score <= limit)
-    if groq_client:
+    if gemini_client:
         try:
             prompt = (f"Rate '{text}' in one short punchy sentence. "
                       f"The score is {score}/100 — match that energy. Be funny. Plain text only. No intro.")
-            verdict = await asyncio.to_thread(_call_groq_fun, prompt)
+            verdict = await asyncio.to_thread(_call_gemini_fun, prompt)
         except Exception as e:
-            logger.warning("Groq hot failed: %s", e)
+            logger.warning("Gemini hot failed: %s", e)
             verdict = fallback
     else:
         verdict = fallback

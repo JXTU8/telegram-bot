@@ -1,8 +1,8 @@
 """
 handlers/ai.py
 ──────────────
-Groq AI client, Serper web search, /ask command, and /choose flow.
-Other handlers that need AI (roast, 8ball, hot…) import _call_groq_fun from here.
+Gemini AI client, Serper web search, /ask command, and /choose flow.
+Other handlers that need AI (roast, 8ball, hot…) import _call_gemini_fun from here.
 
 Search policy:
   - Always enabled for all chats.
@@ -19,7 +19,8 @@ from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 
 import requests
-from groq import Groq
+from google import genai
+from google.genai import types
 from telegram import Update
 from telegram.error import TelegramError
 from telegram.ext import ContextTypes, ConversationHandler
@@ -33,16 +34,16 @@ from helpers import (
 
 logger = logging.getLogger(__name__)
 
-# ── Groq client ───────────────────────────────────────────────────────────────
+# ── Gemini client ─────────────────────────────────────────────────────────────
 
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-GROQ_MODEL   = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
-if GROQ_API_KEY:
-    groq_client = Groq(api_key=GROQ_API_KEY)
-    logger.info("Groq AI ready.")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+if GEMINI_API_KEY:
+    gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+    logger.info("Gemini AI ready with model %s.", GEMINI_MODEL)
 else:
-    groq_client = None
-    logger.warning("GROQ_API_KEY not set — /ask, /roast, /compliment, /8ball, /hot will use fallbacks.")
+    gemini_client = None
+    logger.warning("GEMINI_API_KEY not set — /ask, /roast, /compliment, /8ball, /hot will use fallbacks.")
 
 # ── Serper web search + LRU cache ────────────────────────────────────────────
 
@@ -137,20 +138,31 @@ def _search_web(query: str) -> str:
         return ""
 
 
-# ── Shared Groq base function ─────────────────────────────────────────────────
+# ── Shared Gemini base function ───────────────────────────────────────────────
 
-def _groq_complete(messages: list, max_tokens: int = 1024, temperature: float = 0.7) -> str:
-    """Single low-level call to Groq. Shared by all public helpers."""
-    chat = groq_client.chat.completions.create(
-        model=GROQ_MODEL,
-        messages=messages,
-        max_tokens=max_tokens,
-        temperature=temperature,
+def _gemini_complete(
+    contents: list,
+    system_instruction: str,
+    max_tokens: int = 1024,
+    temperature: float = 0.7,
+) -> str:
+    """Single text-only Gemini call shared by all public AI helpers."""
+    response = gemini_client.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=contents,
+        config=types.GenerateContentConfig(
+            system_instruction=system_instruction,
+            max_output_tokens=max_tokens,
+            temperature=temperature,
+        ),
     )
-    return chat.choices[0].message.content.strip()
+    text = (response.text or "").strip()
+    if not text:
+        raise RuntimeError("Gemini returned an empty response")
+    return text
 
 
-def _call_groq(question: str, search_context: str, history: list | None = None) -> str:
+def _call_gemini(question: str, search_context: str, history: list | None = None) -> str:
     system_msg = (
         "You are a knowledgeable, reliable assistant in a Malaysian Telegram group chat. "
         "Your default mode is calm, clear, and informative — give accurate, well-reasoned answers. "
@@ -163,14 +175,18 @@ def _call_groq(question: str, search_context: str, history: list | None = None) 
     user_msg = question
     if search_context:
         user_msg = f"Web search results for context:\n{search_context}\n\nQuestion: {question}"
-    messages = [{"role": "system", "content": system_msg}]
+    contents = []
     if history:
-        messages.extend(history)
-    messages.append({"role": "user", "content": user_msg})
-    return _groq_complete(messages, max_tokens=1024, temperature=0.7)
+        for message in history:
+            role = "model" if message.get("role") == "assistant" else "user"
+            content = str(message.get("content", "")).strip()
+            if content:
+                contents.append(types.Content(role=role, parts=[types.Part.from_text(text=content)]))
+    contents.append(types.Content(role="user", parts=[types.Part.from_text(text=user_msg)]))
+    return _gemini_complete(contents, system_msg, max_tokens=1024, temperature=0.7)
 
 
-def _call_groq_fun(prompt: str) -> str:
+def _call_gemini_fun(prompt: str) -> str:
     """
     Short, playful AI response used by roast, compliment, 8ball, hot.
     A random style word is injected every call so repeated uses on the
@@ -185,22 +201,14 @@ def _call_groq_fun(prompt: str) -> str:
         "passive aggressive", "enthusiastically confused", "retired superhero",
     ]
     style = random.choice(spice_words)
-    return _groq_complete(
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "You write short, playful Telegram group chat content. "
-                    "Plain text only. No markdown. Keep it friendly, funny, and safe. "
-                    f"Write in a {style} style this time. "
-                    "Give only the answer, no intro, no label, no explanation of your style."
-                ),
-            },
-            {"role": "user", "content": prompt},
-        ],
-        max_tokens=120,
-        temperature=0.95,
+    system_instruction = (
+        "You write short, playful Telegram group chat content. "
+        "Plain text only. No markdown. Keep it friendly, funny, and safe. "
+        f"Write in a {style} style this time. "
+        "Give only the answer, no intro, no label, no explanation of your style."
     )
+    contents = [types.Content(role="user", parts=[types.Part.from_text(text=prompt)])]
+    return _gemini_complete(contents, system_instruction, max_tokens=120, temperature=0.95)
 
 
 # ── Per-user ask rate limiting ────────────────────────────────────────────────
@@ -289,7 +297,7 @@ async def _process_ask(
     answer_displayed = False
     try:
         search_context = await _run_ai_io(_search_web, question) if use_search else ""
-        answer = await _run_ai_io(_call_groq, question, search_context, history)
+        answer = await _run_ai_io(_call_gemini, question, search_context, history)
 
         prior = history or []
         new_history = (prior + [
@@ -324,7 +332,16 @@ async def _process_ask(
     except Exception as e:
         logger.error("Ask error: %s", e)
         if not answer_displayed:
-            await thinking_msg.edit_text("❌ Something went wrong with the AI. Please try again later.")
+            error_text = str(e).casefold()
+            if any(marker in error_text for marker in ("api key", "authentication", "unauthorized", "401")):
+                message = "❌ The AI service key is invalid or missing. Please ask the bot admin to update `GEMINI_API_KEY`."
+            elif any(marker in error_text for marker in ("model", "not found", "404")):
+                message = "❌ The configured AI model is unavailable. Please ask the bot admin to check `GEMINI_MODEL`."
+            elif "rate" in error_text or "429" in error_text:
+                message = "⚠️ The AI service is busy or rate-limited. Please try again shortly."
+            else:
+                message = "❌ Something went wrong with the AI. Please try again later."
+            await thinking_msg.edit_text(message)
 
 
 def _is_ask_bot_message(text: str | None) -> bool:
@@ -337,9 +354,9 @@ def _is_ask_bot_message(text: str | None) -> bool:
 # ── /ask command ──────────────────────────────────────────────────────────────
 
 async def ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not groq_client:
+    if not gemini_client:
         await update.message.reply_text(
-            "⚠️ AI is not configured. Ask the admin to set up the `GROQ_API_KEY`."
+            "⚠️ AI is not configured. Ask the admin to set up the `GEMINI_API_KEY`."
         )
         return
     if not context.args:
@@ -388,7 +405,7 @@ async def ask_followup_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     Fires when a user sends a plain-text reply (no /ask command) directly to a
     bot /ask answer (initial or overflow chunk).
     """
-    if not groq_client:
+    if not gemini_client:
         return
 
     message = update.message
