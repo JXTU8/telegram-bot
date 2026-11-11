@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 # ── Gemini client ─────────────────────────────────────────────────────────────
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
 if GEMINI_API_KEY:
     gemini_client = genai.Client(api_key=GEMINI_API_KEY)
     logger.info("Gemini AI ready with model %s.", GEMINI_MODEL)
@@ -157,9 +157,10 @@ def _gemini_complete(
         config=types.GenerateContentConfig(
             system_instruction=system_instruction,
             max_output_tokens=max_tokens,
-            thinking_config=types.ThinkingConfig(thinking_level="low"),
+            # Gemini 2.5 models use thinking_budget (int), not thinking_level.
+            # 0 disables thinking, which is the default behaviour for Flash-Lite.
+            thinking_config=types.ThinkingConfig(thinking_budget=0),
             automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
-            automatic_continuation=False,
             http_options=types.HttpOptions(
                 timeout=45_000,
                 retry_options=types.HttpRetryOptions(attempts=1),
