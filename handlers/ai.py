@@ -58,12 +58,14 @@ _AI_EXECUTOR = ThreadPoolExecutor(
 SEARCH_CACHE_TTL_SECONDS = max(0, env_int("SEARCH_CACHE_TTL_SECONDS", 900))
 SEARCH_CACHE_MAX_ITEMS = 128
 MAX_ASK_LENGTH = 500
+_SERPER_TIMEOUT = (2, 5)
+_GEMINI_TIMEOUT_SECONDS = 20.0
 
 _SEARCH_CACHE: OrderedDict = OrderedDict()
 _search_cache_lock = threading.Lock()
 
 
-async def _run_ai_io(func, *args, timeout: float = 35.0):
+async def _run_ai_io(func, *args, timeout: float = _GEMINI_TIMEOUT_SECONDS):
     loop = asyncio.get_running_loop()
     return await asyncio.wait_for(
         loop.run_in_executor(_AI_EXECUTOR, lambda: func(*args)),
@@ -117,7 +119,7 @@ def _search_web(query: str) -> str:
             SERPER_URL,
             headers={"X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json"},
             json={"q": query, "num": 5},
-            timeout=(3, 8),
+            timeout=_SERPER_TIMEOUT,
         )
         resp.raise_for_status()
         data = resp.json()
@@ -157,7 +159,7 @@ def _gemini_complete(
             max_output_tokens=max_tokens,
             thinking_config=types.ThinkingConfig(thinking_level="low"),
             automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
-            http_options=types.HttpOptions(timeout=30_000),
+            http_options=types.HttpOptions(timeout=20_000),
         ),
     )
     text = (response.text or "").strip()
@@ -168,9 +170,10 @@ def _gemini_complete(
 
 def _call_gemini(question: str, search_context: str, history: list | None = None) -> str:
     system_msg = (
-        "You are a knowledgeable, reliable assistant in a Malaysian Telegram group chat. "
+        "You are a knowledgeable, reliable assistant in a Telegram group chat. "
         "Your default mode is calm, clear, and informative — give accurate, well-reasoned answers. "
-        "You understand Gen Z slang, internet culture, and local Malaysian context, so you can read the room. "
+        "Always answer in natural English, even when the user writes in another language, unless they explicitly ask for a different language. "
+        "You understand Gen Z slang, internet culture, and Malaysian context, so you can read the room. "
         "If the question is lighthearted, absurd, or clearly asking for banter, bring the humour naturally — "
         "but never force jokes onto serious questions. "
         "Keep answers concise. Plain text only, absolutely no markdown, no bullet points, no headers. "
@@ -334,13 +337,13 @@ async def _process_ask(
                 _save_ask_context, chat_id, overflow_msg.message_id, new_history
             )
     except asyncio.TimeoutError:
-        logger.warning("Ask request timed out after waiting for Gemini.")
+        logger.warning("Ask request timed out after %.0f seconds.", _GEMINI_TIMEOUT_SECONDS)
         if not answer_displayed:
             await thinking_msg.edit_text(
                 "⚠️ The AI took too long to respond. Please try again in a moment."
             )
     except Exception as e:
-        logger.error("Ask error: %s", e)
+        logger.exception("Ask error")
         if not answer_displayed:
             error_text = str(e).casefold()
             if any(marker in error_text for marker in ("api key", "authentication", "unauthorized", "401")):
