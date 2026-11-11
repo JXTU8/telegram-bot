@@ -59,7 +59,7 @@ SEARCH_CACHE_TTL_SECONDS = max(0, env_int("SEARCH_CACHE_TTL_SECONDS", 900))
 SEARCH_CACHE_MAX_ITEMS = 128
 MAX_ASK_LENGTH = 500
 _SERPER_TIMEOUT = (2, 5)
-_GEMINI_TIMEOUT_SECONDS = 20.0
+_GEMINI_TIMEOUT_SECONDS = 45.0
 
 _SEARCH_CACHE: OrderedDict = OrderedDict()
 _search_cache_lock = threading.Lock()
@@ -159,7 +159,11 @@ def _gemini_complete(
             max_output_tokens=max_tokens,
             thinking_config=types.ThinkingConfig(thinking_level="low"),
             automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
-            http_options=types.HttpOptions(timeout=20_000),
+            automatic_continuation=False,
+            http_options=types.HttpOptions(
+                timeout=45_000,
+                retry_options=types.HttpRetryOptions(attempts=1),
+            ),
         ),
     )
     text = (response.text or "").strip()
