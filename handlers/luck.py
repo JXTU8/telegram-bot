@@ -1,7 +1,7 @@
 """
 handlers/luck.py
 ────────────────
-Luck system: /luck, /luckboard, /streak, and deprecated /fate stubs.
+Luck system: /luck, /luckboard, and /streak.
 """
 
 import asyncio
@@ -23,7 +23,6 @@ from stores.luck_store import (
     increment_luck_checks,
 )
 from stores.user_store import track_seen_user
-from stores.birthday_store import get_all_birthdays
 
 from helpers import (
     _display_user, _mentioned_target, _normalize_target, _today,
@@ -89,36 +88,20 @@ def _update_streak_sync(user_id: int, today_str: str, tier_category: str) -> int
     return update_fate_streak(user_id, today_str, tier_category)
 
 
-# Fix 13: _BIRTHDAY_SCORE must be defined BEFORE _score_display uses it.
-# Previously it was declared after the function — fragile even though Python
-# resolves names at call-time, not definition-time.
-_BIRTHDAY_SCORE = 101  # sentinel — outside 0-100 range, never in _SPECIAL_SCORE_CASES
-
-
 def _score_display(score: int) -> str:
     if score == 999:
         return "999 ⚡ MAXIMUM"
     if score == -999:
         return "-999 💀 MINIMUM"
-    if score == _BIRTHDAY_SCORE:
-        return "🎂 MAX"
     filled = round(max(0, min(score, 100)) / 10)
     bar = "█" * filled + "░" * (10 - filled)
     return f"{score}/100  [{bar}]"
 
 
 def _apply_special_luck(score, tier, luck_msg, target_name, today, seed=""):
-    """Apply brainrot special cases on top of the base luck result.
-
-    Birthday overrides (score == _BIRTHDAY_SCORE) are always preserved —
-    day specials like New Year cannot clobber a birthday.
-    """
+    """Apply calendar and score-based special cases to a luck result."""
     day_note = ""
     is_april_fools = False
-
-    # Birthday takes total priority — skip all day/score overrides
-    if score == _BIRTHDAY_SCORE:
-        return score, tier, luck_msg, day_note, is_april_fools
 
     # New Year (Jan 1) — always max luck
     if today.month == 1 and today.day == 1:
@@ -158,12 +141,6 @@ def _luck_result_text(target_name, tier, score, luck_msg,
         parts.append(f"\n{day_note}")
     if checking_other:
         parts.append("\n\n_⚠️ Their score won't appear on /luckboard until they run /luck themselves._")
-        # Fix 11: username-only mentions can't trigger the birthday override because
-        # the bot has no user_id to look up — surface this clearly.
-        if username_mention:
-            parts.append(
-                "\n_🎂 Birthday check skipped — have them use /luck directly for birthday luck._"
-            )
     else:
         parts.append("\n\n_Scores reset daily at midnight MYT · /streak to track your run_")
     return "".join(parts)
@@ -178,8 +155,6 @@ async def luck_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     target_user_id = None
     target_name = None
     checking_other = False
-    # Fix 11: track whether we resolved via @username (no user_id available)
-    is_username_mention = False
 
     for entity in (message.entities or []):
         if entity.type == "text_mention" and getattr(entity, "user", None):
@@ -194,7 +169,6 @@ async def luck_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             target_name = mentioned
             target_user_id = None
             checking_other = True
-            is_username_mention = True   # Fix 11: @username path — no user_id
         else:
             target_user_id = user.id
             target_name = user.first_name or user.username or "You"
@@ -209,32 +183,13 @@ async def luck_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     today_str = today.strftime("%Y-%m-%d")
     seed = str(target_user_id) if target_user_id else _normalize_target(target_name)
 
-    # Birthday override — applies whenever we have the actual user ID (own or other).
-    # Fix 4: was incorrectly restricted to self-luck only; text_mention gives us
-    # the real user ID for others too, so the override should fire for them as well.
-    # Fix 11: @username mentions (is_username_mention=True) skip this block because
-    # target_user_id is None — the note in _luck_result_text tells the user why.
-    if target_user_id:
-        bdays = await asyncio.to_thread(get_all_birthdays, update.effective_chat.id)
-        bday = bdays.get(str(target_user_id))
-        if bday and bday.get("day") == today.day and bday.get("month") == today.month:
-            score = _BIRTHDAY_SCORE
-            tier = "🎂 BIRTHDAY LEGEND"
-            luck_msg = (
-                "It's their birthday! The universe has no choice but to comply. "
-                "Maximum luck, no exceptions. They earned this one."
-                if checking_other else
-                "It's your birthday. The universe has no choice but to comply. "
-                "Maximum luck, no exceptions. You earned this one."
-            )
-
     score, tier, luck_msg, day_note, is_april_fools = _apply_special_luck(
         score, tier, luck_msg, target_name, today, seed=seed
     )
 
     streak_line = ""
     if not checking_other:
-        if score >= 65 or score in (999, _BIRTHDAY_SCORE):
+        if score >= 65 or score == 999:
             tier_category = "lucky"
         elif score <= 35 or score == -999:
             tier_category = "unlucky"
@@ -365,8 +320,6 @@ async def streak_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         f"{icon} {label}: *{streak} day{'s' if streak != 1 else ''}* in a row",
         parse_mode="Markdown",
     )
-
-
 # ── /lucktest (owner-only) ────────────────────────────────────────────────────
 
 @owner_only
@@ -427,23 +380,5 @@ async def lucktest_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         f"🔧 *Luck Test — Input score: {raw_score}*\n{clamp_note}\n"
         f"{result_text}\n\n"
         "_Preview only — nothing saved._",
-        parse_mode="Markdown",
-    )
-
-
-# ── Deprecated stubs ──────────────────────────────────────────────────────────
-
-async def fate_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(
-        "⚠️ `/fate` has been removed.\n\n"
-        "Use `/luck` instead — it works the same way!\n"
-        "Use `/luckboard` for the leaderboard.",
-        parse_mode="Markdown",
-    )
-
-
-async def fateboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(
-        "⚠️ `/fateboard` has been removed.\n\nUse `/luckboard` instead!",
         parse_mode="Markdown",
     )

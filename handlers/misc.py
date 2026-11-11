@@ -2,7 +2,7 @@
 handlers/misc.py
 ────────────────
 /start, /help (paginated), /stats, /recap, /leaderboard, /profile,
-/status, /cancel, /ban, /unban, /banlist, and background tracking helpers.
+/status, /log, /cancel, /ban, /unban, /banlist, and background tracking helpers.
 """
 
 import asyncio
@@ -18,12 +18,8 @@ from telegram.ext import ContextTypes, ConversationHandler
 from config import TIMEZONE, VERSION
 from db import redis
 from stores.ban_store import ban_user, unban_user, get_banned_users
-from stores.birthday_store import get_all_birthdays
 from stores.countdown_store import get_all_countdowns
 from stores.luck_store import get_fate_board, get_fate_streak, get_luck_check_count
-from stores.mvp_store import get_user_mvp_stats, get_today_mvp, get_mvp_board
-from stores.quote_store import get_quote_count, get_user_quote_counts
-from stores.reminder_store import get_user_remind_jobs
 from stores.ship_store import get_top_ship_pairs, get_shipboard_reset_time, get_user_ship_stats
 from stores.user_store import get_seen_users, track_seen_user
 from stores.stats_store import get_cmd_stats, get_cmd_stats_today, increment_cmd_stat
@@ -47,17 +43,29 @@ _SEEN_CACHE_MAX = 10_000
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "👋 *Welcome to Countdown Bot!*\n\n"
-        "I track countdowns, run luck checks, set reminders, host ships and more "
+        "I track countdowns, run luck checks, host ships and more "
         "— all from one group chat.\n\n"
         "➕ /addcountdown — add a new countdown\n"
         "📋 /listcountdown — see all active countdowns\n"
         "🎲 /choose — let me decide for you\n"
         "🍀 /luck — check your daily luck\n"
-        "⏰ /remind — set a personal reminder\n"
-        "🎂 /addbirthday — set your birthday\n"
         "🏆 /leaderboard — combined group leaderboard\n"
         "📋 /recap — today's group summary\n\n"
-        "💡 Use /help to browse *all 40+ commands* by category.",
+        "💡 Use /help to browse all available commands by category.",
+        parse_mode="Markdown",
+    )
+
+
+# ── /log ──────────────────────────────────────────────────────────────────────
+
+async def log_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show the public update notes for the current bot release."""
+    await update.message.reply_text(
+        f"📢 *Countdown Bot Update — v{VERSION}*\n\n"
+        "Welcome to the first stable release!\n"
+        "• Countdown creation and daily reminders\n"
+        "• AI, luck, ships, games, and group summaries\n"
+        "• A cleaner command set — use /help to explore it",
         parse_mode="Markdown",
     )
 
@@ -75,17 +83,13 @@ HELP_PAGES = {
     "decisions": (
         "🎲 *Decisions*\n\n"
         "/choose — can't decide? let the bot pick for you\n"
-        "/decide opt1, opt2, opt3 — instant pick\n"
-        "/rank topic: item1, item2, item3 — rank anything\n"
-        "/toss — pick a random person from mentions or the group\n"
-        "/poll question: opt1, opt2 — send a native Telegram poll"
+        "/decide opt1, opt2, opt3 — instant pick"
     ),
     "ai": (
         "🤖 *AI*\n\n"
         "/ask <question> — ask AI anything\n"
         "/8ball <question> — magic 8-ball\n"
-        "/hot <anything> — rate anything out of 100\n"
-        "/predict <scenario> — AI predicts the outcome"
+        "/hot <anything> — rate anything out of 100"
     ),
     "luck": (
         "🍀 *Daily Luck*\n\n"
@@ -97,15 +101,11 @@ HELP_PAGES = {
     "fun": (
         "🎉 *Fun*\n\n"
         "/game — number guessing game (1–100)\n"
-        "/trivia [topic] — AI trivia question, first correct answer wins\n"
-        "/triviaboard — all-time trivia leaderboard\n"
         "/ship @user1 @user2 — compatibility percentage\n"
         "/shipboard — top ship pairs in this group\n"
         "/roast @user — personalised roast\n"
         "/compliment @user — personalised compliment\n"
         "/vibecheck — group mood score\n"
-        "/mvp — today's MVP\n"
-        "/mvpboard — all-time MVP leaderboard\n"
         "/truth — random truth question\n"
         "/dare — random dare question\n"
         "/wouldyourather — random would you rather\n"
@@ -113,27 +113,9 @@ HELP_PAGES = {
         "/curse @user — daily curse\n"
         "/bless @user — daily blessing"
     ),
-    "quotes": (
-        "💬 *Quotes*\n\n"
-        "/quote — show a random saved quote\n"
-        "/quote (reply) — save the replied message to the archive\n"
-        "/quotes — browse saved quotes with prev/next\n"
-        "/deletequote <number> — delete a quote (admins only)"
-    ),
-    "reminders": (
-        "⏰ *Reminders*\n\n"
-        "/remind 10m take a break — set a personal reminder\n"
-        "/remind tmr 3pm meeting — natural language reminder (AI)\n"
-        "/cancelremind — view and cancel your pending reminders\n"
-        "/remindall 1h group meeting — group-wide reminder (admins only)\n"
-        "/birthday — see upcoming birthdays in this chat\n"
-        "/addbirthday DD/MM — set your birthday\n"
-        "/deletebirthday — delete your birthday\n"
-        "/deletebirthday @user — delete someone's birthday (admins only)\n"
-    ),
     "summary": (
         "📊 *Summary*\n\n"
-        "/leaderboard — combined luck, ship and MVP leaderboard\n"
+        "/leaderboard — combined luck and ship leaderboard\n"
         "/recap — today's full group activity summary\n"
         "/stats — group activity overview\n"
         "/profile — your bot profile in this chat"
@@ -141,19 +123,18 @@ HELP_PAGES = {
     "other": (
         "⚙️ *Other*\n\n"
         "/cancel — cancel an active setup flow\n"
-        "/help — show this menu"
+        "/help — show this menu\n"
+        "/log — show the latest bot update notes"
     ),
 }
 
-_HELP_PAGE_ORDER  = ["countdown", "decisions", "ai", "luck", "fun", "quotes", "reminders", "summary", "other"]
+_HELP_PAGE_ORDER  = ["countdown", "decisions", "ai", "luck", "fun", "summary", "other"]
 _HELP_PAGE_LABELS = {
     "countdown": "⏱ Countdown",
     "decisions": "🎲 Decisions",
     "ai":        "🤖 AI",
     "luck":      "🍀 Luck",
     "fun":       "🎉 Fun",
-    "quotes":    "💬 Quotes",
-    "reminders": "⏰ Reminders",
     "summary":   "📊 Summary",
     "other":     "⚙️ Other",
 }
@@ -206,14 +187,12 @@ async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     chat_id   = update.effective_chat.id
     today_str = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
 
-    luck_board, pairs, today_mvp, mvp_board = await asyncio.gather(
+    luck_board, pairs = await asyncio.gather(
         asyncio.to_thread(get_fate_board, chat_id, today_str),
         asyncio.to_thread(get_top_ship_pairs, chat_id, 3),
-        asyncio.to_thread(get_today_mvp, chat_id, today_str),
-        asyncio.to_thread(get_mvp_board, chat_id, 3),
         return_exceptions=True,
     )
-    for val in (luck_board, pairs, today_mvp, mvp_board):
+    for val in (luck_board, pairs):
         if isinstance(val, Exception):
             logger.error("leaderboard_command gather error: %s", val)
 
@@ -241,23 +220,7 @@ async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     else:
         lines.append("_No ships yet. Use /ship!_")
 
-    lines.append("\n🏆 *MVP*")
-    mvp = today_mvp if isinstance(today_mvp, dict) else {}
-    if mvp:
-        lines.append(f"Today: *{_escape_md(mvp.get('name', '?'))}*")
-    else:
-        lines.append("_No MVP yet today. Use /mvp!_")
-
-    board_rows = mvp_board if isinstance(mvp_board, list) else []
-    if board_rows:
-        lines.append("_All-time:_")
-        for i, row in enumerate(board_rows, 1):
-            medal = medals[i - 1] if i <= 3 else f"{i}."
-            name  = _display_name_or_id(row.get("name", ""), row.get("user_id", "?"))
-            wins  = int(row.get("wins", 0))
-            lines.append(f"{medal} *{_escape_md(name)}* — `{wins}` win{'s' if wins != 1 else ''}")
-
-    lines.append("\n_Use /luckboard · /shipboard · /mvpboard for full lists_")
+    lines.append("\n_Use /luckboard · /shipboard for full lists_")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
@@ -268,33 +231,21 @@ async def recap_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     today_str = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
 
     (
-        luck_board, pairs, today_mvp, quote_count, seen,
-        countdowns, all_bdays,
+        luck_board, pairs, seen, countdowns,
     ) = await asyncio.gather(
         asyncio.to_thread(get_fate_board, chat_id, today_str),
         asyncio.to_thread(get_top_ship_pairs, chat_id, 1),
-        asyncio.to_thread(get_today_mvp, chat_id, today_str),
-        asyncio.to_thread(get_quote_count, chat_id),
         asyncio.to_thread(get_seen_users, chat_id),
         asyncio.to_thread(get_all_countdowns, chat_id),
-        asyncio.to_thread(get_all_birthdays, chat_id),
         return_exceptions=True,
     )
 
     board        = luck_board  if isinstance(luck_board,  dict) else {}
     ship_list    = pairs       if isinstance(pairs,        list) else []
-    mvp          = today_mvp   if isinstance(today_mvp,    dict) else {}
-    total_quotes = quote_count if isinstance(quote_count,  int)  else 0
-    seen_users   = seen        if isinstance(seen,          dict) else {}
-    cd_dict      = countdowns  if isinstance(countdowns,   dict) else {}
-    bday_dict    = all_bdays   if isinstance(all_bdays,    dict) else {}
+    seen_users   = seen        if isinstance(seen,        dict) else {}
+    cd_dict      = countdowns  if isinstance(countdowns,  dict) else {}
 
     lines = [f"📋 *Daily Recap — {today_str}*\n"]
-
-    if mvp:
-        lines.append(f"🏆 *MVP:* {_escape_md(mvp.get('name', '?'))}")
-    else:
-        lines.append("🏆 *MVP:* _Not crowned yet — use /mvp_")
 
     if board:
         sorted_board = sorted(board.items(), key=lambda kv: kv[1]["score"], reverse=True)
@@ -339,32 +290,6 @@ async def recap_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     else:
         lines.append("⏱ *Countdowns:* _None active — use /addcountdown_")
 
-    upcoming_bdays = []
-    for uid_str, bday in bday_dict.items():
-        try:
-            d, m = int(bday.get("day", 0)), int(bday.get("month", 0))
-            if not d or not m:
-                continue
-            bday_this_year = date(today_date.year, m, d)
-            if bday_this_year < today_date:
-                bday_this_year = date(today_date.year + 1, m, d)
-            days_until = (bday_this_year - today_date).days
-            if 0 <= days_until <= 7:
-                upcoming_bdays.append((days_until, bday.get("name", uid_str)))
-        except ValueError:
-            pass
-    upcoming_bdays.sort()
-
-    if upcoming_bdays:
-        parts = []
-        for days_until, bname in upcoming_bdays[:3]:
-            tag = "Today! 🎂" if days_until == 0 else f"in {days_until}d"
-            parts.append(f"{_escape_md(bname)} ({tag})")
-        lines.append(f"🎂 *Birthdays this week:* {', '.join(parts)}")
-    else:
-        lines.append("🎂 *Birthdays:* _None this week_")
-
-    lines.append(f"💬 *Quotes saved:* {total_quotes} total")
     lines.append(f"👤 *Members tracked:* {len(seen_users)}")
     lines.append("\n_Run /leaderboard for the full rankings_")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
@@ -377,18 +302,16 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     today_str = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
 
     results = await asyncio.gather(
-        asyncio.to_thread(get_quote_count, chat_id),
         asyncio.to_thread(get_seen_users, chat_id),
         asyncio.to_thread(get_top_ship_pairs, chat_id, 1),
         asyncio.to_thread(get_fate_board, chat_id, today_str),
         asyncio.to_thread(get_all_countdowns, chat_id),
         return_exceptions=True,
     )
-    quote_count  = results[0] if not isinstance(results[0], Exception) else 0
-    seen_users   = results[1] if not isinstance(results[1], Exception) else {}
-    top_pairs    = results[2] if not isinstance(results[2], Exception) else []
-    board        = results[3] if not isinstance(results[3], Exception) else {}
-    countdowns   = results[4] if not isinstance(results[4], Exception) else {}
+    seen_users   = results[0] if not isinstance(results[0], Exception) else {}
+    top_pairs    = results[1] if not isinstance(results[1], Exception) else []
+    board        = results[2] if not isinstance(results[2], Exception) else {}
+    countdowns   = results[3] if not isinstance(results[3], Exception) else {}
     for i, r in enumerate(results):
         if isinstance(r, Exception):
             logger.error("stats_command gather[%s] failed: %s", i, r)
@@ -417,7 +340,6 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     lines = [
         "📊 *Group Stats*\n",
         f"👥 Members tracked: *{member_count}*",
-        f"💬 Quotes saved: *{quote_count}*",
         f"⏱ Active countdowns: *{countdown_count}*",
         "\n🍀 *Today's Luck*",
         f"Checks: *{luck_count}*",
@@ -454,27 +376,14 @@ async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     name    = _display_user(target_user)
     today   = datetime.now(TIMEZONE).date()
 
-    bdays, reminders, streak, mvp_stats, quote_counts, ship_stats, luck_checks = await asyncio.gather(
-        asyncio.to_thread(get_all_birthdays, chat_id),
-        asyncio.to_thread(get_user_remind_jobs, chat_id, user_id),
+    streak, ship_stats, luck_checks = await asyncio.gather(
         asyncio.to_thread(get_fate_streak, user_id),
-        asyncio.to_thread(get_user_mvp_stats, chat_id, user_id),
-        asyncio.to_thread(get_user_quote_counts, chat_id, name),
         asyncio.to_thread(get_user_ship_stats, chat_id, name),
         asyncio.to_thread(get_luck_check_count, user_id),
     )
 
-    bday = bdays.get(str(user_id))
-    if bday:
-        birthday_line = f"{bday.get('day', 0):02d}/{bday.get('month', 0):02d}"
-    else:
-        birthday_line = "Not set"
-
     streak_count, streak_cat = streak
     streak_line  = f"{streak_count} day(s) {streak_cat}" if streak_count else "No active streak"
-    authored_quotes, saved_quotes = quote_counts
-    mvp_wins  = int(mvp_stats.get("wins", 0)) if mvp_stats else 0
-    last_mvp  = mvp_stats.get("last_won", "Never") if mvp_stats else "Never"
     seen      = await asyncio.to_thread(get_seen_users, chat_id)
     seen_name = _display_name_or_id(seen.get(str(user_id), name), user_id)
 
@@ -505,12 +414,7 @@ async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             f"🍀 Today's luck: *{_escape_md(luck_tier)}* (`{luck_display}`)",
             f"📈 Luck streak: *{_escape_md(streak_line)}*",
             f"🎯 Total luck checks: *{total_luck_checks}*",
-            f"🏆 MVP wins: *{mvp_wins}*",
-            f"Last MVP: *{_escape_md(last_mvp)}*",
             f"💞 Ships this cycle: {ship_line}",
-            f"⏰ Pending reminders: *{len(reminders)}*",
-            f"🎂 Birthday: *{_escape_md(birthday_line)}*",
-            f"💬 Quotes authored/saved: *{authored_quotes}/{saved_quotes}*",
             f"📆 Today: *{today.isoformat()} MYT*",
         ]),
         parse_mode="Markdown",

@@ -1,6 +1,6 @@
 # 🤖 Countdown Bot
 
-A feature-rich Telegram group bot built for keeping groups engaged, organised, and entertained. Originally focused on countdowns, it has grown into a full-featured group companion with AI-powered commands, a daily luck system, reminders, birthday tracking, ships, quotes, and more.
+A Telegram group bot for countdowns, AI-powered commands, daily luck, ships, games, and group summaries.
 
 ---
 
@@ -9,16 +9,12 @@ A feature-rich Telegram group bot built for keeping groups engaged, organised, a
 | Category | Highlights |
 |---|---|
 | ⏱ **Countdowns** | Multi-step creation wizard, daily reminders, short codes, auto-cleanup of expired entries |
-| 🤖 **AI (Groq + Serper)** | `/ask` with web search + 6-hour conversation memory, natural language reminders, AI roasts/compliments/8ball |
-| 🍀 **Daily Luck** | Deterministic daily scores, tier system, streaks, birthday overrides, April Fools reveal, New Year max-luck |
-| ⏰ **Reminders** | Personal and group-wide, regex fast path or AI natural language (`/remind tmr 3pm call mum`), persisted across restarts |
-| 🎂 **Birthdays** | Per-chat archive, daily auto-greeting job at 00:01 MYT, birthday luck override |
+| 🤖 **AI (Groq + Serper)** | `/ask` with web search + 6-hour conversation memory, AI roasts/compliments/8ball |
+| 🍀 **Daily Luck** | Deterministic daily scores, tier system, streaks, April Fools reveal, New Year max-luck |
 | 🎮 **Games** | Number guessing game with 60 s inactivity reveal, higher/lower hints |
 | 💞 **Ships** | Deterministic daily compatibility scores, 48-hour rolling leaderboard |
-| 🏆 **MVP** | Daily random winner, all-time leaderboard |
-| 💬 **Quotes** | Save, browse (paginated), and delete group quotes |
-| 📊 **Summary** | `/recap` (MVP, luck extremes, top ship, next countdown, birthdays this week), `/leaderboard`, `/stats`, `/profile` |
-| 🎲 **Decisions** | `/choose` wizard, `/decide`, `/rank`, `/toss`, `/poll`, `/coinflip` |
+| 📊 **Summary** | `/recap` (luck extremes, top ship, next countdown), `/leaderboard`, `/stats`, `/profile` |
+| 🎲 **Decisions** | `/choose` wizard, `/decide`, `/coinflip` |
 | 🎉 **Fun** | `/truth`, `/dare`, `/wouldyourather`, `/vibecheck`, `/curse`, `/bless`, `/hot` |
 
 ---
@@ -42,7 +38,7 @@ A feature-rich Telegram group bot built for keeping groups engaged, organised, a
 | `BOT_TOKEN` | ✅ | Telegram bot token from [@BotFather](https://t.me/BotFather) |
 | `UPSTASH_REDIS_REST_URL` | ✅ | Upstash Redis REST endpoint |
 | `UPSTASH_REDIS_REST_TOKEN` | ✅ | Upstash Redis auth token |
-| `GROQ_API_KEY` | ⚠️ | Enables `/ask`, `/roast`, `/compliment`, `/8ball`, `/hot`, AI reminders |
+| `GROQ_API_KEY` | ⚠️ | Enables `/ask`, `/roast`, `/compliment`, `/8ball`, `/hot` |
 | `SERPER_API_KEY` | ⚠️ | Enables web search in `/ask` |
 | `BOT_OWNER_ID` | ⚠️ | Telegram user ID of the bot owner (unlocks `/status`, `/lucktest`) |
 | `BOT_OWNER_USERNAME` | ⚠️ | Username(s) of the bot owner, comma-separated |
@@ -107,22 +103,6 @@ python bot.py
 | `/luckboard` | Today's luck leaderboard with streak badges |
 | `/streak` | View your current luck streak |
 
-### ⏰ Reminders
-| Command | Description |
-|---|---|
-| `/remind 10m take a break` | Set a personal reminder (fast regex) |
-| `/remind tmr 3pm call mum` | Natural language reminder (AI-parsed) |
-| `/cancelremind` | View and cancel pending reminders |
-| `/remindall 1h meeting` | Set a group-wide reminder (admins only) |
-
-### 🎂 Birthdays
-| Command | Description |
-|---|---|
-| `/addbirthday DD/MM` | Save your birthday |
-| `/birthday` | See upcoming birthdays in this chat |
-| `/deletebirthday` | Remove your birthday |
-| `/deletebirthday @user` | Remove someone's birthday (admins only) |
-
 ### 🎮 Games & Fun
 | Command | Description |
 |---|---|
@@ -132,8 +112,6 @@ python bot.py
 | `/roast @user` | AI-generated personalised roast |
 | `/compliment @user` | AI-generated compliment |
 | `/vibecheck` | Group mood score |
-| `/mvp` | Crown today's MVP |
-| `/mvpboard` | All-time MVP leaderboard |
 | `/truth` | Random truth question |
 | `/dare` | Random dare |
 | `/wouldyourather` | Random would-you-rather |
@@ -146,23 +124,12 @@ python bot.py
 |---|---|
 | `/choose` | Interactive decision wizard |
 | `/decide opt1, opt2` | Instant random pick |
-| `/rank topic: item1, item2` | Randomly rank a list |
-| `/toss` | Pick a random group member |
-| `/poll question: opt1, opt2` | Send a native Telegram poll |
-
-### 💬 Quotes
-| Command | Description |
-|---|---|
-| `/quote` | Show a random saved quote |
-| `/quote` (reply to a message) | Save that message to the archive |
-| `/quotes` | Browse all quotes with prev/next buttons |
-| `/deletequote <number>` | Delete a quote (admins only) |
 
 ### 📊 Summary
 | Command | Description |
 |---|---|
-| `/recap` | Today's full group summary (MVP, luck, ships, countdown, birthdays) |
-| `/leaderboard` | Combined luck + ships + MVP leaderboard |
+| `/recap` | Today's full group summary (luck, ships, countdown) |
+| `/leaderboard` | Combined luck + ships leaderboard |
 | `/stats` | Group activity overview |
 | `/profile` | Your bot profile in this chat |
 
@@ -171,6 +138,7 @@ python bot.py
 |---|---|
 | `/start` | Introduction and quick-start |
 | `/help` | Paginated help menu by category |
+| `/log` | Latest bot update notes (`v1.0.0`) |
 | `/cancel` | Cancel an active setup wizard |
 | `/status` | Bot health check (owner only) |
 | `/lucktest <score>` | Preview a luck card without saving (owner only) |
@@ -189,21 +157,14 @@ keep_alive.py           ← Flask server + self-ping thread
 
 handlers/
   ai.py                 ← Groq client, Serper search, /ask, /choose
-  birthdays.py          ← /birthday, /addbirthday, daily job
   countdown.py          ← /addcountdown wizard, daily reminders
-  fun.py                ← ship, roast, game, poll, mvp, …
+  fun.py                ← ship, roast, game, and other fun commands
   luck.py               ← luck engine, /luck, /luckboard, /streak
   misc.py               ← /start, /help, /recap, /stats, /profile, /status
-  quotes.py             ← /quote, /quotes, /deletequote
-  reminders.py          ← /remind (regex + AI), /remindall, restore jobs
 
 stores/
-  birthday_store.py     ← Redis: birthdays:<chat_id>
   countdown_store.py    ← Redis: countdowns:<chat_id>
   luck_store.py         ← Redis: luckboard:<chat_id>:<date>, fate_streak:<uid>
-  mvp_store.py          ← Redis: mvp_daily:<chat_id>:<date>, mvp_wins:<chat_id>
-  quote_store.py        ← Redis: quotes:<chat_id>
-  reminder_store.py     ← Redis: remind_jobs:<chat_id>, remind_count:<uid>
   ship_store.py         ← Redis: ship_pairs:<chat_id>:<bucket> (48 h TTL)
   user_store.py         ← Redis: seen_users:<chat_id> (90-day TTL)
 ```
@@ -212,9 +173,8 @@ stores/
 
 - **All persistence in Redis** — no SQL, no file system. Upstash free tier is enough for hundreds of groups.
 - **Async throughout** — blocking store calls are wrapped in `asyncio.to_thread`. The bot stays responsive under load.
-- **Deterministic daily randomness** — luck scores, ship scores, and MVP picks use `random.Random(seed)` seeded by `user_id + date`, so results are consistent within a day but change the next.
-- **Job persistence** — countdown reminders and personal reminders survive bot restarts via Redis + `restore_jobs` on startup. Overdue reminders are delivered with an apology rather than dropped.
-- **Two-tier reminder parsing** — fast regex for standard formats (`10m`, `2h`), Groq AI fallback for natural language (`tmr 3pm`, `next monday`).
+- **Deterministic daily randomness** — luck and ship scores use `random.Random(seed)` seeded by `user_id + date`, so results are consistent within a day but change the next.
+- **Job persistence** — countdown reminders survive bot restarts via Redis + `restore_jobs` on startup.
 
 ---
 

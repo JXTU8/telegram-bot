@@ -18,7 +18,6 @@ from telegram.ext import (
 
 from config import TOKEN, TIMEZONE
 from keep_alive import keep_alive
-from stores.luck_store import delete_old_fateboard_keys
 from stores.ban_store import is_banned
 
 # ── Ban cache — avoids a Redis round-trip on every single update/click ────────
@@ -29,7 +28,7 @@ _BAN_CACHE_TTL = 300           # seconds
 
 # ── Handlers ──────────────────────────────────────────────────────────────────
 from handlers.misc import (
-    start_command, help_command, help_callback,
+    start_command, help_command, help_callback, log_command,
     stats_command, profile_command, status_command,
     seen_user_tracker, error_handler, conversation_timeout,
     cancel_command, leaderboard_command, recap_command,
@@ -48,34 +47,16 @@ from handlers.ai import (
 )
 from handlers.luck import (
     luck_command, luckboard_command, streak_command, lucktest_command,
-    fate_command, fateboard_command,
 )
 from handlers.fun import (
     ship_command, shipboard_command,
     roast_command, compliment_command,
-    vibecheck_command, rank_command,
+    vibecheck_command,
     truth_command, dare_command, would_you_rather_command,
     coinflip_command, eightball_command,
-    curse_command, bless_command,
-    mvp_command, mvpboard_command, hot_command,
-    decide_command, poll_command, toss_command,
+    curse_command, bless_command, hot_command,
+    decide_command,
     game_command, game_guess_handler,
-    predict_command,
-)
-from handlers.trivia import (
-    trivia_command, trivia_callback, triviaboard_command,
-)
-from handlers.reminders import (
-    remind_command, cancelremind_command, cancelremind_callback,
-    remindall_command, restore_remind_jobs, restore_remindall_jobs,
-)
-from handlers.birthdays import (
-    birthday_command, addbirthday_command, deletebirthday_command,
-    birthday_check_job,
-)
-from handlers.quotes import (
-    quote_command, quotes_command, quotes_callback,
-    deletequote_command,
 )
 
 # ── Conversation states ───────────────────────────────────────────────────────
@@ -120,27 +101,16 @@ async def ban_gate(update: Update, context) -> None:
 # ── Startup hook ──────────────────────────────────────────────────────────────
 
 async def on_startup(app) -> None:
-    """Runs once after the bot connects. Restores all persistent jobs from Redis."""
-    try:
-        await asyncio.to_thread(delete_old_fateboard_keys)
-    except Exception as e:
-        logger.error("on_startup: delete_old_fateboard_keys failed: %s", e)
-
+    """Runs once after the bot connects. Restores countdown jobs from Redis."""
     for restore_fn, label in [
         (lambda: restore_jobs(app),           "countdown jobs"),
-        (lambda: restore_remind_jobs(app),    "remind jobs"),
-        (lambda: restore_remindall_jobs(app), "remindall jobs"),
     ]:
         try:
             await restore_fn()
         except Exception as e:
             logger.error("on_startup: restoring %s failed: %s", label, e)
 
-    midnight = datetime.now(TIMEZONE).replace(
-        hour=0, minute=1, second=0, microsecond=0
-    ).timetz()
-    app.job_queue.run_daily(birthday_check_job, time=midnight)
-    logger.info("on_startup complete — all jobs restored.")
+    logger.info("on_startup complete — countdown jobs restored.")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -217,9 +187,6 @@ def main() -> None:
     # six-character string "prefix:" under fullmatch, so the handlers were never
     # called and every inline button hung with a loading animation.
     app.add_handler(CallbackQueryHandler(help_callback,         pattern=r"^help:.+"))
-    app.add_handler(CallbackQueryHandler(quotes_callback,       pattern=r"^quote:.+"))
-    app.add_handler(CallbackQueryHandler(cancelremind_callback, pattern=r"^cancelremind:.+"))
-    app.add_handler(CallbackQueryHandler(trivia_callback,       pattern=r"^trivia:.+"))
 
     # ── Conversation handlers ─────────────────────────────────────────────────
     app.add_handler(countdown_conv)
@@ -229,21 +196,19 @@ def main() -> None:
     # ── Commands ──────────────────────────────────────────────────────────────
     app.add_handler(_cmd("start",           start_command))
     app.add_handler(_cmd("help",            help_command))
+    app.add_handler(_cmd("log",             log_command))
     app.add_handler(_cmd("cancel",          cancel_command))
     app.add_handler(_cmd("ask",             ask_command))
     app.add_handler(_cmd("listcountdown",   list_countdown, threaded=False))
     app.add_handler(_cmd("removecountdown", remove_countdown_cmd, threaded=False))
-    app.add_handler(_cmd("fate",            fate_command))
     app.add_handler(_cmd("luck",            luck_command))
     app.add_handler(_cmd("luckboard",       luckboard_command))
-    app.add_handler(_cmd("fateboard",       fateboard_command))
     app.add_handler(_cmd("streak",          streak_command))
     app.add_handler(_cmd("ship",            ship_command))
     app.add_handler(_cmd("shipboard",       shipboard_command))
     app.add_handler(_cmd("roast",           roast_command))
     app.add_handler(_cmd("compliment",      compliment_command))
     app.add_handler(_cmd("vibecheck",       vibecheck_command))
-    app.add_handler(_cmd("rank",            rank_command))
     app.add_handler(_cmd("truth",           truth_command))
     app.add_handler(_cmd("dare",            dare_command))
     app.add_handler(_cmd("wouldyourather",  would_you_rather_command))
@@ -252,24 +217,8 @@ def main() -> None:
     app.add_handler(_cmd("curse",           curse_command))
     app.add_handler(_cmd("bless",           bless_command))
     app.add_handler(_cmd("decide",          decide_command))
-    app.add_handler(_cmd("poll",            poll_command))
-    app.add_handler(_cmd("toss",            toss_command))
     app.add_handler(_cmd("game",            game_command))
-    app.add_handler(_cmd("birthday",        birthday_command))
-    app.add_handler(_cmd("addbirthday",     addbirthday_command))
-    app.add_handler(_cmd("deletebirthday",  deletebirthday_command))
-    app.add_handler(_cmd("remind",          remind_command))
-    app.add_handler(_cmd("cancelremind",    cancelremind_command))
-    app.add_handler(_cmd("remindall",       remindall_command))
-    app.add_handler(_cmd("quote",           quote_command))
-    app.add_handler(_cmd("quotes",          quotes_command))
-    app.add_handler(_cmd("deletequote",     deletequote_command))
-    app.add_handler(_cmd("mvp",             mvp_command))
-    app.add_handler(_cmd("mvpboard",        mvpboard_command))
     app.add_handler(_cmd("hot",             hot_command))
-    app.add_handler(_cmd("predict",         predict_command))
-    app.add_handler(_cmd("trivia",          trivia_command))
-    app.add_handler(_cmd("triviaboard",     triviaboard_command))
     app.add_handler(_cmd("cmdstats",        cmdstats_command))
     app.add_handler(_cmd("stats",           stats_command))
     app.add_handler(_cmd("leaderboard",     leaderboard_command))

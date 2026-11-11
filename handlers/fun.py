@@ -1,9 +1,8 @@
 """
 handlers/fun.py
 ───────────────
-Fun commands: ship, roast, compliment, vibecheck, rank, truth, dare,
-wouldyourather, coinflip, 8ball, curse, bless, mvp, hot, toss, decide,
-poll, game, roastmax.
+Fun commands: ship, roast, compliment, vibecheck, truth, dare,
+wouldyourather, coinflip, 8ball, curse, bless, hot, decide, and game.
 """
 
 import asyncio
@@ -22,12 +21,10 @@ from constants import (
     SHIP_OWNER_BLOCK_LINES, SHIP_TIER_LINES, BOT_SHIP_REFUSALS,
     ROAST_LINES, COMPLIMENT_LINES, VIBE_TIERS,
     TRUTH_QUESTIONS, DARE_PROMPTS, WOULD_YOU_RATHER_PROMPTS,
-    EIGHT_BALL_ANSWERS, CURSE_LINES, BLESS_LINES, MVP_LINES, HOT_VERDICTS,
-    TOSS_VERDICTS, PREDICT_FALLBACK_LINES,
+    EIGHT_BALL_ANSWERS, CURSE_LINES, BLESS_LINES, HOT_VERDICTS,
 )
 from stores.ship_store import save_ship_pair, get_top_ship_pairs, get_shipboard_reset_time
-from stores.user_store import track_seen_user, get_seen_users
-from stores.mvp_store import get_today_mvp, save_mvp_win, get_mvp_board
+from stores.user_store import track_seen_user
 from handlers.ai import groq_client, _call_groq_fun
 from helpers import (
     _display_user, _arg_text, _normalize_target, _daily_rng,
@@ -38,26 +35,7 @@ from helpers import (
 
 logger = logging.getLogger(__name__)
 
-# ── Telegram poll limits ──────────────────────────────────────────────────────
-_POLL_MAX_OPTIONS = 10
-_POLL_MAX_QUESTION_LEN = 300
-_POLL_MAX_OPTION_LEN = 100
-
-_POLL_COOLDOWNS: dict = {}
-_POLL_COOLDOWN_SECONDS: float = 30.0
-_POLL_COOLDOWNS_MAX = 5_000
-
-
 # ── Ship helpers ──────────────────────────────────────────────────────────────
-
-def _purge_poll_cooldowns(now: float) -> None:
-    expired = [
-        key for key, last_used in _POLL_COOLDOWNS.items()
-        if now - last_used >= _POLL_COOLDOWN_SECONDS
-    ]
-    for key in expired:
-        del _POLL_COOLDOWNS[key]
-
 
 def _log_background_failure(label: str):
     def _callback(task: asyncio.Task) -> None:
@@ -340,41 +318,6 @@ async def vibecheck_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     await update.message.reply_text(f"📡 Vibe Check\nGroup mood: {score}/100\n{mood}")
 
 
-# ── /rank ─────────────────────────────────────────────────────────────────────
-
-def _parse_rank_text(text: str):
-    title, item_text = ("Random Ranking", text)
-    if ":" in text:
-        title, item_text = [p.strip() for p in text.split(":", 1)]
-        title = title or "Random Ranking"
-    if "," in item_text:
-        items = [i.strip() for i in item_text.split(",") if i.strip()]
-    else:
-        items = [i.strip() for i in item_text.split() if i.strip()]
-    return title, items[:12], len(items) > 12
-
-
-async def rank_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    text = _arg_text(context)
-    if not text:
-        await update.message.reply_text(
-            "Usage: /rank topic: item1, item2, item3\nExample: /rank food: pizza, burger, sushi"
-        )
-        return
-    title, items, truncated = _parse_rank_text(text)
-    if len(items) < 2:
-        await update.message.reply_text("Give me at least 2 things to rank.")
-        return
-    rng = _daily_rng("rank", update.effective_chat.id, title.casefold())
-    items_copy = list(items)
-    rng.shuffle(items_copy)
-    lines = [f"🏆 {title}"]
-    lines.extend(f"{i}. {item}" for i, item in enumerate(items_copy, 1))
-    if truncated:
-        lines.append("_(Only the first 12 items were ranked)_")
-    await update.message.reply_text("\n".join(lines))
-
-
 # ── /truth, /dare, /wouldyourather ───────────────────────────────────────────
 
 async def truth_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -434,69 +377,6 @@ async def bless_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await update.message.reply_text(random.choice(BLESS_LINES).format(target=target))
 
 
-# ── /mvp ─────────────────────────────────────────────────────────────────────
-
-async def mvp_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = update.effective_chat.id
-    today_str = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
-    saved_winner = await asyncio.to_thread(get_today_mvp, chat_id, today_str)
-    if saved_winner:
-        winner_name = _display_name_or_id(saved_winner.get("name", ""), saved_winner.get("user_id", "unknown"))
-        await update.message.reply_text(
-            f"🏆 *Today's MVP — {_escape_md(winner_name)}*\n{random.choice(MVP_LINES)}",
-            parse_mode="Markdown",
-        )
-        return
-
-    rng = random.Random(f"mvp:{chat_id}:{today_str}")
-    candidate_pool: dict = {}
-    try:
-        admins = await context.bot.get_chat_administrators(chat_id)
-        for member in admins:
-            u = member.user
-            if not u.is_bot:
-                name = _display_user(u)
-                candidate_pool[str(u.id)] = name
-                task = asyncio.create_task(asyncio.to_thread(track_seen_user, chat_id, u.id, name))
-                task.add_done_callback(_log_background_failure("track_seen_user"))
-    except Exception as e:
-        logger.warning("Could not fetch admins for mvp in chat %s: %s", chat_id, e)
-    seen = await asyncio.to_thread(get_seen_users, chat_id)
-    for uid, name in seen.items():
-        safe_name = _display_name_or_id(name, uid)
-        if uid not in candidate_pool or candidate_pool[uid] == str(uid):
-            candidate_pool[uid] = safe_name
-    if not candidate_pool:
-        await update.message.reply_text("⚠️ Not enough members tracked yet. Have people use a command first!")
-        return
-    winner_id = rng.choice(list(candidate_pool.keys()))
-    winner_name = _display_name_or_id(candidate_pool[winner_id], winner_id)
-    await asyncio.to_thread(save_mvp_win, chat_id, today_str, winner_id, winner_name)
-    await update.message.reply_text(
-        f"🏆 *Today's MVP — {_escape_md(winner_name)}*\n{rng.choice(MVP_LINES)}",
-        parse_mode="Markdown",
-    )
-
-
-async def mvpboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    rows = await asyncio.to_thread(get_mvp_board, update.effective_chat.id, 10)
-    if not rows:
-        await update.message.reply_text("🏆 No MVP wins recorded yet. Use /mvp to crown today's winner.")
-        return
-    medals = ["🥇", "🥈", "🥉"]
-    lines = ["🏆 *MVP Board*\n"]
-    for i, row in enumerate(rows, 1):
-        rank = medals[i - 1] if i <= 3 else f"{i}."
-        name = _display_name_or_id(row.get("name", ""), row.get("user_id", "unknown"))
-        wins = int(row.get("wins", 0))
-        last_won = row.get("last_won", "unknown")
-        lines.append(
-            f"{rank} *{_escape_md(name)}* — `{wins}` win{'s' if wins != 1 else ''}\n"
-            f"   Last: {_escape_md(last_won)}"
-        )
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
-
-
 # ── /hot ──────────────────────────────────────────────────────────────────────
 
 async def hot_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -524,48 +404,6 @@ async def hot_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     )
 
 
-# ── /predict ──────────────────────────────────────────────────────────────────
-
-async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    text = _arg_text(context)
-    if not text:
-        await update.message.reply_text(
-            "Usage: `/predict <scenario>`\n"
-            "Examples:\n"
-            "• `/predict will I pass my exam`\n"
-            "• `/predict who wins the group trivia tonight`\n"
-            "• `/predict should I sleep early`",
-            parse_mode="Markdown",
-        )
-        return
-    today_str = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
-    rng       = random.Random(f"predict:{_normalize_target(text)}:{today_str}")
-    fallback  = rng.choice(PREDICT_FALLBACK_LINES)
-    if not groq_client:
-        await update.message.reply_text(
-            f"🔮 *Prediction*\n\n_{_escape_md(text)}_\n\n{fallback}",
-            parse_mode="Markdown",
-        )
-        return
-    try:
-        prompt = (
-            f"Give a short, dramatic, entertaining prediction for this scenario: '{text}'. "
-            "Be confident and creative. Max 2 sentences. "
-            "No markdown, no bullet points, plain text only."
-        )
-        result = await asyncio.to_thread(_call_groq_fun, prompt)
-        await update.message.reply_text(
-            f"🔮 *Prediction*\n\n_{_escape_md(text)}_\n\n{result}",
-            parse_mode="Markdown",
-        )
-    except Exception as e:
-        logger.warning("Groq predict failed: %s", e)
-        await update.message.reply_text(
-            f"🔮 *Prediction*\n\n_{_escape_md(text)}_\n\n{fallback}",
-            parse_mode="Markdown",
-        )
-
-
 # ── /decide ───────────────────────────────────────────────────────────────────
 
 async def decide_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -581,103 +419,6 @@ async def decide_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     chosen = random.choice(options)
     await update.message.reply_text(f"🎯 {chosen}\n{random.choice(VERDICT_LINES)}")
-
-
-# ── /poll ─────────────────────────────────────────────────────────────────────
-
-async def poll_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id  = update.effective_user.id
-    chat_id  = update.effective_chat.id
-    ck = (chat_id, user_id)
-    now = _time.monotonic()
-    _purge_poll_cooldowns(now)
-    remaining = _POLL_COOLDOWN_SECONDS - (now - _POLL_COOLDOWNS.get(ck, 0))
-    if remaining > 0:
-        await update.message.reply_text(
-            f"⚠️ Please wait {remaining:.0f}s before sending another poll."
-        )
-        return
-    if len(_POLL_COOLDOWNS) >= _POLL_COOLDOWNS_MAX:
-        evict = _POLL_COOLDOWNS_MAX // 10
-        for old_key in list(_POLL_COOLDOWNS)[:evict]:
-            del _POLL_COOLDOWNS[old_key]
-    _POLL_COOLDOWNS[ck] = now
-
-    text = _arg_text(context)
-    if not text or ":" not in text:
-        await update.message.reply_text(
-            "Usage: /poll question: option1, option2, option3\n"
-            "Example: /poll Where to makan?: McD, KFC, Mamak"
-        )
-        return
-    question, opts_text = text.split(":", 1)
-    question = question.strip()
-    options = [o.strip() for o in opts_text.split(",") if o.strip()]
-    if not question:
-        await update.message.reply_text("The question can't be empty.")
-        return
-    if len(options) < 2:
-        await update.message.reply_text("Give at least 2 options separated by commas.")
-        return
-
-    warnings = []
-    if len(options) > _POLL_MAX_OPTIONS:
-        warnings.append(
-            f"⚠️ Only the first {_POLL_MAX_OPTIONS} options will be used "
-            f"(you gave {len(options)})."
-        )
-    if len(question) > _POLL_MAX_QUESTION_LEN:
-        warnings.append(f"⚠️ Question trimmed to {_POLL_MAX_QUESTION_LEN} characters.")
-    truncated_opts = [o for o in options[:_POLL_MAX_OPTIONS] if len(o) > _POLL_MAX_OPTION_LEN]
-    if truncated_opts:
-        warnings.append(
-            f"⚠️ {len(truncated_opts)} option(s) trimmed to {_POLL_MAX_OPTION_LEN} characters."
-        )
-    if warnings:
-        await update.message.reply_text("\n".join(warnings))
-
-    try:
-        await context.bot.send_poll(
-            chat_id=update.effective_chat.id,
-            question=question[:_POLL_MAX_QUESTION_LEN],
-            options=[o[:_POLL_MAX_OPTION_LEN] for o in options[:_POLL_MAX_OPTIONS]],
-            is_anonymous=False,
-        )
-    except TelegramError as e:
-        logger.warning("send_poll failed in chat %s: %s", chat_id, e)
-        await update.message.reply_text(
-            "⚠️ I couldn't create that poll here. Check my poll permission and try again."
-        )
-
-
-# ── /toss ─────────────────────────────────────────────────────────────────────
-
-async def toss_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    message = update.message
-    targets = []
-    for entity in (message.entities or []):
-        if entity.type == "text_mention" and getattr(entity, "user", None):
-            if not entity.user.is_bot:
-                targets.append(_display_user(entity.user))
-        elif entity.type == "mention":
-            mention = message.parse_entity(entity)
-            bot_username = getattr(context.bot, "username", None)
-            if bot_username and _normalize_target(mention) == bot_username.casefold():
-                continue
-            targets.append(mention.lstrip("@"))
-    if not targets:
-        seen = await asyncio.to_thread(get_seen_users, update.effective_chat.id)
-        if not seen:
-            await update.message.reply_text(
-                "⚠️ No one tracked yet! Have group members use a few commands first, then try again."
-            )
-            return
-        targets = list(seen.values())
-    chosen = random.choice(targets)
-    await update.message.reply_text(
-        f"🎰 *The Pick*\n\n➡️ *{_escape_md(chosen)}*\n\n_{random.choice(TOSS_VERDICTS)}_",
-        parse_mode="Markdown",
-    )
 
 
 # ── /game — Number guessing ────────────────────────────────────────────────────

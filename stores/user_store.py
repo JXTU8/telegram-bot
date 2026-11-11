@@ -1,7 +1,7 @@
 """
 stores/user_store.py
 ────────────────────
-Seen-user tracking per chat (used by /mvp, /toss, /stats).
+Seen-user tracking per chat (used by /stats and /profile).
 Redis key: seen_users:<chat_id>  →  JSON dict {user_id_str: name}
 TTL: 90 days, refreshed on every write. Capped at 500 users.
 """

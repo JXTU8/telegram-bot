@@ -338,17 +338,6 @@ BLESS_LINES = [
     "{target} is blessed with main-character background music.",
 ]
 
-MVP_LINES = [
-    "The data is in. The vibe is certified.",
-    "Chosen by the algorithm. No debates.",
-    "Today's main character. Uncontested.",
-    "The group would not be the same without this one.",
-    "Carrying the group energy on their back. Respect.",
-    "Statistically, the most needed person in this chat today.",
-    "The universe picked. We just announced it.",
-    "Undefeated. Unbothered. MVP.",
-]
-
 HOT_VERDICTS = [
     (15,  "🧊 Absolutely not. Ice cold."),
     (35,  "😬 Not great. The vibes said no."),
@@ -356,43 +345,4 @@ HOT_VERDICTS = [
     (75,  "🔥 Lowkey hot. Solid choice."),
     (90,  "🌶️ Very hot. The group approves."),
     (100, "💥 MAXIMUM HOT. Undeniably elite."),
-]
-
-PREDICT_FALLBACK_LINES = [
-    "The crystal ball sees chaos ahead. Proceed with caution.",
-    "All signs point to yes — but the universe reserves the right to change its mind.",
-    "The stars have consulted. The answer is aggressively unclear.",
-    "Probability says maybe. Fate says why not. Nobody asked either of them.",
-    "The cosmic committee reviewed this. They were divided.",
-    "The future is foggy but the vibes are sending something.",
-    "The timeline branch on this one is looking... interesting.",
-    "Bold move. The universe is watching with popcorn.",
-    "Unclear. The oracle is on lunch break.",
-    "The outcome depends entirely on choices you have already made. Good luck.",
-]
-
-TOSS_VERDICTS = [
-    "The universe has selected its champion.",
-    "Fate has spoken. No appeals.",
-    "The algorithm chose wisely.",
-    "Picked with zero bias. Probably.",
-    "The cosmic coin has landed.",
-    "This selection is legally binding.",
-    "The stars have converged on this one.",
-    "No take backs. The pick is final.",
-]
-
-# ── Birthdays ─────────────────────────────────────────────────────────────────
-
-BIRTHDAY_MESSAGES = [
-    "🎂 Happy Birthday, {name}! May your day be as amazing as you are! 🎉",
-    "🎈 It's {name}'s birthday! Wishing you an absolutely legendary day! 🥳",
-    "🎁 Everyone say happy birthday to {name}! 🎂 May this year be your best yet!",
-    "🕯️ Today is {name}'s special day! Happy Birthday — the group is celebrating with you! 🎊",
-    "🎉 {name}, the universe has confirmed: today is YOUR day. Happy Birthday! 🌟",
-]
-
-_MONTH_NAMES = [
-    "", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 ]
