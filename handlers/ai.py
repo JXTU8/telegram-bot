@@ -57,7 +57,7 @@ _AI_EXECUTOR = ThreadPoolExecutor(
 
 SEARCH_CACHE_TTL_SECONDS = max(0, env_int("SEARCH_CACHE_TTL_SECONDS", 900))
 SEARCH_CACHE_MAX_ITEMS = 128
-MAX_ASK_LENGTH = 500
+MAX_ASK_LENGTH = 1000
 _SERPER_TIMEOUT = (2, 5)
 _GEMINI_TIMEOUT_SECONDS = 45.0
 
@@ -158,7 +158,7 @@ def _gemini_complete(
             system_instruction=system_instruction,
             max_output_tokens=max_tokens,
             # Gemini 3.x models use thinking_level (not thinking_budget).
-            thinking_config=types.ThinkingConfig(thinking_level="low"),
+            thinking_config=types.ThinkingConfig(thinking_level="medium"),
             automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
             automatic_continuation=False,
             http_options=types.HttpOptions(
