@@ -48,6 +48,18 @@
 - Something that broke
 -->
 
+## v1.1.0 — 2026-11-15 — Global bug reporting
+
+### Added
+- `/bug <description>` — report a bug straight to the developer from any group or DM
+- Reports arrive with the description, username, a copyable user ID and the chat name
+- One-time notice introducing `/bug`, shown on the first command in each group
+- `/bug` usage is now listed in `/help`; `/banbug` and `/unbanbug` let the owner block abuse
+
+### Changed
+- `/bug` is rate-limited to one report per 10 minutes per user (configurable)
+- Background trackers now share one handler so command stats actually record usage
+
 ## v1.0.2 — 2026-11-15 — Changelog-driven /log and codebase cleanup
 
 ### Added

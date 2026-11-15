@@ -54,6 +54,17 @@ BOT_OWNER_USERNAMES: set[str] = {
 }
 
 
+# ── Bug reporting ────────────────────────────────────────────────────────────
+# Where /bug reports are forwarded. A dedicated ID lets you send reports to a
+# developer chat or a staff group; if unset, reports go to the bot owner.
+# Negative values are fine (Telegram group/supergroup IDs are negative).
+BUG_ADMIN_ID: int = env_int("BUG_ADMIN_ID", BOT_OWNER_ID)
+
+# One report per user per window. Redis-backed, so it survives restarts.
+# Clamped to at least 60s so a typo in the env var can't disable moderation.
+BUG_COOLDOWN_SECONDS: int = max(60, env_int("BUG_COOLDOWN_SECONDS", 600))
+
+
 # ── Countdown defaults (24-hour, MYT) ────────────────────────────────────────
 
 DEFAULT_REMINDER_HOUR: int = env_int("DEFAULT_REMINDER_HOUR", 12)

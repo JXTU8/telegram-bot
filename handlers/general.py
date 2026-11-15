@@ -16,7 +16,12 @@ import logging
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
+from config import BUG_COOLDOWN_SECONDS
+
 logger = logging.getLogger(__name__)
+
+# Keep the /bug help text in sync with the configured rate limit.
+_BUG_COOLDOWN_MINUTES = max(1, BUG_COOLDOWN_SECONDS // 60)
 
 
 # ── /start ────────────────────────────────────────────────────────────────────
@@ -89,6 +94,8 @@ HELP_PAGES = {
     ),
     "other": (
         "⚙️ *Other*\n\n"
+        "/bug <what went wrong> — report a bug directly to the developer\n"
+        f"_(works here, in any group, or in a DM · one report per {_BUG_COOLDOWN_MINUTES} min)_\n"
         "/log — latest release notes\n"
         "/log all — every released version\n"
         "/log 1.0.1 — notes for one version\n"

@@ -7,6 +7,7 @@ STRUCTURAL CHANGE (refactor):
 
         handlers/general.py   /start, /help, /cancel
         handlers/log.py       /log (release notes)
+        handlers/bug.py       /bug, /banbug, /unbanbug
         handlers/stats.py     /leaderboard, /recap, /stats, /profile
         handlers/admin.py     /status, /ban family, /say, /id, /cmdstats
         handlers/tracking.py  background trackers, error handler, timeout

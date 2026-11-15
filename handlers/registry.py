@@ -5,7 +5,7 @@ The bot's wiring diagram: which update goes to which handler, in which order.
 
 STRUCTURAL CHANGE (refactor):
     ``bot.py`` used to contain ~120 lines of registration: the ban gate, two
-    wrapper factories, three hand-built ConversationHandlers, 35 add_handler
+    wrapper factories, three hand-built ConversationHandlers, 37 add_handler
     calls and the startup hook. It mixed *policy* (what the bot does) with
     *plumbing* (how it starts). Now bot.py only builds the Application, and all
     plumbing is here, in one declarative place.
@@ -41,6 +41,7 @@ from handlers.ai import (
     ask_command, ask_followup_handler, choose_start, received_decision,
     received_options,
 )
+from handlers.bug import banbug_command, bug_command, unbanbug_command
 from handlers.countdown import (
     add_countdown_start, cancel, editcountdown_start, list_countdown,
     received_date, received_edit_field, received_edit_value, received_name,
@@ -63,10 +64,7 @@ from handlers.luck import (
 from handlers.stats import (
     leaderboard_command, profile_command, recap_command, stats_command,
 )
-from handlers.tracking import (
-    command_stats_tracker, conversation_timeout, error_handler,
-    seen_user_tracker,
-)
+from handlers.tracking import conversation_timeout, error_handler, passive_tracker
 
 logger = logging.getLogger(__name__)
 
@@ -156,9 +154,9 @@ def _conversation_handlers() -> list[ConversationHandler]:
 
 
 # ── Command table ────────────────────────────────────────────────────────────
-# STRUCTURAL CHANGE: this replaces 37 near-identical add_handler calls. The two
-# countdown list/remove commands opt out of the thread-reply shim because they
-# already build their own HTML replies directly.
+# STRUCTURAL CHANGE: this replaces 37 near-identical add_handler calls (now 40
+# with /bug, /banbug, /unbanbug). The two countdown list/remove commands opt out
+# of the thread-reply shim because they build their own HTML replies directly.
 
 def _command_handlers() -> list[CommandHandler]:
     def cmd(name: str, handler, *, threaded: bool = True) -> CommandHandler:
@@ -170,6 +168,7 @@ def _command_handlers() -> list[CommandHandler]:
         cmd("start",           start_command),
         cmd("help",            help_command),
         cmd("log",             log_command),
+        cmd("bug",             bug_command),
         cmd("cancel",          cancel_command),
         cmd("ask",             ask_command),
         cmd("listcountdown",   list_countdown, threaded=False),
@@ -202,6 +201,8 @@ def _command_handlers() -> list[CommandHandler]:
         cmd("ban",             ban_command),
         cmd("unban",           unban_command),
         cmd("banlist",         banlist_command),
+        cmd("banbug",          banbug_command),
+        cmd("unbanbug",        unbanbug_command),
         cmd("say",             say_command),
         cmd("id",              id_command),
     ]
@@ -232,9 +233,10 @@ def register_handlers(app) -> None:
         _threaded(ask_followup_handler),
     ))
 
-    # group 1 — passive tracking; runs alongside group 0, never blocks it.
-    app.add_handler(MessageHandler(filters.ALL, seen_user_tracker), group=1)
-    app.add_handler(MessageHandler(filters.COMMAND, command_stats_tracker), group=1)
+    # group 1 — ONE passive tracker. PTB runs at most one handler per group, so
+    # seen-user tracking, command stats and the one-time /bug notice are all
+    # dispatched from handlers/tracking.passive_tracker.
+    app.add_handler(MessageHandler(filters.ALL, passive_tracker), group=1)
 
     # group 2 — number guesses; deliberately isolated from the trackers.
     app.add_handler(MessageHandler(

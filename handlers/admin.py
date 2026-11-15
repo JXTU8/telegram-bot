@@ -18,12 +18,13 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from changelog import current_version
-from config import SERPER_API_KEY, TIMEZONE
+from config import BUG_ADMIN_ID, SERPER_API_KEY, TIMEZONE
 from db import redis
 from helpers import (
     BOT_OWNER_ID, _display_user, _escape_md, _is_owner, owner_only,
 )
 from stores.ban_store import ban_user, get_banned_users, unban_user
+from stores.bug_store import get_announced_chats, get_bug_banned_users
 from stores.stats_store import get_cmd_stats, get_cmd_stats_today
 
 logger = logging.getLogger(__name__)
@@ -59,6 +60,10 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     redis_detail = _escape_md(redis_msg[:120].replace("`", "").replace("\n", " "))
     banned_count = len(await asyncio.to_thread(get_banned_users))
+    bug_bans, announced_chats = await asyncio.gather(
+        asyncio.to_thread(get_bug_banned_users),
+        asyncio.to_thread(get_announced_chats),
+    )
 
     lines = [
         "🧪 *Bot Status*",
@@ -68,6 +73,9 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         f"Job queue: *{'ok' if context.application.job_queue else 'missing'}*",
         f"Scheduled jobs: *{job_count if job_count >= 0 else 'unknown'}*",
         f"Banned users: *{banned_count}*",
+        f"Bug reports →: *{BUG_ADMIN_ID or 'not configured'}*",
+        f"Bug-report bans: *{len(bug_bans)}*",
+        f"Groups announced: *{len(announced_chats)}*",
         f"BOT\\_TOKEN: *{_env_status('BOT_TOKEN')}*",
         f"Redis URL/token: *{_env_status('UPSTASH_REDIS_REST_URL')}/{_env_status('UPSTASH_REDIS_REST_TOKEN')}*",
         f"Gemini: *{'ready' if gemini_client else 'missing key'}*",

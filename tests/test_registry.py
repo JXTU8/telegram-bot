@@ -19,12 +19,12 @@ import handlers.misc as facade
 from handlers import registry
 
 _EXPECTED_COMMANDS = {
-    "start", "help", "log", "cancel", "ask", "listcountdown",
+    "start", "help", "log", "bug", "cancel", "ask", "listcountdown",
     "removecountdown", "luck", "luckboard", "streak", "ship", "shipboard",
     "roast", "compliment", "vibecheck", "truth", "dare", "wouldyourather",
     "coinflip", "8ball", "curse", "bless", "decide", "game", "hot",
     "cmdstats", "stats", "leaderboard", "recap", "profile", "status",
-    "lucktest", "ban", "unban", "banlist", "say", "id",
+    "lucktest", "ban", "unban", "banlist", "banbug", "unbanbug", "say", "id",
 }
 
 
@@ -55,13 +55,17 @@ class RegistryTests(unittest.TestCase):
 
         groups = [group for group, _ in app.registered]
         self.assertEqual(groups.count(-1), 1, "ban gate must be alone in group -1")
-        self.assertEqual(groups.count(1), 2, "seen-user + cmd-stats trackers")
+        # PTB runs at most ONE handler per group, so group 1 must be a single
+        # passive_tracker that dispatches all background work.
+        self.assertEqual(groups.count(1), 1, "one passive tracker in group 1")
         self.assertEqual(groups.count(2), 1, "game guess handler")
         self.assertEqual(len(app.error_handlers), 1)
         self.assertEqual(
             sum(1 for _, handler in app.registered
                 if isinstance(handler, ConversationHandler)), 3,
         )
+        group_one = next(handler for group, handler in app.registered if group == 1)
+        self.assertEqual(group_one.callback.__name__, "passive_tracker")
 
     def test_compatibility_facade_still_exports_every_old_name(self):
         for name in facade.__all__:

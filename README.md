@@ -17,6 +17,7 @@ A Telegram group bot for countdowns, AI-powered commands, daily luck, ships, gam
 | 🎲 **Decisions** | `/choose` wizard, `/decide`, `/coinflip` |
 | 🎉 **Fun** | `/truth`, `/dare`, `/wouldyourather`, `/vibecheck`, `/curse`, `/bless`, `/hot` |
 | 📢 **Release notes** | `/log`, `/log all`, `/log <version>` — edited by writing one plain-text file |
+| 🐞 **Bug reports** | `/bug` from any chat → forwarded to the developer, rate-limited, with `/banbug` moderation and a one-time group notice |
 
 ---
 
@@ -46,6 +47,8 @@ All of them are read in one place: `config.py`.
 | `SERPER_API_KEY` | ⚠️ | Enables web search in `/ask` |
 | `BOT_OWNER_ID` | ⚠️ | Telegram user ID of the bot owner (unlocks `/status`, `/lucktest`, `/ban`) |
 | `BOT_OWNER_USERNAME` | ⚠️ | Username(s) of the bot owner, comma-separated |
+| `BUG_ADMIN_ID` | ⚠️ | Where `/bug` reports are sent (your user ID, or a staff group ID). Falls back to `BOT_OWNER_ID` |
+| `BUG_COOLDOWN_SECONDS` | ➖ | Seconds between reports from one user (default: `600`, minimum `60`) |
 | `RENDER_URL` | ⚠️ | Your Render service URL — enables the self-ping keep-alive |
 | `PORT` | ➖ | Port for the Flask keep-alive server (default: `8080`) |
 | `DEFAULT_REMINDER_HOUR` | ➖ | Default countdown reminder hour in MYT (default: `12`) |
@@ -80,6 +83,8 @@ pip install -r requirements.txt
 export BOT_TOKEN=...
 export UPSTASH_REDIS_REST_URL=...
 export UPSTASH_REDIS_REST_TOKEN=...
+export BOT_OWNER_ID=123456789      # unlocks /status, /banbug, ...
+export BUG_ADMIN_ID=123456789      # optional: where /bug reports land (defaults to BOT_OWNER_ID)
 
 # 3. Run
 python bot.py
@@ -159,9 +164,51 @@ python -m unittest discover -s tests -v
 | `/log all` | List every released version |
 | `/log 1.0.1` | Notes for one specific version (`v1.0.1` also works) |
 | `/log help` | In-chat guide for editing the notes |
+| `/bug <description>` | Report a bug to the developer — works in any group or DM, one report per 10 min |
 | `/cancel` | Cancel an active setup wizard |
 | `/status` | Bot health check (owner only) |
 | `/lucktest <score>` | Preview a luck card without saving (owner only) |
+| `/banbug <user_id>` | Block a user from `/bug` (owner only) |
+| `/unbanbug <user_id>` | Restore their `/bug` access (owner only) |
+
+---
+
+## 🐞 Bug reporting (`/bug`)
+
+Anyone can run `/bug <description>` in a group **or** in a private chat. The bot
+forwards a formatted report to `BUG_ADMIN_ID` (or `BOT_OWNER_ID` if unset):
+
+```
+🐞 New Bug Report
+
+📝 Description
+<whatever they typed>
+
+👤 From: Alice — @alice
+🆔 User ID: `123456789`          ← tap to copy
+💬 Chat: My Group · `-1001234567`
+🕐 When: 2026-11-15 15:22 MYT
+
+🚫 Block /bug: `/banbug 123456789`
+🔨 Ban from bot: `/ban 123456789`
+```
+
+- **Rate limit:** one report per user every `BUG_COOLDOWN_SECONDS` (default 10
+  min). The window is a Redis `SET NX EX` key, so it survives restarts and cannot
+  be bypassed by two simultaneous messages. Failures fail **closed**.
+- **Moderation:** `/banbug <user_id>` / `/unbanbug <user_id>` (owner only). Both
+  also accept a reply to the user's message or a mention from Telegram's picker.
+  Bans are stored in Redis (`bug_banned_users`) and checked before anything else.
+  Blocked reporters are ignored silently.
+- **First-time group notice:** on the very first command in a group, the bot
+  posts a one-time introduction to `/bug`. The chat ID is added to the persistent
+  Redis set `bug_announced_chats` with an atomic `SADD`, so the notice can never
+  repeat — even across redeploys or concurrent commands.
+- `/status` shows the destination ID, the number of blocked reporters and how
+  many groups have been announced.
+
+> ⚠️ If neither `BUG_ADMIN_ID` nor `BOT_OWNER_ID` is set, `/bug` replies that
+> reporting is not configured instead of silently dropping reports.
 
 ---
 
@@ -224,9 +271,10 @@ handlers/
   registry.py           ← the wiring diagram: ban gate, conversations, command table
   general.py            ← /start, /help, /cancel
   log.py                ← /log rendering + subcommands (reads changelog.py)
+  bug.py                ← /bug, /banbug, /unbanbug (report forwarding + moderation)
   stats.py              ← /leaderboard, /recap, /stats, /profile
   admin.py              ← /status, /ban family, /say, /id, /cmdstats
-  tracking.py           ← background trackers, error handler, conversation timeout
+  tracking.py           ← ONE group-1 passive tracker, one-time notice, error handler
   ai.py                 ← Gemini client, Serper search, /ask, /choose
   countdown.py          ← /addcountdown wizard, daily reminders
   fun.py                ← ship, roast, game, and other fun commands
@@ -240,6 +288,7 @@ stores/
   user_store.py         ← Redis: seen_users:<chat_id> (90-day TTL)
   stats_store.py        ← Redis: cmdstats:* hashes
   ban_store.py          ← Redis: banned_users (global list)
+  bug_store.py          ← Redis: bug bans, cooldown windows, announced-group set
   _utils.py             ← shared Redis value decoders
 ```
 
@@ -253,6 +302,7 @@ stores/
 | `os.getenv` calls scattered across `helpers.py`, `luck.py`, `ai.py`, `keep_alive.py` | All env reads in `config.py` | One place to audit a deployment |
 | Duplicate background-failure callback and two copies of the game reveal timer | `helpers.log_background_failure` + one `job.data`-driven reveal callback | Less copy-paste, fewer divergent bug fixes |
 | `/luck` referenced an undefined `is_username_mention` | Unused argument removed | `/luck` no longer raises `NameError` |
+| Two separate handlers in group 1 (`filters.ALL` first) | One `passive_tracker` dispatching all three background jobs | PTB runs only **one handler per group** — command stats never used to fire; now they do, and the one-time `/bug` notice is reliable |
 
 ### Key design decisions
 
@@ -260,7 +310,8 @@ stores/
 - **Async throughout** — blocking store calls are wrapped in `asyncio.to_thread`. The bot stays responsive under load.
 - **Deterministic daily randomness** — luck and ship scores use `random.Random(seed)` seeded by `user_id + date`, so results are consistent within a day but change the next.
 - **Job persistence** — countdown reminders survive bot restarts via Redis + `restore_jobs` on startup.
-- **Handler groups matter** — the ban gate is group `-1`, passive trackers group `1`, game guesses group `2`. `handlers/registry.py` documents and preserves that ordering.
+- **Handler groups matter** — the ban gate is group `-1`, the single passive tracker group `1`, game guesses group `2`. `handlers/registry.py` documents and preserves that ordering.
+- **Atomic moderation state** — `/bug` cooldowns (`SET NX EX`), bans (JSON list) and announced groups (`SADD`) all live in Redis, so restarts and concurrent updates cannot reset a limit or duplicate a notice.
 
 ---
 
