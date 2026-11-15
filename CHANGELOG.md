@@ -48,19 +48,19 @@
 - Something that broke
 -->
 
-## v1.1.0 — 2026-11-15 — Global bug reporting
+## v1.0.3 — 2026-11-15 — Global bug reporting
 
 ### Added
 - `/bug <description>` — report a bug straight to the developer from any group or DM
 - Reports arrive with the description, username, a copyable user ID and the chat name
 - One-time notice introducing `/bug`, shown on the first command in each group
-- `/bug` usage is now listed in `/help`; `/banbug` and `/unbanbug` let the owner block abuse
+- `/bug` usage is now listed in `/help`; 
 
 ### Changed
-- `/bug` is rate-limited to one report per 10 minutes per user (configurable)
+- `/bug` is rate-limited to one report
 - Background trackers now share one handler so command stats actually record usage
 
-## v1.0.2 — 2026-11-15 — Changelog-driven /log and codebase cleanup
+## v1.0.2 — 2026-11-14 — Changelog-driven /log and codebase cleanup
 
 ### Added
 - `/log` now reads its notes from `CHANGELOG.md` — edit one plain-text file, no code changes
@@ -76,7 +76,7 @@
 - `/luck` no longer crashes on a leftover undefined variable
 - The number-guessing game no longer defines two separate reveal timers
 
-## v1.0.1 — Gemini upgrade
+## v1.0.1 — 2026-11-10 — Gemini upgrade
 
 ### What's new
 - `/ask` now uses Gemini Flash

@@ -27,7 +27,6 @@ from collections import OrderedDict
 from telegram import Update
 from telegram.ext import ContextTypes, ConversationHandler
 
-from config import BUG_COOLDOWN_SECONDS
 from helpers import _delete_tracked, _display_user, _thread_kwargs
 from stores.bug_store import claim_bug_announcement
 from stores.stats_store import increment_cmd_stat
@@ -83,13 +82,10 @@ async def command_stats_tracker(update: Update, context: ContextTypes.DEFAULT_TY
 
 # ── One-time /bug announcement ──────────────────────────────────────────────
 
-_COOLDOWN_MINUTES = max(1, BUG_COOLDOWN_SECONDS // 60)
-
 BUG_ANNOUNCEMENT_TEXT = (
     "🐞 *New: Bug Reports*\n\n"
     "Spotted something broken? Tell the developer directly:\n"
-    "`/bug <what happened>` — works here, in any group, or in a DM.\n\n"
-    f"_One report per {_COOLDOWN_MINUTES} minutes, please. Abuse gets blocked._"
+    "`/bug <what happened>` — works here, in any group, or in a DM."
 )
 
 

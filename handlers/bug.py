@@ -34,7 +34,6 @@ from stores.bug_store import (
 logger = logging.getLogger(__name__)
 
 MAX_DESCRIPTION_LENGTH = 1000
-_COOLDOWN_MINUTES = max(1, BUG_COOLDOWN_SECONDS // 60)
 
 
 # ── Admin-facing message ──────────────────────────────────────────────────────
@@ -113,8 +112,7 @@ async def bug_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             "🐞 *Report a Bug*\n\n"
             "Usage: `/bug <what went wrong>`\n"
             "_e.g. `/bug /luck shows 0 after midnight`_\n\n"
-            "Works here, in any group, or in a private chat with me.\n"
-            f"_One report per {_COOLDOWN_MINUTES} min per user._",
+            "Works here, in any group, or in a private chat with me.",
             parse_mode="Markdown",
         )
         return

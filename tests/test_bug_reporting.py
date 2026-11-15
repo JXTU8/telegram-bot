@@ -216,6 +216,7 @@ class BugCommandTests(_RedisMixin, unittest.IsolatedAsyncioTestCase):
         await bug_command(update, ctx)
         self.assertEqual(bot.sent, [])
         self.assertIn("Usage", "".join(message.replies))
+        self.assertNotIn("One report per", "".join(message.replies))
 
     async def test_overlong_description_is_rejected(self):
         update, ctx, bot, message = self._make(["x" * 1001])
@@ -305,7 +306,7 @@ class BugAnnouncementTests(_RedisMixin, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(first.sent), 1)
         self.assertEqual(second.sent, [])
         self.assertIn("/bug", first.sent[0]["text"])
-        self.assertIn("One report per", first.sent[0]["text"])
+        self.assertNotIn("One report per", first.sent[0]["text"])
 
     async def test_dms_and_plain_messages_do_not_announce(self):
         dm = await self._run_tracker(_Chat(chat_id=1, chat_type="private"), "/start")
@@ -342,7 +343,7 @@ class BugAnnouncementTests(_RedisMixin, unittest.IsolatedAsyncioTestCase):
 class ChangelogAndHelpTests(unittest.TestCase):
     def test_help_documents_bug_usage(self):
         self.assertIn("/bug <what went wrong>", HELP_PAGES["other"])
-        self.assertIn("one report per", HELP_PAGES["other"])
+        self.assertNotIn("one report per", HELP_PAGES["other"].lower())
 
     def test_latest_log_entry_announces_bug(self):
         releases = load_releases()
