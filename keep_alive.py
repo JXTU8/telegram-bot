@@ -4,16 +4,20 @@ keep_alive.py
 Spins up a tiny Flask web server so Render sees an active HTTP service
 and doesn't spin it down. The bot pings itself every 14 minutes via
 the RENDER_URL environment variable to prevent the free-tier sleep.
+
+STRUCTURAL CHANGE (refactor): PORT and RENDER_URL are now read in config.py
+with every other environment variable; ``time`` is imported once at module
+scope instead of inside the ping loop.
 """
 
 import logging
-import os
 import threading
+import time
 
 import requests
 from flask import Flask
 
-from config import env_int
+from config import PORT, RENDER_URL
 
 logger = logging.getLogger(__name__)
 
@@ -35,9 +39,7 @@ def health():
 
 def _self_ping() -> None:
     """Ping our own URL every 14 minutes to prevent Render free-tier sleep."""
-    import time
-
-    url = os.getenv("RENDER_URL", "").rstrip("/")
+    url = RENDER_URL
     if not url:
         logger.warning(
             "RENDER_URL not set — self-ping disabled. "
@@ -66,7 +68,7 @@ def keep_alive() -> None:
             return
         _started = True
 
-    port = env_int("PORT", 8080)
+    port = PORT
 
     # Web server thread
     server_thread = threading.Thread(

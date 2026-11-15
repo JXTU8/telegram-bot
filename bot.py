@@ -1,72 +1,27 @@
 """
 bot.py
 ──────
-Entry point. Registers all handlers and starts the bot.
-All logic lives in handlers/ — edit this file only when adding/removing commands.
+Entry point. Build the Application, wire up the handlers, start polling.
+
+STRUCTURAL CHANGE (refactor):
+    This file used to hold the ban gate, two wrapper factories, all three
+    ConversationHandlers and 35 individual add_handler calls. All of that
+    plumbing now lives in ``handlers/registry.py``; this file is deliberately
+    small so startup behaviour can be read in one screen.
+
+    To add a command: write the handler in the appropriate handlers/ module,
+    then add one line to ``_command_handlers()`` in handlers/registry.py.
+    You should not need to touch this file.
 """
 
-import asyncio
 import logging
-import time as _time
-from datetime import datetime
 
 from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder, CallbackQueryHandler, CommandHandler,
-    ConversationHandler, MessageHandler, TypeHandler, filters,
-)
+from telegram.ext import ApplicationBuilder
 
-from config import TOKEN, TIMEZONE
+from config import TOKEN
+from handlers.registry import on_startup, register_handlers
 from keep_alive import keep_alive
-from stores.ban_store import is_banned
-
-# ── Ban cache — avoids a Redis round-trip on every single update/click ────────
-# Banned status is cached per-user for 5 minutes. A newly banned user can still
-# send up to one more update within the cache window, which is acceptable.
-_BAN_CACHE: dict = {}          # user_id → (monotonic_timestamp, is_banned: bool)
-_BAN_CACHE_TTL = 300           # seconds
-
-# ── Handlers ──────────────────────────────────────────────────────────────────
-from handlers.misc import (
-    start_command, help_command, help_callback, log_command,
-    stats_command, profile_command, status_command,
-    seen_user_tracker, error_handler, conversation_timeout,
-    cancel_command, leaderboard_command, recap_command,
-    ban_command, unban_command, banlist_command, say_command,
-    id_command, cmdstats_command, command_stats_tracker,
-)
-from handlers.countdown import (
-    add_countdown_start, received_name, received_date, received_time,
-    editcountdown_start, received_edit_field, received_edit_value,
-    cancel, list_countdown, remove_countdown_cmd,
-    restore_jobs,
-)
-from handlers.ai import (
-    ask_command, ask_followup_handler,
-    choose_start, received_decision, received_options,
-)
-from handlers.luck import (
-    luck_command, luckboard_command, streak_command, lucktest_command,
-)
-from handlers.fun import (
-    ship_command, shipboard_command,
-    roast_command, compliment_command,
-    vibecheck_command,
-    truth_command, dare_command, would_you_rather_command,
-    coinflip_command, eightball_command,
-    curse_command, bless_command, hot_command,
-    decide_command,
-    game_command, game_guess_handler,
-)
-
-# ── Conversation states ───────────────────────────────────────────────────────
-from helpers import (
-    ASK_NAME, ASK_DATE, ASK_TIME,
-    ASK_DECISION, ASK_OPTIONS,
-    ASK_EDIT_FIELD, ASK_EDIT_VALUE,
-    CONV_TIMEOUT,
-    _patch_message_reply_to_thread,
-)
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -74,46 +29,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-
-# ── Ban gate ──────────────────────────────────────────────────────────────────
-
-async def ban_gate(update: Update, context) -> None:
-    from telegram.ext import ApplicationHandlerStop
-    from helpers import _is_owner
-    user = update.effective_user
-    if not user or user.is_bot:
-        return
-    if _is_owner(user):
-        return
-    uid = user.id
-    now = _time.monotonic()
-    cached = _BAN_CACHE.get(uid)
-    if cached and now - cached[0] < _BAN_CACHE_TTL:
-        if cached[1]:           # cached as banned
-            raise ApplicationHandlerStop
-        return                  # cached as not banned — skip Redis entirely
-    banned = await asyncio.to_thread(is_banned, uid)
-    _BAN_CACHE[uid] = (now, banned)
-    if banned:
-        raise ApplicationHandlerStop
-
-
-# ── Startup hook ──────────────────────────────────────────────────────────────
-
-async def on_startup(app) -> None:
-    """Runs once after the bot connects. Restores countdown jobs from Redis."""
-    for restore_fn, label in [
-        (lambda: restore_jobs(app),           "countdown jobs"),
-    ]:
-        try:
-            await restore_fn()
-        except Exception as e:
-            logger.error("on_startup: restoring %s failed: %s", label, e)
-
-    logger.info("on_startup complete — countdown jobs restored.")
-
-
-# ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
     keep_alive()
@@ -130,126 +45,13 @@ def main() -> None:
         .build()
     )
 
-    def _threaded(handler):
-        async def wrapper(update: Update, context):
-            message = getattr(update, "message", None)
-            if message:
-                _patch_message_reply_to_thread(update)
-            return await handler(update, context)
-        return wrapper
-
-    # ── Helper: only fire CommandHandlers on real messages, not edits/channel posts ──
-    def _cmd(name, handler, *, threaded=True):
-        active_handler = _threaded(handler) if threaded else handler
-        return CommandHandler(name, active_handler, filters=filters.UpdateType.MESSAGE)
-
-    # ── Ban gate — must be registered first, runs before everything else ──────
-    app.add_handler(TypeHandler(Update, ban_gate), group=-1)
-
-    # ── Conversation handlers ─────────────────────────────────────────────────
-    countdown_conv = ConversationHandler(
-        entry_points=[CommandHandler("addcountdown", add_countdown_start)],
-        states={
-            ASK_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_name)],
-            ASK_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_date)],
-            ASK_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_time)],
-            ConversationHandler.TIMEOUT: [MessageHandler(filters.ALL, conversation_timeout)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-        conversation_timeout=CONV_TIMEOUT,
-    )
-
-    choose_conv = ConversationHandler(
-        entry_points=[CommandHandler("choose", _threaded(choose_start))],
-        states={
-            ASK_DECISION: [MessageHandler(filters.TEXT & ~filters.COMMAND, _threaded(received_decision))],
-            ASK_OPTIONS:  [MessageHandler(filters.TEXT & ~filters.COMMAND, _threaded(received_options))],
-            ConversationHandler.TIMEOUT: [MessageHandler(filters.ALL, _threaded(conversation_timeout))],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-        conversation_timeout=CONV_TIMEOUT,
-    )
-
-    edit_conv = ConversationHandler(
-        entry_points=[CommandHandler("editcountdown", editcountdown_start)],
-        states={
-            ASK_EDIT_FIELD: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_edit_field)],
-            ASK_EDIT_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_edit_value)],
-            ConversationHandler.TIMEOUT: [MessageHandler(filters.ALL, conversation_timeout)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-        conversation_timeout=CONV_TIMEOUT,
-    )
-
-    # ── Callback handlers (most specific patterns first) ──────────────────────
-    # Patterns use "prefix:.*" so they work under both re.match (PTB 20.x) and
-    # re.fullmatch (PTB 21.x).  The old "^prefix:" form only matched the literal
-    # six-character string "prefix:" under fullmatch, so the handlers were never
-    # called and every inline button hung with a loading animation.
-    app.add_handler(CallbackQueryHandler(help_callback,         pattern=r"^help:.+"))
-
-    # ── Conversation handlers ─────────────────────────────────────────────────
-    app.add_handler(countdown_conv)
-    app.add_handler(choose_conv)
-    app.add_handler(edit_conv)
-
-    # ── Commands ──────────────────────────────────────────────────────────────
-    app.add_handler(_cmd("start",           start_command))
-    app.add_handler(_cmd("help",            help_command))
-    app.add_handler(_cmd("log",             log_command))
-    app.add_handler(_cmd("cancel",          cancel_command))
-    app.add_handler(_cmd("ask",             ask_command))
-    app.add_handler(_cmd("listcountdown",   list_countdown, threaded=False))
-    app.add_handler(_cmd("removecountdown", remove_countdown_cmd, threaded=False))
-    app.add_handler(_cmd("luck",            luck_command))
-    app.add_handler(_cmd("luckboard",       luckboard_command))
-    app.add_handler(_cmd("streak",          streak_command))
-    app.add_handler(_cmd("ship",            ship_command))
-    app.add_handler(_cmd("shipboard",       shipboard_command))
-    app.add_handler(_cmd("roast",           roast_command))
-    app.add_handler(_cmd("compliment",      compliment_command))
-    app.add_handler(_cmd("vibecheck",       vibecheck_command))
-    app.add_handler(_cmd("truth",           truth_command))
-    app.add_handler(_cmd("dare",            dare_command))
-    app.add_handler(_cmd("wouldyourather",  would_you_rather_command))
-    app.add_handler(_cmd("coinflip",        coinflip_command))
-    app.add_handler(_cmd("8ball",           eightball_command))
-    app.add_handler(_cmd("curse",           curse_command))
-    app.add_handler(_cmd("bless",           bless_command))
-    app.add_handler(_cmd("decide",          decide_command))
-    app.add_handler(_cmd("game",            game_command))
-    app.add_handler(_cmd("hot",             hot_command))
-    app.add_handler(_cmd("cmdstats",        cmdstats_command))
-    app.add_handler(_cmd("stats",           stats_command))
-    app.add_handler(_cmd("leaderboard",     leaderboard_command))
-    app.add_handler(_cmd("recap",           recap_command))
-    app.add_handler(_cmd("profile",         profile_command))
-    app.add_handler(_cmd("status",          status_command))
-    app.add_handler(_cmd("lucktest",        lucktest_command))
-    app.add_handler(_cmd("ban",             ban_command))
-    app.add_handler(_cmd("unban",           unban_command))
-    app.add_handler(_cmd("banlist",         banlist_command))
-    app.add_handler(_cmd("say",             say_command))
-    app.add_handler(_cmd("id",              id_command))
-
-    # ── Message handlers (group 0) ────────────────────────────────────────────
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.REPLY, _threaded(ask_followup_handler)))
-
-    # ── Message handlers (group 1) ────────────────────────────────────────────
-    app.add_handler(MessageHandler(filters.ALL,     seen_user_tracker),      group=1)
-    app.add_handler(MessageHandler(filters.COMMAND, command_stats_tracker),  group=1)
-
-    # ── Message handlers (group 2) ────────────────────────────────────────────
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _threaded(game_guess_handler)), group=2)
-
-    app.add_error_handler(error_handler)
+    register_handlers(app)
 
     logger.info("Bot is running...")
-    # Pass allowed_updates explicitly so Telegram resets any server-side filter it has
-    # cached from a previous run.  When allowed_updates is omitted (None), Telegram
-    # silently reuses the last value it was given — if that value ever excluded
-    # callback_query, every inline button goes undelivered indefinitely regardless of
-    # handler registration.  Update.ALL_TYPES fixes this permanently.
+    # Pass allowed_updates explicitly so Telegram resets any server-side filter
+    # cached from a previous run. When omitted, Telegram silently reuses the
+    # last value — if that ever excluded callback_query, every inline button
+    # goes undelivered regardless of handler registration.
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 

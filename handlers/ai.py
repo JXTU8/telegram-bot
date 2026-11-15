@@ -10,8 +10,8 @@ Search policy:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
-import os
 import random
 import threading
 import time
@@ -25,7 +25,12 @@ from telegram import Update
 from telegram.error import TelegramError
 from telegram.ext import ContextTypes, ConversationHandler
 
-from config import env_int
+# STRUCTURAL CHANGE (refactor): keys, model name, cache TTL and worker count are
+# now plain values from config.py rather than os.getenv calls in this module.
+from config import (
+    AI_THREAD_WORKERS, GEMINI_API_KEY, GEMINI_MODEL, SEARCH_CACHE_TTL_SECONDS,
+    SERPER_API_KEY,
+)
 from constants import THINKING_MESSAGES, VERDICT_LINES
 from helpers import (
     _track, _delete_tracked, ASK_DECISION, ASK_OPTIONS, CONV_TIMEOUT,
@@ -36,8 +41,6 @@ logger = logging.getLogger(__name__)
 
 # ── Gemini client ─────────────────────────────────────────────────────────────
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
 if GEMINI_API_KEY:
     gemini_client = genai.Client(api_key=GEMINI_API_KEY)
     logger.info("Gemini AI ready with model %s.", GEMINI_MODEL)
@@ -47,15 +50,13 @@ else:
 
 # ── Serper web search + LRU cache ────────────────────────────────────────────
 
-SERPER_API_KEY = os.getenv("SERPER_API_KEY", "")
 SERPER_URL = "https://google.serper.dev/search"
 _serper_local = threading.local()
 _AI_EXECUTOR = ThreadPoolExecutor(
-    max_workers=max(2, env_int("AI_THREAD_WORKERS", 3)),
+    max_workers=AI_THREAD_WORKERS,
     thread_name_prefix="ai-io",
 )
 
-SEARCH_CACHE_TTL_SECONDS = max(0, env_int("SEARCH_CACHE_TTL_SECONDS", 900))
 SEARCH_CACHE_MAX_ITEMS = 128
 MAX_ASK_LENGTH = 1000
 _SERPER_TIMEOUT = (2, 5)
@@ -266,9 +267,10 @@ def _ask_ctx_key(chat_id: int, message_id: int) -> str:
 
 
 def _save_ask_context(chat_id: int, message_id: int, history: list) -> None:
-    import json
+    # Imported lazily so the text helpers above remain unit-testable without
+    # Redis credentials being present.
+    from db import redis
     try:
-        from db import redis
         redis.set(
             _ask_ctx_key(chat_id, message_id),
             json.dumps(history, separators=(",", ":")),
@@ -279,9 +281,9 @@ def _save_ask_context(chat_id: int, message_id: int, history: list) -> None:
 
 
 def _load_ask_context(chat_id: int, message_id: int) -> list | None:
-    import json
+    # See _save_ask_context: Redis is only needed when a conversation is used.
+    from db import redis
     try:
-        from db import redis
         raw = redis.get(_ask_ctx_key(chat_id, message_id))
         if not raw:
             return None

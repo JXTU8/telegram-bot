@@ -16,6 +16,7 @@ A Telegram group bot for countdowns, AI-powered commands, daily luck, ships, gam
 | 📊 **Summary** | `/recap` (luck extremes, top ship, next countdown), `/leaderboard`, `/stats`, `/profile` |
 | 🎲 **Decisions** | `/choose` wizard, `/decide`, `/coinflip` |
 | 🎉 **Fun** | `/truth`, `/dare`, `/wouldyourather`, `/vibecheck`, `/curse`, `/bless`, `/hot` |
+| 📢 **Release notes** | `/log`, `/log all`, `/log <version>` — edited by writing one plain-text file |
 
 ---
 
@@ -23,15 +24,18 @@ A Telegram group bot for countdowns, AI-powered commands, daily luck, ships, gam
 
 - **Runtime** — Python 3.11+
 - **Bot framework** — [python-telegram-bot](https://github.com/python-telegram-bot/python-telegram-bot) v20 (async, job queue)
-- **AI** — [Google Gemini](https://ai.google.dev/) (`gemini-3.8-flash`) for fast free-tier inference
+- **AI** — [Google Gemini](https://ai.google.dev/) (default model `gemini-3.5-flash-lite`, override with `GEMINI_MODEL`)
 - **Web search** — [Serper](https://serper.dev/) (Google results, LRU cached)
 - **Database** — [Upstash Redis](https://upstash.com/) (serverless, REST)
+- **Release notes** — plain `CHANGELOG.md` (no database, no Python edits)
 - **Web server** — Flask (keep-alive endpoint for Render free tier)
 - **Deployment** — [Render](https://render.com/) (free web service)
 
 ---
 
 ## ⚙️ Environment Variables
+
+All of them are read in one place: `config.py`.
 
 | Variable | Required | Description |
 |---|---|---|
@@ -40,15 +44,20 @@ A Telegram group bot for countdowns, AI-powered commands, daily luck, ships, gam
 | `UPSTASH_REDIS_REST_TOKEN` | ✅ | Upstash Redis auth token |
 | `GEMINI_API_KEY` | ⚠️ | Enables `/ask`, `/roast`, `/compliment`, `/8ball`, `/hot` |
 | `SERPER_API_KEY` | ⚠️ | Enables web search in `/ask` |
-| `BOT_OWNER_ID` | ⚠️ | Telegram user ID of the bot owner (unlocks `/status`, `/lucktest`) |
+| `BOT_OWNER_ID` | ⚠️ | Telegram user ID of the bot owner (unlocks `/status`, `/lucktest`, `/ban`) |
 | `BOT_OWNER_USERNAME` | ⚠️ | Username(s) of the bot owner, comma-separated |
 | `RENDER_URL` | ⚠️ | Your Render service URL — enables the self-ping keep-alive |
+| `PORT` | ➖ | Port for the Flask keep-alive server (default: `8080`) |
 | `DEFAULT_REMINDER_HOUR` | ➖ | Default countdown reminder hour in MYT (default: `12`) |
 | `DEFAULT_REMINDER_MINUTE` | ➖ | Default countdown reminder minute (default: `0`) |
 | `FATE_LUCKY_ID` | ➖ | Force a user to always roll max luck |
 | `FATE_UNLUCKY_ID` | ➖ | Force a user to always roll min luck |
 | `SEARCH_CACHE_TTL_SECONDS` | ➖ | How long to cache Serper results (default: `900`) |
-| `GEMINI_MODEL` | ➖ | Gemini model to use (default: `gemini-3.8-flash`) |
+| `GEMINI_MODEL` | ➖ | Gemini model to use (default: `gemini-3.5-flash-lite`) |
+| `AI_THREAD_WORKERS` | ➖ | Threads for blocking AI I/O (default: `3`) |
+
+> 📌 The **bot version is not an env var**. It is read from the newest heading in
+> `CHANGELOG.md`, so `/log` and `/status` can never disagree — see the next section.
 
 ---
 
@@ -67,11 +76,19 @@ A Telegram group bot for countdowns, AI-powered commands, daily luck, ships, gam
 # 1. Clone and install
 pip install -r requirements.txt
 
-# 2. Copy and fill in your environment variables
-cp .env.example .env   # or export them manually
+# 2. Export the variables listed above (BOT_TOKEN + the two Redis ones are mandatory)
+export BOT_TOKEN=...
+export UPSTASH_REDIS_REST_URL=...
+export UPSTASH_REDIS_REST_TOKEN=...
 
 # 3. Run
 python bot.py
+```
+
+### Tests
+
+```bash
+python -m unittest discover -s tests -v
 ```
 
 ---
@@ -138,43 +155,112 @@ python bot.py
 |---|---|
 | `/start` | Introduction and quick-start |
 | `/help` | Paginated help menu by category |
-| `/log` | Latest bot update notes (`v1.0.1`) |
+| `/log` | Latest release notes |
+| `/log all` | List every released version |
+| `/log 1.0.1` | Notes for one specific version (`v1.0.1` also works) |
+| `/log help` | In-chat guide for editing the notes |
 | `/cancel` | Cancel an active setup wizard |
 | `/status` | Bot health check (owner only) |
 | `/lucktest <score>` | Preview a luck card without saving (owner only) |
 
 ---
 
+## 📝 Publishing an update (`/log`)
+
+**One file. No Python. No Markdown escaping.** Open `CHANGELOG.md`, copy the
+`TEMPLATE` comment block near the top, and paste it **above the newest `## v...`
+heading**:
+
+```markdown
+## v1.0.3 — 2026-11-20 — Short title for this release
+
+### Added
+- Something new (`/code` spans are safe)
+
+### Fixed
+- Something that broke
+```
+
+Then save. That's the whole workflow.
+
+| You write | The bot does |
+|---|---|
+| A new `## vX.Y.Z` section at the top | `/log` shows it as the latest release |
+| The version number | `/status` reports it, and the `/log` header uses it — no `VERSION` constant to bump |
+| `### Added` / `### Fixed` | Renders as a bold section |
+| `- item` (or `* item`, or a plain line) | Renders as a `•` bullet |
+| Older `## v...` sections left in place | `/log all` and `/log 1.0.1` keep working |
+| Backticks around `code` | Preserved as inline code; other Markdown characters are auto-escaped |
+
+Notes:
+
+- Everything before the first `## v...` heading, and everything inside
+  `<!-- ... -->`, is ignored — that's why the how-to guide and TEMPLATE can
+  live in the same file.
+- The date and title are optional. `-`, `–`, `—`, `|` and `:` all work as
+  separators.
+- Very long notes are split into several Telegram messages automatically.
+- **Hot reload:** a locally running bot re-reads the file on the next `/log`
+  call (the cache is keyed on file mtime + size). On Render, deploy/restart to
+  pick up the new file.
+- If the file is missing or empty, `/log` shows a friendly placeholder instead
+  of crashing, and `/status` falls back to version `0.0.0`.
+
+---
+
 ## 🏗️ Architecture
 
 ```
-bot.py                  ← entry point, handler registration
-config.py               ← env vars, timezone, version
-helpers.py              ← shared utilities (display, escape, admin check, RNG)
+bot.py                  ← entry point ONLY: build app + run_polling
+config.py               ← every env var, timezone, owner/fate settings
 constants.py            ← all static text (tiers, messages, quotes)
+helpers.py              ← shared utilities (display, escape, admin check, RNG)
+changelog.py            ← stdlib-only CHANGELOG.md parser + hot-reload cache
+CHANGELOG.md            ← 📝 THE /log CONTENT — edit this to publish an update
 db.py                   ← Upstash Redis client
 keep_alive.py           ← Flask server + self-ping thread
 
 handlers/
+  registry.py           ← the wiring diagram: ban gate, conversations, command table
+  general.py            ← /start, /help, /cancel
+  log.py                ← /log rendering + subcommands (reads changelog.py)
+  stats.py              ← /leaderboard, /recap, /stats, /profile
+  admin.py              ← /status, /ban family, /say, /id, /cmdstats
+  tracking.py           ← background trackers, error handler, conversation timeout
   ai.py                 ← Gemini client, Serper search, /ask, /choose
   countdown.py          ← /addcountdown wizard, daily reminders
   fun.py                ← ship, roast, game, and other fun commands
-  luck.py               ← luck engine, /luck, /luckboard, /streak
-  misc.py               ← /start, /help, /recap, /stats, /profile, /status
+  luck.py               ← luck engine, /luck, /luckboard, /streak, /lucktest
+  misc.py               ← compatibility facade only (re-exports old names, no logic)
 
 stores/
   countdown_store.py    ← Redis: countdowns:<chat_id>
   luck_store.py         ← Redis: luckboard:<chat_id>:<date>, fate_streak:<uid>
   ship_store.py         ← Redis: ship_pairs:<chat_id>:<bucket> (48 h TTL)
   user_store.py         ← Redis: seen_users:<chat_id> (90-day TTL)
+  stats_store.py        ← Redis: cmdstats:* hashes
+  ban_store.py          ← Redis: banned_users (global list)
+  _utils.py             ← shared Redis value decoders
 ```
+
+### What changed in the refactor
+
+| Before | After | Why |
+|---|---|---|
+| `/log` text hard-coded as an f-string in `misc.py`, version separate in `config.py` | `CHANGELOG.md` → `changelog.py` → `handlers/log.py` | One file to edit, no code or Markdown escaping, no version drift |
+| `handlers/misc.py` = 790 lines of unrelated commands | Split into `general` / `log` / `stats` / `admin` / `tracking` | Each file has one job; `misc.py` is now a documented compatibility shim |
+| `bot.py` held the ban gate, wrappers, 3 conversations and 37 `add_handler` calls | `handlers/registry.py` owns all wiring; `bot.py` is ~50 lines | Adding a command is a one-line edit; startup is readable in one screen |
+| `os.getenv` calls scattered across `helpers.py`, `luck.py`, `ai.py`, `keep_alive.py` | All env reads in `config.py` | One place to audit a deployment |
+| Duplicate background-failure callback and two copies of the game reveal timer | `helpers.log_background_failure` + one `job.data`-driven reveal callback | Less copy-paste, fewer divergent bug fixes |
+| `/luck` referenced an undefined `is_username_mention` | Unused argument removed | `/luck` no longer raises `NameError` |
 
 ### Key design decisions
 
-- **All persistence in Redis** — no SQL, no file system. Upstash free tier is enough for hundreds of groups.
+- **All persistence in Redis** — no SQL, no file system for live data. Upstash's free tier is enough for hundreds of groups. Release notes are the one exception: they are versioned plain text, committed with the code.
 - **Async throughout** — blocking store calls are wrapped in `asyncio.to_thread`. The bot stays responsive under load.
 - **Deterministic daily randomness** — luck and ship scores use `random.Random(seed)` seeded by `user_id + date`, so results are consistent within a day but change the next.
 - **Job persistence** — countdown reminders survive bot restarts via Redis + `restore_jobs` on startup.
+- **Handler groups matter** — the ban gate is group `-1`, passive trackers group `1`, game guesses group `2`. `handlers/registry.py` documents and preserves that ordering.
 
 ---
 

@@ -5,8 +5,8 @@ Shared utility functions, conversation states, and owner config.
 Imported by every handler — keep this free of handler-specific logic.
 """
 
+import asyncio
 import logging
-import os
 import random
 from datetime import date, datetime
 from functools import wraps
@@ -14,7 +14,10 @@ from functools import wraps
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from config import TIMEZONE, env_int
+# STRUCTURAL CHANGE (refactor): owner settings moved to config.py with all the
+# other env vars. They are re-exported here because handlers/fun.py and
+# handlers/admin.py historically import them from helpers.
+from config import BOT_OWNER_ID, BOT_OWNER_USERNAMES, TIMEZONE
 
 logger = logging.getLogger(__name__)
 
@@ -24,19 +27,14 @@ ASK_DECISION, ASK_OPTIONS = range(3, 5)
 ASK_EDIT_FIELD, ASK_EDIT_VALUE = range(5, 7)
 CONV_TIMEOUT = 90
 
-# ── Owner config ──────────────────────────────────────────────────────────────
-BOT_OWNER_ID = env_int("BOT_OWNER_ID", 0)
-BOT_OWNER_USERNAMES = {
-    username.strip().lstrip("@").casefold()
-    for username in os.getenv("BOT_OWNER_USERNAME", "").replace(",", " ").split()
-    if username.strip()
-}
-
 
 # ── Owner helpers ─────────────────────────────────────────────────────────────
 
 def _is_owner(user) -> bool:
     """Return True if the given Telegram user is the bot owner."""
+    # Some update types (channel posts, anonymous admins) carry no user at all.
+    if user is None:
+        return False
     return (BOT_OWNER_ID and user.id == BOT_OWNER_ID) or (
         bool(user.username)
         and user.username.casefold() in BOT_OWNER_USERNAMES
@@ -54,7 +52,9 @@ def owner_only(func):
         if not _is_owner(user):
             logger.info(
                 "owner_only: rejected %s (id=%s) for %s",
-                user.username or "no-username", user.id, func.__name__,
+                getattr(user, "username", None) or "no-username",
+                getattr(user, "id", "unknown"),
+                func.__name__,
             )
             return
         return await func(update, context)
@@ -235,3 +235,19 @@ def _escape_md(text: str) -> str:
     for ch in ("_", "*", "`", "["):
         text = text.replace(ch, f"\\{ch}")
     return text
+
+
+# ── Background task helpers ──────────────────────────────────────────────────
+# STRUCTURAL CHANGE: this done-callback factory was copy-pasted verbatim into
+# handlers/fun.py and handlers/luck.py. Fire-and-forget asyncio tasks swallow
+# their own exceptions, so a shared helper keeps those failures visible in logs.
+
+def log_background_failure(label: str):
+    """Return a Task done-callback that logs a fire-and-forget task's failure."""
+    def _callback(task: asyncio.Task) -> None:
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc:
+            logger.warning("%s failed: %s", label, exc)
+    return _callback

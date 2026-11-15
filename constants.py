@@ -129,7 +129,9 @@ FATE_EXTREME_UNLUCKY_MESSAGES = [
     "MAXIMUM CURSE DETECTED. Even the laws of physics are against you today. We recommend staying very very still.",
 ]
 
-_SPECIAL_SCORE_CASES = {
+# Public constant: consumed by handlers/luck.py. Names without a leading
+# underscore signal that other modules are allowed to import it.
+SPECIAL_SCORE_CASES = {
     0:   ("🪦 ZERO",        "Completely and utterly cooked. Zero. Zilch. The void looked at you and said no."),
     1:   ("💀 1/100",       "One. ONE. You barely exist on the luck scale today. Somehow not zero."),
     42:  ("🌌 THE ANSWER",  "The answer to life, the universe, and everything. Deep lore detected."),

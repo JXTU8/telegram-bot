@@ -1,0 +1,13 @@
+# Python bytecode / caches
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Local secrets and virtual environments
+.env
+.venv/
+venv/
+
+# Test / tooling caches
+.pytest_cache/
+.coverage

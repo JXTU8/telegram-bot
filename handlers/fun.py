@@ -8,11 +8,9 @@ wouldyourather, coinflip, 8ball, curse, bless, hot, decide, and game.
 import asyncio
 import logging
 import random
-import time as _time
 from datetime import datetime
 
 from telegram import Update
-from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
 from config import TIMEZONE
@@ -27,25 +25,19 @@ from stores.ship_store import save_ship_pair, get_top_ship_pairs, get_shipboard_
 from stores.user_store import track_seen_user
 from handlers.ai import gemini_client, _call_gemini_fun
 from helpers import (
-    _display_user, _arg_text, _normalize_target, _daily_rng,
-    _mentioned_target, _target_from_mention_or_sender, _escape_md,
-    _display_name_or_id, _message_thread_id,
-    BOT_OWNER_ID, BOT_OWNER_USERNAMES,
+    _arg_text, _daily_rng, _display_user, _escape_md, _mentioned_target,
+    _message_thread_id, _normalize_target, _target_from_mention_or_sender,
+    BOT_OWNER_ID, BOT_OWNER_USERNAMES, log_background_failure,
 )
 
 logger = logging.getLogger(__name__)
 
+# STRUCTURAL CHANGE (refactor): the fire-and-forget failure callback and the
+# game's reveal-timer closure used to be defined twice in this file. The callback
+# now lives in helpers.py (shared with handlers/luck.py), and the reveal timer
+# is one module-level job backed by job.data instead of two nested closures.
+
 # ── Ship helpers ──────────────────────────────────────────────────────────────
-
-def _log_background_failure(label: str):
-    def _callback(task: asyncio.Task) -> None:
-        if task.cancelled():
-            return
-        exc = task.exception()
-        if exc:
-            logger.warning("%s failed: %s", label, exc)
-    return _callback
-
 
 def _ship_target(label, user_id=None, username="", explicit_username=False):
     return {"label": label, "user_id": user_id,
@@ -227,10 +219,10 @@ async def ship_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     for t in targets:
         if t.get("user_id"):
             task = asyncio.create_task(asyncio.to_thread(track_seen_user, chat_id, t["user_id"], t["label"]))
-            task.add_done_callback(_log_background_failure("track_seen_user"))
+            task.add_done_callback(log_background_failure("track_seen_user"))
     pair_key = f"{normalized[0]}:{normalized[1]}"
     task = asyncio.create_task(asyncio.to_thread(save_ship_pair, chat_id, pair_key, target_a, target_b, score))
-    task.add_done_callback(_log_background_failure("save_ship_pair"))
+    task.add_done_callback(log_background_failure("save_ship_pair"))
     filled = round(score / 10)
     bar = "█" * filled + "░" * (10 - filled)
     a_safe = _escape_md(target_a)
@@ -423,9 +415,57 @@ async def decide_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 # ── /game — Number guessing ────────────────────────────────────────────────────
 
-_ACTIVE_GAMES: dict = {}
+_ACTIVE_GAMES: dict[int, dict] = {}
 _GAME_RANGE = (1, 100)
 _GAME_TIMEOUT_SECONDS = 60
+_GAME_JOB_PREFIX = "game_reveal:"
+
+
+async def _reveal_game_answer(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Reveal the answer only if no newer guess has replaced this timer.
+    State travels in ``job.data``, so this one callback serves the initial
+    timer and every re-armed timer instead of being redefined per call.
+    """
+    data = context.job.data or {}
+    chat_id = data.get("chat_id")
+    game = _ACTIVE_GAMES.get(chat_id)
+    if game is None or game["version"] != data.get("version"):
+        return
+
+    _ACTIVE_GAMES.pop(chat_id, None)
+    thread_id = data.get("thread_id")
+    thread_kwargs = {"message_thread_id": thread_id} if thread_id is not None else {}
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=(
+            f"⏰ *Time's up!* Nobody guessed it.\n"
+            f"The number was *{data['number']}*. Better luck next time!\n\n"
+            "_Start a new game with /game_"
+        ),
+        parse_mode="Markdown",
+        **thread_kwargs,
+    )
+
+
+def _arm_reveal_timer(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    """Drop the previous timer and schedule one fresh inactivity reveal."""
+    game = _ACTIVE_GAMES[chat_id]
+    job_name = f"{_GAME_JOB_PREFIX}{chat_id}"
+    for job in context.application.job_queue.get_jobs_by_name(job_name):
+        job.schedule_removal()
+    context.application.job_queue.run_once(
+        _reveal_game_answer,
+        when=_GAME_TIMEOUT_SECONDS,
+        name=job_name,
+        chat_id=chat_id,
+        data={
+            "chat_id": chat_id,
+            "number": game["number"],
+            "version": game["version"],
+            "thread_id": game["thread_id"],
+        },
+    )
 
 
 async def game_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -440,38 +480,12 @@ async def game_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     lo, hi = _GAME_RANGE
-    number   = random.randint(lo, hi)
-    job_name = f"game_reveal:{chat_id}"
-    thread_id = _message_thread_id(update)
     _ACTIVE_GAMES[chat_id] = {
-        "number": number,
-        "job_name": job_name,
-        "timer_version": 1,
-        "thread_id": thread_id,
+        "number": random.randint(lo, hi),
+        "version": 1,
+        "thread_id": _message_thread_id(update),
     }
-
-    async def _reveal(
-        ctx: ContextTypes.DEFAULT_TYPE,
-        _cid=chat_id, _n=number, _version=1, _thread_id=thread_id,
-    ) -> None:
-        game = _ACTIVE_GAMES.get(_cid)
-        if game and game.get("timer_version") == _version:
-            _ACTIVE_GAMES.pop(_cid, None)
-            thread_kwargs = {"message_thread_id": _thread_id} if _thread_id is not None else {}
-            await ctx.bot.send_message(
-                chat_id=_cid,
-                text=(
-                    f"⏰ *Time's up!* Nobody guessed it.\n"
-                    f"The number was *{_n}*. Better luck next time!\n\n"
-                    f"_Start a new game with /game_"
-                ),
-                parse_mode="Markdown",
-                **thread_kwargs,
-            )
-
-    context.application.job_queue.run_once(
-        _reveal, when=_GAME_TIMEOUT_SECONDS, name=job_name, chat_id=chat_id
-    )
+    _arm_reveal_timer(context, chat_id)
     await update.message.reply_text(
         f"🎮 *Number Guessing Game!*\n\n"
         f"I'm thinking of a number between *{lo}* and *{hi}*.\n"
@@ -505,13 +519,13 @@ async def game_guess_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text(f"⚠️ Guess must be between {lo} and {hi}!")
         return
 
-    game     = _ACTIVE_GAMES[chat_id]
-    number   = game["number"]
-    job_name = game["job_name"]
-    game["timer_version"] = int(game.get("timer_version", 0)) + 1
-    timer_version = game["timer_version"]
+    game = _ACTIVE_GAMES[chat_id]
+    number = game["number"]
+    game["version"] += 1
     user_name = _display_user(update.effective_user)
 
+    # Any guess invalidates the outstanding reveal timer, win or lose.
+    job_name = f"{_GAME_JOB_PREFIX}{chat_id}"
     for job in context.application.job_queue.get_jobs_by_name(job_name):
         job.schedule_removal()
 
@@ -519,35 +533,10 @@ async def game_guess_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         _ACTIVE_GAMES.pop(chat_id, None)
         await update.message.reply_text(
             f"🎉 *{_escape_md(user_name)} got it!* The number was *{number}*! 🏆\n\n"
-            f"_Start another round with /game_",
+            "_Start another round with /game_",
             parse_mode="Markdown",
         )
         return
 
-    hint = "📈 Higher!" if guess < number else "📉 Lower!"
-    await update.message.reply_text(hint)
-
-    reveal_thread_id = game.get("thread_id")
-
-    async def _reveal(
-        ctx: ContextTypes.DEFAULT_TYPE,
-        _cid=chat_id, _n=number, _version=timer_version, _thread_id=reveal_thread_id,
-    ) -> None:
-        game = _ACTIVE_GAMES.get(_cid)
-        if game and game.get("timer_version") == _version:
-            _ACTIVE_GAMES.pop(_cid, None)
-            thread_kwargs = {"message_thread_id": _thread_id} if _thread_id is not None else {}
-            await ctx.bot.send_message(
-                chat_id=_cid,
-                text=(
-                    f"⏰ *Time's up!* Nobody guessed it.\n"
-                    f"The number was *{_n}*. Better luck next time!\n\n"
-                    f"_Start a new game with /game_"
-                ),
-                parse_mode="Markdown",
-                **thread_kwargs,
-            )
-
-    context.application.job_queue.run_once(
-        _reveal, when=_GAME_TIMEOUT_SECONDS, name=job_name, chat_id=chat_id
-    )
+    await update.message.reply_text("📈 Higher!" if guess < number else "📉 Lower!")
+    _arm_reveal_timer(context, chat_id)

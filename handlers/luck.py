@@ -1,7 +1,13 @@
 """
 handlers/luck.py
 ────────────────
-Luck system: /luck, /luckboard, and /streak.
+Luck engine and commands: /luck, /luckboard, /streak, /lucktest.
+
+STRUCTURAL CHANGE (refactor):
+    * Fate override IDs now come from config.py instead of being read here.
+    * The fire-and-forget failure logger was duplicated in handlers/fun.py;
+      both modules now use helpers.log_background_failure().
+    * The shared SPECIAL_SCORE_CASES constant lost its private underscore.
 """
 
 import asyncio
@@ -12,39 +18,22 @@ from datetime import datetime
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from config import TIMEZONE
+from config import FATE_LUCKY_ID, FATE_UNLUCKY_ID, TIMEZONE
 from constants import (
-    FATE_TIERS, FATE_EXTREME_LUCKY_MESSAGES, FATE_EXTREME_UNLUCKY_MESSAGES,
-    _SPECIAL_SCORE_CASES,
+    FATE_EXTREME_LUCKY_MESSAGES, FATE_EXTREME_UNLUCKY_MESSAGES, FATE_TIERS,
+    SPECIAL_SCORE_CASES,
+)
+from helpers import (
+    _arg_text, _display_user, _escape_md, _mentioned_target,
+    _normalize_target, _today, log_background_failure, owner_only,
 )
 from stores.luck_store import (
-    save_fate_entry, get_fate_board,
-    update_fate_streak, get_fate_streak,
-    increment_luck_checks,
+    get_fate_board, get_fate_streak, increment_luck_checks, save_fate_entry,
+    update_fate_streak,
 )
 from stores.user_store import track_seen_user
 
-from helpers import (
-    _display_user, _mentioned_target, _normalize_target, _today,
-    _escape_md, owner_only, _arg_text,
-)
-from config import env_int
-
 logger = logging.getLogger(__name__)
-
-
-def _log_background_failure(label: str):
-    def _callback(task: asyncio.Task) -> None:
-        if task.cancelled():
-            return
-        exc = task.exception()
-        if exc:
-            logger.warning("%s failed: %s", label, exc)
-    return _callback
-
-
-FATE_LUCKY_ID = env_int("FATE_LUCKY_ID", 0)
-FATE_UNLUCKY_ID = env_int("FATE_UNLUCKY_ID", 0)
 
 
 # ── Core luck engine ──────────────────────────────────────────────────────────
@@ -84,10 +73,6 @@ def _remember_fate(chat_id: int, user_id: int, name: str, score: int, tier: str)
     save_fate_entry(chat_id, today_str, user_id, name, score, tier)
 
 
-def _update_streak_sync(user_id: int, today_str: str, tier_category: str) -> int:
-    return update_fate_streak(user_id, today_str, tier_category)
-
-
 def _score_display(score: int) -> str:
     if score == 999:
         return "999 ⚡ MAXIMUM"
@@ -98,7 +83,7 @@ def _score_display(score: int) -> str:
     return f"{score}/100  [{bar}]"
 
 
-def _apply_special_luck(score, tier, luck_msg, target_name, today, seed=""):
+def _apply_special_luck(score, tier, luck_msg, today):
     """Apply calendar and score-based special cases to a luck result."""
     day_note = ""
     is_april_fools = False
@@ -117,15 +102,14 @@ def _apply_special_luck(score, tier, luck_msg, target_name, today, seed=""):
         is_april_fools = True
 
     # Score-based specials (only for normal 0-100 scores)
-    if score in _SPECIAL_SCORE_CASES and score not in (999, -999):
-        tier, luck_msg = _SPECIAL_SCORE_CASES[score]
+    if score in SPECIAL_SCORE_CASES and score not in (999, -999):
+        tier, luck_msg = SPECIAL_SCORE_CASES[score]
 
     return score, tier, luck_msg, day_note, is_april_fools
 
 
 def _luck_result_text(target_name, tier, score, luck_msg,
-                      streak_line="", day_note="", checking_other=False,
-                      username_mention=False) -> str:
+                      streak_line="", day_note="", checking_other=False) -> str:
     target_safe = _escape_md(target_name)
     parts = [
         f"🍀 *Daily Luck — {target_safe}*\n"
@@ -184,7 +168,7 @@ async def luck_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     seed = str(target_user_id) if target_user_id else _normalize_target(target_name)
 
     score, tier, luck_msg, day_note, is_april_fools = _apply_special_luck(
-        score, tier, luck_msg, target_name, today, seed=seed
+        score, tier, luck_msg, today
     )
 
     streak_line = ""
@@ -199,19 +183,19 @@ async def luck_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         t1 = asyncio.create_task(
             asyncio.to_thread(_remember_fate, update.effective_chat.id, target_user_id, target_name, score, tier)
         )
-        t1.add_done_callback(_log_background_failure("_remember_fate"))
+        t1.add_done_callback(log_background_failure("_remember_fate"))
         t2 = asyncio.create_task(
             asyncio.to_thread(track_seen_user, update.effective_chat.id, target_user_id, target_name)
         )
-        t2.add_done_callback(_log_background_failure("track_seen_user"))
+        t2.add_done_callback(log_background_failure("track_seen_user"))
 
         t3 = asyncio.create_task(
             asyncio.to_thread(increment_luck_checks, target_user_id)
         )
-        t3.add_done_callback(_log_background_failure("increment_luck_checks"))
+        t3.add_done_callback(log_background_failure("increment_luck_checks"))
 
         old_streak, old_cat = await asyncio.to_thread(get_fate_streak, target_user_id)
-        streak = await asyncio.to_thread(_update_streak_sync, target_user_id, today_str, tier_category)
+        streak = await asyncio.to_thread(update_fate_streak, target_user_id, today_str, tier_category)
 
         if old_streak >= 2 and streak == 1 and old_cat != "neutral":
             broken_icon = "🔥" if old_cat == "lucky" else "💀"
@@ -228,7 +212,6 @@ async def luck_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         target_name, tier, score, luck_msg,
         streak_line=streak_line, day_note=day_note,
         checking_other=checking_other,
-        username_mention=is_username_mention,  # Fix 11
     )
 
     if is_april_fools:
@@ -367,7 +350,7 @@ async def lucktest_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     today = _today()
 
     final_score, final_tier, final_msg, day_note, _ = _apply_special_luck(
-        score, tier, luck_msg, target_name, today, seed=str(update.effective_user.id)
+        score, tier, luck_msg, today
     )
 
     result_text = _luck_result_text(target_name, final_tier, final_score, final_msg, day_note=day_note)
