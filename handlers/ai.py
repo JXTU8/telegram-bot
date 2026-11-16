@@ -5,7 +5,15 @@ Gemini AI client, Serper web search, /ask command, and /choose flow.
 Other handlers that need AI (roast, 8ball, hot…) import _call_gemini_fun from here.
 
 Search policy:
-  - Always enabled for all chats.
+  - Always enabled for all chats, but a search failure never fails the answer.
+
+STRUCTURAL CHANGE (error handling):
+    /ask errors are no longer classified by guessing substrings out of str(e).
+    All classification lives in handlers/ask_errors.py, keyed primarily on the
+    HTTP status code, so a 429/503 "the model is overloaded" is reported as
+    high demand rather than a bad model name. This module now also detects
+    safety blocks, degrades gracefully when search is down, and splits long
+    answers using UTF-16-aware chunks that stay under Telegram's 4096 limit.
 """
 from __future__ import annotations
 
@@ -32,6 +40,9 @@ from config import (
     SERPER_API_KEY,
 )
 from constants import THINKING_MESSAGES, VERDICT_LINES
+from handlers.ask_errors import (
+    AskEmptyAnswer, AskSafetyBlocked, EMPTY_PROMPT_MESSAGE, classify_ask_error,
+)
 from helpers import (
     _track, _delete_tracked, ASK_DECISION, ASK_OPTIONS, CONV_TIMEOUT,
     _thread_kwargs,
@@ -60,7 +71,14 @@ _AI_EXECUTOR = ThreadPoolExecutor(
 SEARCH_CACHE_MAX_ITEMS = 128
 MAX_ASK_LENGTH = 1000
 _SERPER_TIMEOUT = (2, 5)
+_SEARCH_TIMEOUT_SECONDS = 12.0   # web search is optional; never hold up the answer
 _GEMINI_TIMEOUT_SECONDS = 45.0
+
+# Telegram hard limit is 4096 characters per message. We cap at 3900 UTF-16
+# units so emoji-heavy answers (2 units each) still fit with room to spare.
+TELEGRAM_MAX_CHARS = 4096
+_ASK_SAFE_CHARS = 3900
+_MAX_HEADER_CHARS = 800
 
 _SEARCH_CACHE: OrderedDict = OrderedDict()
 _search_cache_lock = threading.Lock()
@@ -168,9 +186,30 @@ def _gemini_complete(
             ),
         ),
     )
-    text = (response.text or "").strip()
+    # A safety-filtered response usually has NO text at all, and reading
+    # ``.text`` can itself raise. Inspect the metadata first so the user gets
+    # "blocked by safety" rather than a vague "something went wrong".
+    feedback = getattr(response, "prompt_feedback", None)
+    block_reason = getattr(feedback, "block_reason", None)
+    if block_reason and str(block_reason) not in ("", "None", "0", "BLOCK_REASON_UNSPECIFIED"):
+        raise AskSafetyBlocked(str(block_reason))
+
+    candidates = getattr(response, "candidates", None) or []
+    blocked_finish = ("SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST", "SPII", "RECITATION")
+    for candidate in candidates:
+        finish_reason = str(getattr(candidate, "finish_reason", "") or "").upper()
+        if any(marker in finish_reason for marker in blocked_finish):
+            raise AskSafetyBlocked(finish_reason)
+
+    try:
+        text = (response.text or "").strip()
+    except Exception as e:
+        # Some SDK versions raise instead of returning "" for blocked content.
+        if any(marker in str(e).casefold() for marker in ("safety", "blocked", "finish_reason")):
+            raise AskSafetyBlocked(str(e)) from e
+        text = ""
     if not text:
-        raise RuntimeError("Gemini returned an empty response")
+        raise AskEmptyAnswer("Gemini returned no text")
     return text
 
 
@@ -255,6 +294,12 @@ def _set_ask_cooldown(user_id: int) -> None:
         _ASK_COOLDOWNS[user_id] = now
 
 
+def _clear_ask_cooldown(user_id: int) -> None:
+    """Release the slot after a transient failure so a retry isn't blocked."""
+    with _ask_cooldowns_lock:
+        _ASK_COOLDOWNS.pop(user_id, None)
+
+
 # ── Ask conversation context (Redis-backed, TTL 6 h) ─────────────────────────
 
 _ASK_CTX_TTL = 6 * 3600
@@ -294,6 +339,86 @@ def _load_ask_context(chat_id: int, message_id: int) -> list | None:
         return None
 
 
+# ── Telegram-safe message building (pure, unit-testable) ─────────────────────
+
+def _utf16_len(text: str) -> int:
+    """Telegram counts UTF-16 code units; an emoji takes two, not one."""
+    return len(text.encode("utf-16-le")) // 2
+
+
+def _take_utf16(text: str, limit: int) -> tuple[str, int]:
+    """Return (prefix, consumed_code_points) with UTF-16 length <= limit."""
+    units = 0
+    count = 0
+    for char in text:
+        width = 2 if ord(char) > 0xFFFF else 1
+        if units + width > limit:
+            break
+        units += width
+        count += 1
+    return text[:count], count
+
+
+def _answer_header(question: str, history: list | None) -> str:
+    original_q = None
+    if history:
+        original_q = next(
+            (h.get("content") for h in history if h.get("role") == "user"), None
+        )
+    if original_q and original_q != question:
+        header = f"{_ASK_PREFIX}{original_q}\n↩️ {question}\n\n"
+    else:
+        header = f"{_ASK_PREFIX}{question}\n\n"
+    # A 1000-character question must not eat the space reserved for the answer.
+    if _utf16_len(header) > _MAX_HEADER_CHARS:
+        prefix, _ = _take_utf16(header, _MAX_HEADER_CHARS - 4)
+        header = prefix + "…\n\n"
+    return header
+
+
+def build_answer_messages(question: str, history: list | None, answer: str) -> list[str]:
+    """
+    Split an answer into Telegram-safe messages.
+
+    Every returned string is <= _ASK_SAFE_CHARS UTF-16 units (well under the
+    hard 4096-character API limit). The first keeps the "🤖 Q:" header; the rest
+    carry the "🤖 ↪ " marker so replying to any chunk still continues the thread.
+    """
+    header = _answer_header(question, history)
+    first_piece, used = _take_utf16(
+        answer, max(1, _ASK_SAFE_CHARS - _utf16_len(header))
+    )
+    messages = [header + first_piece]
+
+    remaining = answer[used:]
+    overflow_budget = _ASK_SAFE_CHARS - _utf16_len(_ASK_OVERFLOW_PREFIX)
+    while remaining:
+        piece, used = _take_utf16(remaining, overflow_budget)
+        if not piece:
+            break
+        messages.append(_ASK_OVERFLOW_PREFIX + piece)
+        remaining = remaining[used:]
+    return messages
+
+
+# ── Failure reporting ────────────────────────────────────────────────────────
+
+async def _report_ask_failure(thinking_msg, failure, exc, *, user_id=None) -> None:
+    """Show one accurate message; never leak raw SDK errors into the chat."""
+    if failure.silent:
+        logger.debug("ask: %s (no user-facing message)", failure.category)
+        return
+    level = logging.WARNING if failure.retryable else logging.ERROR
+    logger.log(level, "ask failed [%s]: %s", failure.category, exc)
+    try:
+        await thinking_msg.edit_text(failure.message)
+    except Exception as e:
+        logger.warning("ask: could not display the error message: %s", e)
+    if failure.retryable and user_id is not None:
+        # Don't make "please try again in a minute" collide with the 3 s cooldown.
+        _clear_ask_cooldown(user_id)
+
+
 # ── Shared ask processing ─────────────────────────────────────────────────────
 
 async def _process_ask(
@@ -303,65 +428,79 @@ async def _process_ask(
     reply_target,
     context: ContextTypes.DEFAULT_TYPE,
     use_search: bool = True,
+    user_id: int | None = None,
 ) -> None:
     """Core logic shared by /ask and the plain-text follow-up handler."""
-    thinking_msg = await reply_target.reply_text(
-        "🤖 Searching and thinking..." if use_search else "🤖 Thinking..."
-    )
-    answer_displayed = False
     try:
-        search_context = await _run_ai_io(_search_web, question) if use_search else ""
-        answer = await _run_ai_io(_call_gemini, question, search_context, history)
+        thinking_msg = await reply_target.reply_text(
+            "🤖 Searching and thinking..." if use_search else "🤖 Thinking..."
+        )
+    except Exception as e:
+        logger.warning("ask: could not post the thinking message: %s", e)
+        return
 
-        prior = history or []
-        new_history = (prior + [
-            {"role": "user",      "content": question},
-            {"role": "assistant", "content": answer},
-        ])[-6:]
-
-        max_len = 3900
-        if history:
-            original_q = next((h["content"] for h in history if h["role"] == "user"), None)
-            if original_q and original_q != question:
-                header = f"🤖 Q: {original_q}\n↩️ {question}\n\n"
-            else:
-                header = f"🤖 Q: {question}\n\n"
-        else:
-            header = f"🤖 Q: {question}\n\n"
-        first_chunk_limit = max(1, max_len - len(header))
-        first_chunk = answer[:first_chunk_limit]
-        remaining_answer = answer[first_chunk_limit:]
-
-        await thinking_msg.edit_text(header + first_chunk)
-        answer_displayed = True
-        await asyncio.to_thread(_save_ask_context, chat_id, thinking_msg.message_id, new_history)
-
-        for i in range(0, len(remaining_answer), max_len):
-            overflow_msg = await thinking_msg.reply_text(
-                _ASK_OVERFLOW_PREFIX + remaining_answer[i:i + max_len]
+    # Web search is optional context: a Serper timeout or network failure must
+    # not turn into a failed /ask. Simply answer without search results.
+    search_context = ""
+    if use_search:
+        try:
+            search_context = await _run_ai_io(
+                _search_web, question, timeout=_SEARCH_TIMEOUT_SECONDS
             )
+        except Exception as e:
+            logger.warning("ask: web search unavailable, answering without it: %s", e)
+
+    try:
+        answer = (await _run_ai_io(_call_gemini, question, search_context, history)).strip()
+        if not answer:
+            raise AskEmptyAnswer("Gemini returned no text")
+    except Exception as e:
+        await _report_ask_failure(
+            thinking_msg, classify_ask_error(e), e, user_id=user_id
+        )
+        return
+
+    new_history = ((history or []) + [
+        {"role": "user",      "content": question},
+        {"role": "assistant", "content": answer},
+    ])[-6:]
+    messages = build_answer_messages(question, history, answer)
+
+    try:
+        await thinking_msg.edit_text(messages[0])
+    except Exception as e:
+        failure = classify_ask_error(e)
+        if failure.silent:
+            # "Message is not modified" means the answer is already there;
+            # carry on with any remaining chunks instead of dropping them.
+            logger.debug("ask: first message already contained the answer")
+        else:
+            await _report_ask_failure(
+                thinking_msg, failure, e, user_id=user_id
+            )
+            return
+
+    await asyncio.to_thread(
+        _save_ask_context, chat_id, thinking_msg.message_id, new_history
+    )
+
+    # Overflow chunks are delivered one at a time. If one fails we say the answer
+    # was cut short, instead of silently stopping halfway through.
+    for text in messages[1:]:
+        try:
+            overflow_msg = await thinking_msg.reply_text(text)
             await asyncio.to_thread(
                 _save_ask_context, chat_id, overflow_msg.message_id, new_history
             )
-    except asyncio.TimeoutError:
-        logger.warning("Ask request timed out after %.0f seconds.", _GEMINI_TIMEOUT_SECONDS)
-        if not answer_displayed:
-            await thinking_msg.edit_text(
-                "⚠️ The AI took too long to respond. Please try again in a moment."
-            )
-    except Exception as e:
-        logger.exception("Ask error")
-        if not answer_displayed:
-            error_text = str(e).casefold()
-            if any(marker in error_text for marker in ("api key", "authentication", "unauthorized", "401")):
-                message = "❌ The AI service key is invalid or missing. Please ask the bot admin to update `GEMINI_API_KEY`."
-            elif any(marker in error_text for marker in ("model", "not found", "404")):
-                message = "❌ The configured AI model is unavailable. Please ask the bot admin to check `GEMINI_MODEL`."
-            elif "rate" in error_text or "429" in error_text:
-                message = "⚠️ The AI service is busy or rate-limited. Please try again shortly."
-            else:
-                message = "❌ Something went wrong with the AI. Please try again later."
-            await thinking_msg.edit_text(message)
+        except Exception as e:
+            failure = classify_ask_error(e)
+            logger.warning("ask: overflow message failed [%s]: %s", failure.category, e)
+            if not failure.silent:
+                try:
+                    await thinking_msg.reply_text(failure.message)
+                except Exception as notify_exc:
+                    logger.warning("ask: could not report truncation: %s", notify_exc)
+            break
 
 
 def _is_ask_bot_message(text: str | None) -> bool:
@@ -379,15 +518,16 @@ async def ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             "⚠️ AI is not configured. Ask the admin to set up the `GEMINI_API_KEY`."
         )
         return
-    if not context.args:
+    question = " ".join(context.args or []).strip()
+    # Empty, whitespace-only or emoji/punctuation-only prompts should never be
+    # sent to Gemini (that would produce a confusing 400). Give a clear hint.
+    if not question or not any(char.isalnum() for char in question):
         await update.message.reply_text(
-            "Usage: `/ask <your question>`\n_(e.g. `/ask what is tung tung tung sahur?`)_\n\n"
-            "_💡 Tip: just reply to my answer to follow up — no command needed!_",
-            parse_mode="Markdown",
+            EMPTY_PROMPT_MESSAGE + "\n\n"
+            "💡 Tip: just reply to any of my answers to follow up — no command needed."
         )
         return
 
-    question = " ".join(context.args)
     if len(question) > MAX_ASK_LENGTH:
         await update.message.reply_text(
             f"⚠️ Question too long. Please keep it under {MAX_ASK_LENGTH} characters."
@@ -415,7 +555,10 @@ async def ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     ):
         history = await asyncio.to_thread(_load_ask_context, chat_id, replied.message_id)
 
-    await _process_ask(question, history, chat_id, update.message, context, use_search=True)
+    await _process_ask(
+        question, history, chat_id, update.message, context,
+        use_search=True, user_id=user_id,
+    )
 
 
 # ── Plain-text reply follow-up handler ───────────────────────────────────────
@@ -444,7 +587,12 @@ async def ask_followup_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     question = message.text.strip()
-    if not question or len(question) > MAX_ASK_LENGTH:
+    if not question or not any(char.isalnum() for char in question):
+        return  # a bare "?" or emoji isn't a question worth an API call
+    if len(question) > MAX_ASK_LENGTH:
+        await message.reply_text(
+            f"⚠️ That follow-up is too long. Please keep it under {MAX_ASK_LENGTH} characters."
+        )
         return
 
     user_id = update.effective_user.id
@@ -469,7 +617,10 @@ async def ask_followup_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         "ask_followup from user %s (depth %s, prev msg %s)",
         update.effective_user.id, len(history) // 2, replied.message_id,
     )
-    await _process_ask(question, history, chat_id, message, context, use_search=True)
+    await _process_ask(
+        question, history, chat_id, message, context,
+        use_search=True, user_id=user_id,
+    )
 
 
 # ── /choose flow ──────────────────────────────────────────────────────────────

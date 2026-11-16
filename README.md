@@ -276,6 +276,7 @@ handlers/
   admin.py              ← /status, /ban family, /say, /id, /cmdstats
   tracking.py           ← ONE group-1 passive tracker, one-time notice, error handler
   ai.py                 ← Gemini client, Serper search, /ask, /choose
+  ask_errors.py         ← /ask error taxonomy (429/503 vs 404/403/400, safety, timeouts)
   countdown.py          ← /addcountdown wizard, daily reminders
   fun.py                ← ship, roast, game, and other fun commands
   luck.py               ← luck engine, /luck, /luckboard, /streak, /lucktest
@@ -312,6 +313,7 @@ stores/
 - **Job persistence** — countdown reminders survive bot restarts via Redis + `restore_jobs` on startup.
 - **Handler groups matter** — the ban gate is group `-1`, the single passive tracker group `1`, game guesses group `2`. `handlers/registry.py` documents and preserves that ordering.
 - **Atomic moderation state** — `/bug` cooldowns (`SET NX EX`), bans (JSON list) and announced groups (`SADD`) all live in Redis, so restarts and concurrent updates cannot reset a limit or duplicate a notice.
+- **`/ask` errors are classified, not guessed** — `handlers/ask_errors.py` reads the HTTP status first (429/503 → high demand, 404 → model, 401/403 → key/permission, 400 → bad request), so "The model is overloaded" is never reported as a bad model name. Long answers are split into UTF-16-safe chunks under Telegram's 4096-character limit.
 
 ---
 

@@ -59,7 +59,11 @@ class ChangelogParserTests(unittest.TestCase):
                                 key=lambda v: tuple(map(int, v.split("."))), reverse=True))
 
     def test_template_inside_html_comment_is_ignored(self):
-        self.assertNotIn("v1.0.3", [r.version for r in load_releases()])
+        # Check the placeholder *content*, not a version number: the owner is
+        # free to renumber releases in CHANGELOG.md at any time.
+        rendered = "\n".join(render_release(r) for r in load_releases())
+        self.assertNotIn("Something new", rendered)
+        self.assertNotIn("Something that broke", rendered)
 
     def test_preamble_sections_and_bullets(self):
         releases = parse_markdown(_SAMPLE)

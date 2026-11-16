@@ -47,6 +47,10 @@
 ### Fixed
 - Something that broke
 -->
+## v1.0.4 — 2026-11-16 — /ask error message
+
+### Added
+- There will be more error message for /ask if any error occur.
 
 ## v1.0.3 — 2026-11-15 — Global bug reporting
 
